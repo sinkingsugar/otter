@@ -12,7 +12,9 @@ Priorities as of 2026-10-11 are in [host-requirements.md §7](host-requirements.
 
 **Track A1: done** (merged 2026-10-11, PR #8; reviewed commits tagged `review/objects`): objects (`Var::Object`, typed by name, never a constant by any parameter path), object types in catalogs, mesh services, guards in control `State`, the cancellation rules; `run` unchanged by objects; one approved exception, the reload cycle +0.03% on aarch64 (compose-time object checks).
 
-**Now: host I/O** (`host-io`): log lines streamed to the host as they are written (`Sink::stream`, `Session::set_log_sink`), and defaults for script arguments (`@const(... ignore-redefined: true)`). Then **A2** (concurrency, H5, accepted 2026-10-11 with 1.x's names: `Spawn` returns a handle, `Wait`/`Peek`/`IsRunning`/`Stop(w)`, structured ownership), then A4 (iteration, H12), and the shared reference-count header as a measured prototype.
+**Host I/O: done** (`host-io`, PR #9): log lines streamed to the host as they are written (`Sink::stream`, `Session::set_log_sink`), defaults for script arguments (`@const(... ignore-redefined: true)`), and catalog lookups by binary search.
+
+**Now: A2, concurrency** (`concurrency`; H5, accepted 2026-10-11): `Spawn` returns a `Wire.Instance` handle and owns the instance unless `detach: true`; `Wait` (with `timeout:`), `Peek`, `IsRunning`, `Stop(w)`; an owner's end cancels its tree in that tick, queued children without instantiation; handles outlive records and never retarget. Requests take effect at the end of a tick, so activations check nothing new; the measured cost is +5 instructions per tick (x86-64), awaiting the maintainer's approval. Then A4 (iteration, H12), and the shared reference-count header as a measured prototype.
 
 Open: `otter-cli`'s `watch_reloads_atomic_saves_and_keeps_running_after_rejected_edits` sometimes times out on CI waiting for the first rejected edit (also on `main` at `9356c92`): a flaky file-watching test.
 
@@ -84,6 +86,7 @@ M2 notes for later milestones:
 The earlier list (syntax, numbers, tables, `Push`, `Match`, `Once`, `check`) is in [history.md](history.md#deviations-from-1x). Since then:
 - **No `$0`, `$1`, `$i`.** 1.x's `ForEach` and `Map` exposed the element, key, value and index as implicit variables, which shadow each other in nested loops and are declared nowhere. In 2.0 a sequence's element is the block's input, a table's entries arrive as `{key value}` (a struct table), and an index comes from a separate `Seq.Enumerate` that yields `{index value}`; no flag changes the input's shape. `$<digit>` is a lexer error with help pointing at the block's input ([metaprogramming.md §1](metaprogramming.md#1-the-ladder)).
 - **`#( )` is pure** ([metaprogramming.md §2.1](metaprogramming.md#21-semantics)): 1.x ran arbitrary shards while loading, effects included.
+- **Spawned instances belong to their spawner** (H5): `Spawn` outputs a handle instead of passing its input through, and its instance is cancelled when the spawner ends unless `detach: true` (1.x children outlive spawners unless joined). Handles never dangle or retarget; a stopped and a cancelled instance fail `Wait` with distinct errors ([host-requirements.md H5](host-requirements.md#h5-concurrency-work-off-the-scheduler-joining-detaching)).
 - **`@include` includes a file once per program** wherever it is named again; 1.x included it again unless `Once: true`, which in 2.0 would always fail (a function cannot be declared twice). No `Fallback:` file. `@read` reads while loading and records the file for reloads; there is no `@env`.
 
 ## Open items outside the golden path
