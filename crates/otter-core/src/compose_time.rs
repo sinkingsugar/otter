@@ -264,6 +264,8 @@ pub fn text_size(value: &Var, cap: usize) -> Option<usize> {
       Var::String(s) => s.len(),
       // `@bytes(`, two digits a byte, `)`.
       Var::Bytes(b) => 8 + 2 * b.len(),
+      // `Type.Name#id`, a 20-digit id at most.
+      Var::Object(o) => o.object_type().name.len() + 21,
       Var::Seq(items) => 2 + items.len(),
       Var::Table(table) => {
         let mut keys = 2;

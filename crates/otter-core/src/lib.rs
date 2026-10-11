@@ -23,6 +23,7 @@ pub mod inline;
 pub mod instance;
 mod lifecycle;
 pub mod log;
+pub mod object;
 pub mod reload;
 pub mod shard;
 pub mod shards;
