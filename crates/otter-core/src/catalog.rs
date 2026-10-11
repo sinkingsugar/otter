@@ -58,16 +58,22 @@ impl Catalog {
 
   /// Adds per-crate lists of object types, e.g.
   /// `catalog.with_objects(&[otter_llm::OBJECTS])`. Fails on a duplicate
-  /// name, or a name that is not `Module.Name` (an uppercase start, a dot):
+  /// name, or a name that is not `Module.Name` (dot-separated segments,
+  /// each an uppercase letter then letters, digits, `_` or `-`):
   /// object types are namespaced by the module that defines them, and never
   /// shadow a builtin type.
   pub fn with_objects(mut self, lists: &[&[&'static ObjectType]]) -> Result<Catalog, String> {
     for ty in lists.iter().flat_map(|list| list.iter()) {
-      let namespaced = ty
-        .name
-        .split('.')
-        .all(|part| part.starts_with(|c: char| c.is_ascii_uppercase()))
-        && ty.name.contains('.');
+      // What the language reads as one name: segments joined by dots, each
+      // an uppercase letter then letters, digits, `_` or `-` (otter-lang's
+      // lexer), at least two segments.
+      let segment = |part: &str| {
+        part.starts_with(|c: char| c.is_ascii_uppercase())
+          && part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+      };
+      let namespaced = ty.name.split('.').all(segment) && ty.name.contains('.');
       if !namespaced {
         return Err(format!(
           "object type `{}` must be named `Module.Name`",

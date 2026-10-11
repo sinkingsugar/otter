@@ -1599,6 +1599,27 @@ impl ComposeCtx<'_> {
     // A block starts fresh each time it runs (metaprogramming.md §3), so it
     // cannot own the instance a stateful callee keeps between calls, as it
     // cannot hold a `Once`.
+    // An object is never a constant (docs/host-requirements.md H1): a
+    // default holding one is refused whether or not this call overrides it,
+    // so the definition cannot carry it into compiled code or the cache.
+    if let Some((index, param)) = fdef
+      .params
+      .iter()
+      .enumerate()
+      .find(|(_, p)| p.default.as_ref().is_some_and(Var::holds_object))
+    {
+      return Err(
+        fn_error(
+          name,
+          "object-in-constant",
+          format!(
+            "{name}: the default of {} holds an object; objects are passed at run time, through a variable",
+            param.name
+          ),
+        )
+        .with_param(&param.name, index),
+      );
+    }
     if fdef.stateful && self.in_flow_argument() {
       return Err(fn_error(
         name,

@@ -477,3 +477,68 @@ fn an_object_is_never_a_constant() {
   }
   assert!(!Var::seq(vec![Var::Int(1)]).holds_object());
 }
+
+/// An object cannot become a constant through the older positional
+/// parameter path or a function default (review
+/// 2026-10-11-b263ee9-codex-a6c596, F1 and F2).
+#[test]
+fn an_object_is_never_a_constant_by_any_parameter_path() {
+  use otter_core::describe::ShardDesc;
+  use otter_core::function::FunctionDef;
+  use otter_core::instance::{InstanceCtx, LeafCtx};
+  use otter_core::shard::{Flow, ParamValue};
+  use otter_core::shards::leaf::{LeafShard, leaf_type};
+  use otter_core::{Args, ComposeCtx, Composed, ShardType};
+
+  /// A shard with undeclared parameters that keeps its first argument.
+  struct Positional;
+  impl LeafShard for Positional {
+    type Compiled = Var;
+    type State = ();
+    const DESC: ShardDesc = ShardDesc::undocumented("Test.Positional", 1);
+    fn compose(args: &Args, _: &mut ComposeCtx<'_>) -> otter_core::Result<Composed<Var>> {
+      let ParamValue::Value(v) = &args.positional()[0] else {
+        panic!("a value")
+      };
+      Ok(Composed {
+        compiled: v.clone(),
+        output: v.type_of(),
+      })
+    }
+    fn instantiate(_: &Var, _: &mut InstanceCtx) -> otter_core::Result<()> {
+      Ok(())
+    }
+    fn activate(v: &Var, _: &mut (), _: &mut impl LeafCtx, _: &Var) -> otter_core::Result<Flow> {
+      Ok(Flow::Next(v.clone()))
+    }
+  }
+  static POSITIONAL: ShardType = leaf_type::<Positional>();
+
+  let code = |err: otter_core::Error| match err {
+    otter_core::Error::Diagnostic(d) => d.code,
+    other => panic!("expected a diagnostic, got {other:?}"),
+  };
+  let object = Var::object(Session(Arc::default()));
+  for value in [
+    object.clone(),
+    Var::table([("deep", Var::seq(vec![object.clone()]))]),
+  ] {
+    let err = run(
+      &mut Mesh::new(),
+      vec![ShardDef::new(&POSITIONAL, vec![val(value.clone())])],
+    )
+    .unwrap_err();
+    assert_eq!(code(err), "object-in-constant", "positional");
+    // A default, used or overridden by the call.
+    for args in [vec![], vec![otter_core::Arg::named("p", val(Var::None))]] {
+      let mut mesh = Mesh::new();
+      mesh.add_function(
+        FunctionDef::new("F", Type::none(), Type::any())
+          .param_default("p", value.clone())
+          .body(vec![get("p")]),
+      );
+      let err = run(&mut mesh, vec![call("F", args)]).unwrap_err();
+      assert_eq!(code(err), "object-in-constant", "default");
+    }
+  }
+}

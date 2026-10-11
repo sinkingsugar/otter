@@ -245,6 +245,26 @@ fn construct_error(desc: &ShardDesc, code: &'static str, message: String) -> Dia
 
 /// Decodes `args` against `desc`'s parameter declarations.
 pub fn decode(desc: &ShardDesc, args: &[Arg]) -> Result<Args> {
+  // An object is never a constant (docs/host-requirements.md H1), whether
+  // the shard declares its parameters or takes them positionally.
+  for (index, arg) in args.iter().enumerate() {
+    if let ParamValue::Value(v) = &arg.value
+      && v.holds_object()
+    {
+      let name = arg.name.clone().unwrap_or_else(|| format!("#{index}"));
+      return Err(Error::Diagnostic(Box::new(
+        construct_error(
+          desc,
+          "object-in-constant",
+          format!(
+            "{}: {name} is a constant holding an object; objects are passed at run time, through a variable",
+            desc.name
+          ),
+        )
+        .param(&name, Some(index)),
+      )));
+    }
+  }
   let decls = match desc.params {
     Params::Undeclared => {
       if let Some(arg) = args.iter().find(|a| a.name.is_some()) {
@@ -381,19 +401,6 @@ pub fn decode(desc: &ShardDesc, args: &[Arg]) -> Result<Args> {
       );
     }
     if let ParamValue::Value(v) = &arg.value {
-      if v.holds_object() {
-        return fail(
-          construct_error(
-            desc,
-            "object-in-constant",
-            format!(
-              "{}: {} is a constant holding an object; objects are passed at run time, through a variable",
-              desc.name, decl.name
-            ),
-          )
-          .param(decl.name, Some(index)),
-        );
-      }
       let ty = v.type_of();
       if !decl.accepts(ty) {
         return fail(
