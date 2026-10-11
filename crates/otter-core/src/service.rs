@@ -18,9 +18,11 @@ use std::sync::Arc;
 
 use crate::hash::HashMap;
 
-/// A typed map of services, one per type.
+/// A typed map of services, one per type. Shared between a mesh and its
+/// preserving revisions (a clone is a reference count, and an empty map
+/// allocates nothing); inserting copies it when it is shared.
 #[derive(Clone, Default)]
-pub struct Services(HashMap<TypeId, Arc<dyn Any + Send + Sync>>);
+pub struct Services(Option<Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>>);
 
 impl Services {
   /// No services: what compose-time evaluation sees.
@@ -36,32 +38,37 @@ impl Services {
 
   /// Inserts a service the host also holds.
   pub fn insert_arc<T: Any + Send + Sync>(&mut self, service: Arc<T>) -> Option<Arc<T>> {
-    let old = self.0.insert(TypeId::of::<T>(), service)?;
+    let map = Arc::make_mut(self.0.get_or_insert_with(Default::default));
+    let old = map.insert(TypeId::of::<T>(), service)?;
     Some(Arc::downcast::<T>(old).expect("services are keyed by their type"))
   }
 
   pub fn remove<T: Any + Send + Sync>(&mut self) -> Option<Arc<T>> {
-    let old = self.0.remove(&TypeId::of::<T>())?;
+    let old = Arc::make_mut(self.0.as_mut()?).remove(&TypeId::of::<T>())?;
     Some(Arc::downcast::<T>(old).expect("services are keyed by their type"))
   }
 
   /// The service of type `T`, borrowed for the activation.
   pub fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
-    self.0.get(&TypeId::of::<T>())?.downcast_ref::<T>()
+    self
+      .0
+      .as_ref()?
+      .get(&TypeId::of::<T>())?
+      .downcast_ref::<T>()
   }
 
   /// The service of type `T`, shared: for an operation that outlives the
   /// activation.
   pub fn get_arc<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
-    let service = self.0.get(&TypeId::of::<T>())?.clone();
+    let service = self.0.as_ref()?.get(&TypeId::of::<T>())?.clone();
     Some(Arc::downcast::<T>(service).expect("services are keyed by their type"))
   }
 
   pub fn len(&self) -> usize {
-    self.0.len()
+    self.0.as_ref().map_or(0, |m| m.len())
   }
 
   pub fn is_empty(&self) -> bool {
-    self.0.is_empty()
+    self.len() == 0
   }
 }
