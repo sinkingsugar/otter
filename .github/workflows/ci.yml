@@ -22,6 +22,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo fmt --manifest-path examples/esp32/Cargo.toml --all --check
       - run: python3 -m unittest discover -s bench/vm-execution -v
+      - run: python3 -m unittest discover -s bench/instructions -v
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --release --workspace
@@ -83,3 +84,23 @@ jobs:
       - run: cargo run --release -p otter-core --example bench_tables -- 200000
       - run: cargo run --release -p otter-core --example bench_instances -- 1000
       - run: cargo run --release -p otter-core --example bench_depth -- --progress
+
+  instructions:
+    # Instructions, allocations and bytes per iteration under Cachegrind,
+    # exact, against bench/instructions/baseline.txt (docs/performance-gates.md).
+    # The image is pinned: instruction counts depend on its Valgrind and C
+    # library, which the baseline records. The measured baseline is uploaded
+    # either way; after an intended change, commit it with the reason
+    # (`gh run download RUN -n instruction-baseline`, bench/instructions/README.md).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 bench/instructions/run.py --check bench/instructions/baseline.txt --fresh fresh/baseline.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instruction-baseline
+          path: fresh/baseline.txt

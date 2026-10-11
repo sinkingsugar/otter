@@ -73,7 +73,7 @@ and other system activity can affect the result despite affinity.
   first 2.0 push must detach shared storage; later pushes can grow in place.
   The 1.x script writes `Push(items Clear: false)` to avoid its clearing
   semantics; the 2.0 dialect writes `Push(items)`, which never clears
-  (`run.py` `dialect`).
+  (`workloads.py` `dialect`).
   Reset, result retention, copy-on-write and capacity growth are part of this
   workload. It is not a unique-buffer-only push benchmark.
 - `make-seq`, `make-table`: repeatedly construct four-element values from a
@@ -86,7 +86,7 @@ bypass the runtime path under investigation.
 
 ## Dialects and platforms
 
-Scripts are generated in the 1.x dialect and translated for 2.0 (`dialect()` in `run.py`): `Var` declarations, lowercase labels, `Push` without `Clear`, and the `do-*` call case as a function (`@fn(Step ...)` called as `Step`; 2.0 has no `Do`). Provenance tolerates a platform without `lscpu` (macOS records `sysctl`'s CPU brand); `--cpu` pinning is Linux only, so runs elsewhere are unpinned and say so in their metadata.
+Scripts are generated in the 1.x dialect and translated for 2.0 (`dialect()` in `workloads.py`, shared with the instruction gate): `Var` declarations, lowercase labels, `Push` without `Clear`, and the `do-*` call case as a function (`@fn(Step ...)` called as `Step`; 2.0 has no `Do`). Provenance tolerates a platform without `lscpu` (macOS records `sysctl`'s CPU brand); `--cpu` pinning is Linux only, so runs elsewhere are unpinned and say so in their metadata.
 
 ## Output and analysis
 

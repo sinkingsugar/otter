@@ -1,6 +1,6 @@
 # Performance Gates
 
-Status: plan, 2026-10-11. Approved in direction by Giovanni; nothing here is implemented yet. It comes before Track A1 (objects and services, [host-requirements.md §7](host-requirements.md#7-priorities-2026-10-11)), so that A1's new `Var` variant and every later core change is measured against a strict baseline. The work is meant to be done on a Linux machine: Valgrind does not run on Apple Silicon macOS.
+Status: 2026-10-11. The instruction and allocation gate (§2) is implemented on the `host-objects` branch ([bench/instructions](../bench/instructions/README.md), §2.1); the wall-clock A/B tool (§3) is next. It comes before Track A1 (objects and services, [host-requirements.md §7](host-requirements.md#7-priorities-2026-10-11)), so that A1's new `Var` variant and every later core change is measured against a strict baseline. The work is meant to be done on a Linux machine: Valgrind does not run on Apple Silicon macOS.
 
 ## 1. Why
 
@@ -42,6 +42,16 @@ The driver should reuse the VM suite's script generator rather than copying it (
 
 **CI.** A new job, or a step in `bench`, running `--check`. Valgrind runs ~50× slower than native: pick N so the job stays within a few minutes, and keep the per-iteration differencing so a small N still gives exact numbers.
 
+### 2.1 As built (2026-10-11)
+
+- **Driver and harness.** `crates/otter-lang/examples/bench_gate.rs` runs one workload with a counting allocator; `bench/instructions/run.py` runs it at N and 2N under Cachegrind and writes or checks `bench/instructions/baseline.txt`. One Valgrind run gives instructions and allocations together (the counting allocator still sees every allocation under Valgrind's `malloc`); `--allocations-only` runs natively, on any OS. The VM suite's generator moved to `bench/vm-execution/workloads.py`, with an untimed variant (no clock reads, so the output does not vary), and `bench_depth`'s and `bench_tables`' workloads moved into `otter_core::bench`, so the examples and the gate share them. 85 workloads, about 5 seconds on 24 cores.
+- **Exact, tolerance 0** (§6's first question). Measured with `--jitter`: five full runs identical in every column, after two fixes. The runtime's own hash maps were randomly seeded, so compose probed differently in each run and the fixed cost differed between the N and 2N runs (the plan's suspected source, found with Callgrind in the type interner and the name-to-slot maps); they now use SipHash with fixed keys (`otter_core::hash`), the same function at the same cost; maps a host passes in (`defines`) stay standard. And Cachegrind probes the cache geometry from the CPU it starts on, which on a hybrid CPU (P- and E-cores) changes with the core; `run.py` passes a fixed geometry. With both, the cache and branch columns are exact too; they stay ungated.
+- **Sensitivity.** A single `black_box(index)` in `inline::run`'s loop (about one instruction per VM operation) fails all 85 workloads, the entity tick at +0.87%, well below what wall-clock timing resolves.
+- **Environment.** Valgrind replaces `memcpy` and `malloc` with its own, and libc code is counted, so counts depend on the Valgrind and C library build. The baseline records rustc, target, C library (`ldd --version`, which names the distribution's package revision) and Valgrind, and `--check` refuses a mismatch. CI pins the image (`ubuntu-24.04`, its packaged Valgrind) rather than the Valgrind version alone, and uploads the baseline it measured as an artifact on every run: regenerating after an intended change is `gh run download`, not reproducing CI's environment. Locally, a change is checked against a baseline written at its base on the same machine.
+- **Local runs** (§6's second question): Linux machines and CI; no Docker path for now. On macOS, `--allocations-only`.
+- **Not yet:** the async path (`bench_async`) and A1's object workloads.
+- **Considered: counting wasm instructions instead.** Deterministic and portable (no Valgrind, any OS), but it measures another program: LLVM's middle end (inlining, as in the `Var` drop-glue regression) is shared, its back end is not, so register allocation, spills and instruction selection, which hot-asm and Cachegrind see, would not show in a stack machine's count; the allocator and libc differ too; and it needs a wasmtime host to read fuel. A possible portable cross-check later, with §4.
+
 ## 3. What the gate does not see, and the wall-clock A/B
 
 Instruction counts are blind to code layout and to branch prediction on real cores. The ±40% swings measured on Apple M-series came from block placement with identical instructions ([runtime-performance-overview.md](runtime-performance-overview.md), lessons 6 and 7). Two things cover that:
@@ -61,7 +71,7 @@ On the `host-objects` branch, with a draft pull request to `main` so CI runs on 
 2. `scripts/perf-ab.py`.
 3. A1 in the decided order ([host-requirements.md](host-requirements.md) H1, H3, H4/H6), each commit passing both gates or regenerating the baseline with a reason.
 
-## 6. Open, for Giovanni
+## 6. Decided
 
-- **Tolerance on instructions per iteration:** 0.5% per workload after measuring the real jitter, or exact (zero tolerance; every hot-path change then regenerates the baseline with a reason). Proposal: measure jitter first; if it is zero, make it exact.
-- **Local runs:** Docker on macOS for `--check`, or Linux machines and CI only.
+- **Tolerance on instructions per iteration:** exact. Jitter measured zero once the hashers were seeded (§2.1); every hot-path change regenerates the baseline with a reason.
+- **Local runs:** Linux machines and CI; no Docker path for now (Giovanni, 2026-10-11).

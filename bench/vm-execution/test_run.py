@@ -1,7 +1,7 @@
 """Result validation must reject a fast run that did the wrong work."""
 import unittest
 
-from run import dialect, parse_output, script
+from workloads import dialect, parse_output, script
 
 
 class OutputValidation(unittest.TestCase):
@@ -51,3 +51,19 @@ class Dialects(unittest.TestCase):
                 self.assertNotIn(old, text, case)
             self.assertIn(" | Var(", text)
             self.assertEqual(script(case, 2, 10, 2), dialect(script(case, 2, 10, 2), "1x"))
+
+
+class Untimed(unittest.TestCase):
+    def test_reads_no_clock(self):
+        for case in ("add-int", "push-shared-seq", "do-int"):
+            text = script(case, 8, 10, 1, timed=False)
+            self.assertNotIn("Time.Now", text, case)
+            self.assertNotIn("VM_SECONDS", text, case)
+
+    def test_output_is_checked_without_durations(self):
+        good = "VM_VALID: true\nVM_DONE: 100\n"
+        self.assertEqual(parse_output(good, 100, 1, timed=False), [])
+        with self.assertRaises(RuntimeError):
+            parse_output(good.replace("100", "99"), 100, 1, timed=False)
+        with self.assertRaises(RuntimeError):
+            parse_output("VM_SECONDS: 0.01\n" + good, 100, 1, timed=False)
