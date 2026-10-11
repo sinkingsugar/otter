@@ -2,6 +2,10 @@
 
 Checkpoint: 2026-10-10. Check `git log` and the working tree for later changes. The plan for current work is [golden-path.md](golden-path.md); it overrides older statements elsewhere. Earlier checkpoints, review rounds and the 1.x deviation list are in [history.md](history.md).
 
+## Next
+
+Priorities as of 2026-10-11 are in [host-requirements.md §7](host-requirements.md#7-priorities-2026-10-11): the rename to Otter first, then objects and services, concurrency and runtime compilation (the needs of an agent-orchestrator host now being built on 2.0), with catalog breadth, early modules and an iOS build in parallel, and M10 after or alongside the first two.
+
 ## Implemented
 
 - **Core** (`shards-core`): compose once, instantiate many (shared immutable `Compiled`, small per-instance `State`), a content-keyed compose cache with recorded dependencies, frame slots with definite-initialization checks, exactly-once cleanup through shared lifecycle helpers.
@@ -81,7 +85,7 @@ The earlier list (syntax, numbers, tables, `Push`, `Match`, `Once`, `check`) is 
 - **Compose stack per nesting level** is about 6 KiB natively for function bodies (the `Do` path was 3.5 KiB), so ESP-IDF keeps `MAX_FLOW_DEPTH` at 24; the next step is attributing the per-level temporaries (the call-site compose alone is 2.4 KiB) or composing iteratively (golden path §6.3's later item).
 - The type registry never frees (shapes included; the soak test records 2 shapes and 2 types per reload that introduces a new record shape); scoped registries are needed for long `watch` sessions.
 - The compose cache is unbounded.
-- Recursive types; objects, services, module ports and the C API, whose decisions are proposed in [host-requirements.md](host-requirements.md) (gaps found by surveying a large production 1.x host, awaiting decision); browser wasm; graphics and physics.
+- Recursive types; objects, services, module ports and the C API, whose decisions are proposed in [host-requirements.md](host-requirements.md) (gaps found by surveying a large production 1.x host, awaiting decision; priorities in its §7); browser wasm; graphics and physics.
 - The external host is porting its shards to 2.0 ([embedding.md](embedding.md)); it must move to the opaque `Table` API (M1) and, with this checkpoint, drop the mesh type parameters from `check`, `run` and `Session`.
 
 ## Verified

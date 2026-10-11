@@ -204,9 +204,35 @@ These are deliberate and stay, but each needs a line in the migration notes and 
 
 ## 6. Order
 
+The first ordering, written for porting the surveyed host as it is. §7 supersedes it.
+
 1. Decide H1, H3, H4, H5 and H6 together (one value design, one resource and lifetime model), then H7 and H10 on top of them. H8 and H9 can be decided in parallel.
 2. Catalog breadth (§3) and the migration tool (H13): no dependency on the decisions, can start at any time, and turn real scripts into compose errors that name the true gaps.
 3. Objects and services in the core, with cleanup and cancellation tests; then the C API's smallest end-to-end: a host registers one leaf and one async foreign shard, and ticks, cancels and exchanges values on two Apple targets.
 4. sqlite, against copies of real databases; then http with streaming; then llm.
 5. A vertical slice in a real host: one complete user-facing flow (a streamed request, a tool call, persistence, cancellation, UI progress through cells).
 6. The rest of the modules, runtime compilation (H8), observability.
+
+## 7. Priorities (2026-10-11)
+
+The surveyed host is not being ported as it is. It is being replaced by **an agent-orchestrator host**: a Rust node that runs on every machine (iOS included, in-process), with native apps and a CLI as clients. Agents and tools are written in Shards; the store, sync, providers and UI are not. That host embeds 2.0 the way `embedding.md` already describes. So the C API and foreign shards (H10), the 1.x migration tool (H13), most of the modules and the UI concerns drop out, while objects, services, concurrency and runtime compilation become the critical path. The host's first milestones (its store, chat with attachments, a CLI, external agent workers, the iOS client) need nothing new from 2.0 except an iOS build, so both sides can proceed in parallel. Its native agent loop is the first point that needs the work below.
+
+**P0. Rename.** The project is renamed to Otter before the next feature work, so the work below lands under its final names. Scope (crates, binary, repository, language and file extension) to be settled first.
+
+**Track A: the core decisions, in order** (the host's native loop needs A1 to A3):
+1. **Objects and services** (H1, H3), specified together with guard cleanup (H4) and the cancellation rules (H6). Gate: a host object (a fake session) created, used and released by scripts; a service looked up at activation; release on success, error, `Stop`, `Return` and cancellation; hot-asm unchanged, or the difference explained; the ESP32 suites still fit.
+2. **Concurrency** (H5): `Spawn` outputs a handle; `Wire.Wait` and `Wire.Stop`; spawned instances owned by their spawner unless detached; channels as a service. Gate: an orchestration script that fans out, waits on and cancels workers, with cancellation reaching every child.
+3. **Runtime compilation** (H8), host side first: compile into a running mesh with a catalog subset, and check with diagnostics; scoped type registries and a bounded compose cache (both already open items); then a script-side `Code.Compile`. Gate: a soak compiling and dropping generated tools with memory flat.
+4. **Iteration** (H12): `ForEach`, `Map`, `Filter`, `Reduce` with a named element, flattened into the VM.
+
+**M10** (code as data, `metaprogramming.md` §4) is not on this host's critical path. It runs after A1 and A2, or in parallel with them when there is capacity; its three cases are supplied.
+
+**Track B: catalog breadth** (§3), at any time and in parallel: strings, regex (dialect decided first), JSON (mapping decided first), fs, hashes, time, the `Is*` family, `Fail`/`Pass`/`Msg`, and parameter parity (`Get(default:)`). The text-tool subset comes first.
+
+**Track C: modules, after A1:** local shell and SSH (one shared session layer), HTTP extensions (methods, headers, bytes, streaming reads), llm embeddings first (own `-sys` crate over llama.cpp), and the memory-index shards over a service.
+
+**Track D: targets, early and cheap:** a CI job that builds `shards-core`, `shards-lang` and `shards-io` as a static library for iOS device and simulator (H11), since the host's node runs in-process on the phone.
+
+**Later:** observability (H14) once A2 lands; platform branching (H9) when a host needs it.
+
+**Deferred** until a host needs them: the C API and foreign shards (H10), the 1.x migration tool (H13), image and audio values (H2), sqlite as a script module (the host uses SQLite in Rust as a derived index), imaging, spreadsheet, pdf, network, candle, audio.

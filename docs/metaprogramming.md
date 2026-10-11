@@ -1,6 +1,6 @@
 # Metaprogramming: compose-time evaluation, flow parameters, code as data
 
-Status: **agreed design** (Opus, Astra, Fable, Gemini, Giovanni; 2026-10-08). M8 and M9 are implemented and reviewed, every finding verified (§2.5, §3.5); M10 is next, its §4.1 cases supplied by Giovanni. This document is the contract for M8 to M10, the way [golden-path.md](golden-path.md) is for M0 to M7; golden path D1, §9 and §12 point here.
+Status: **agreed design** (Opus, Astra, Fable, Gemini, Giovanni; 2026-10-08). M8 and M9 are implemented and reviewed, every finding verified (§2.5, §3.5); M10 follows the host priorities ([host-requirements.md §7](host-requirements.md#7-priorities-2026-10-11): after or alongside objects, services and concurrency), its §4.1 cases supplied by Giovanni. This document is the contract for M8 to M10, the way [golden-path.md](golden-path.md) is for M0 to M7; golden path D1, §9 and §12 point here.
 
 Before starting, read `current-state.md` and the latest records in `.agent-handoffs/`. Do not assume older review findings are still open: the M5 to M7 findings, frame caching, `Var` alignment and fresh wire locals are all closed there.
 
