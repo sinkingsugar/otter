@@ -9,11 +9,14 @@
 //! another instance: across a reload it keeps naming the original one.
 //!
 //! Ending an instance from outside is a request ([`Completion::request`]):
-//! it marks the cell and counts it on the mesh's [`CancelRequests`]. The
-//! mesh acts on requests at the end of a tick, after every running
-//! instance had its activation (until none are left, so a whole tree goes
-//! in that tick); a request made between ticks takes effect at the end of
-//! the next one. Nothing is checked per activation. `Wait` acknowledges the
+//! it marks the cell and counts it on the mesh's [`CancelRequests`]. A
+//! request made between ticks ends its target before the next tick runs
+//! anything; one made during a tick (`Stop(w)`, an owner ending) takes
+//! effect at its end, after every running instance had its activation,
+//! until none are left, so a whole tree goes in that tick. Nothing is
+//! checked per activation: a target that completes in the tick it was
+//! asked to end ends as the request says (`Stopped`, `Cancelled`), and its
+//! last activation has run. `Wait` acknowledges the
 //! instance's cleanup, not the quiescence of external work it started (H6).
 
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};

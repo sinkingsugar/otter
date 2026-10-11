@@ -2094,3 +2094,147 @@ fn waiting_for_oneself_is_an_error() {
     "{outcome:?}"
   );
 }
+
+/// A request made before a target's activation decides how it ends, under
+/// either wake mode: made between ticks, the target never runs; made in
+/// the tick the target completes in (a `Stop(w)` before it, or its owner
+/// ending), the target ends as the request says, not Completed.
+#[test]
+fn a_request_wins_over_a_completion_in_the_same_tick() {
+  for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+    let _ = take_probe_events();
+    // Between ticks, by the host.
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(wire(
+      "quick",
+      false,
+      vec![probe("quick"), konst(Var::Int(7))],
+    ));
+    let id = start(&mut mesh, "quick");
+    let handle = mesh.handle(id).unwrap();
+    completion(&handle).request(Request::Stop);
+    assert_eq!(mesh.tick(), 0);
+    assert_eq!(
+      completion(&handle).outcome(),
+      Some(Outcome::Stopped),
+      "{mode:?}"
+    );
+    assert!(take_probe_events().is_empty(), "never instantiated");
+
+    // In the tick, by Stop(w) before the target's first activation.
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(wire("quick", false, vec![konst(Var::Int(7))]));
+    mesh.add_wire(wire(
+      "stopper",
+      false,
+      vec![
+        spawn("quick"),
+        declare("t"),
+        pause(),
+        stop_instance("t"),
+        wait("t"),
+      ],
+    ));
+    let stopper = start(&mut mesh, "stopper");
+    mesh.run(10);
+    let outcome = mesh.take_outcome(stopper).unwrap();
+    assert_eq!(failure_code(&outcome), "wire-stopped", "{mode:?}");
+
+    // In the tick, by the owner ending before the child's first activation.
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(wire("quick", false, vec![konst(Var::Int(7))]));
+    mesh.add_wire(wire("owner", false, vec![spawn("quick"), pause()]));
+    start(&mut mesh, "owner");
+    mesh.run(10);
+    let finished = finished_by_wire(&mut mesh);
+    assert_eq!(finished["quick"], Outcome::Cancelled, "{mode:?}");
+  }
+}
+
+/// A reload that ends an owner ends its children before it returns, even
+/// when their own definitions are unchanged.
+#[test]
+fn a_reload_ending_an_owner_ends_its_children() {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("child", true, vec![pause()]));
+  mesh.add_wire(wire("grand", true, vec![pause()]));
+  mesh.add_wire(wire(
+    "middle",
+    true,
+    vec![once(vec![spawn("grand")]), pause()],
+  ));
+  mesh.add_wire(wire(
+    "owner",
+    true,
+    vec![once(vec![spawn("child"), spawn("middle")]), pause()],
+  ));
+  let owner = start(&mut mesh, "owner");
+  for _ in 0..3 {
+    mesh.tick();
+  }
+  assert_eq!(mesh.running(), 4);
+  let mut next = mesh.revision();
+  next.add_wire(wire("child", true, vec![pause()]));
+  next.add_wire(wire("grand", true, vec![pause()]));
+  next.add_wire(wire(
+    "middle",
+    true,
+    vec![once(vec![spawn("grand")]), pause()],
+  ));
+  next.add_wire(wire("owner", true, vec![pause()]));
+  let removed = [owner].into_iter().collect();
+  mesh.validate_reload(&mut next, &removed).unwrap();
+  mesh.install_revision(next, &removed);
+  assert_eq!(mesh.running(), 0);
+  let finished = finished_by_wire(&mut mesh);
+  for w in ["owner", "child", "middle", "grand"] {
+    assert_eq!(finished[w], Outcome::Cancelled, "{w}");
+  }
+}
+
+/// A timeout past what the clock can represent waits without a deadline;
+/// its registration goes when the waiter does.
+#[test]
+fn an_enormous_timeout_waits_without_a_deadline() {
+  let (mut mesh, handle) =
+    mesh_with_sleeper(vec![wire("waiter", false, vec![wait_timeout("w", 1.0e19)])]);
+  let waiter = start(&mut mesh, "waiter");
+  for _ in 0..3 {
+    mesh.tick();
+  }
+  assert_eq!(mesh.outcome(waiter), None);
+  assert_eq!(completion(&handle).waiter_count(), 1);
+  mesh.cancel(waiter);
+  assert_eq!(completion(&handle).waiter_count(), 0);
+}
+
+/// Peek on an instance that ended fails as Wait does; a completed `none`
+/// is a value.
+#[test]
+fn peek_reports_every_ending() {
+  let (mut mesh, handle) = mesh_with_sleeper(vec![wire("peeker", false, vec![peek("w")])]);
+  completion(&handle).request(Request::Stop);
+  let peeker = start(&mut mesh, "peeker");
+  mesh.run(5);
+  assert_eq!(
+    failure_code(&mesh.take_outcome(peeker).unwrap()),
+    "wire-stopped"
+  );
+
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("nothing", false, vec![konst(Var::None)]));
+  mesh.add_wire(wire(
+    "peeker",
+    false,
+    vec![spawn("nothing"), declare("t"), pause(), pause(), peek("t")],
+  ));
+  let peeker = start(&mut mesh, "peeker");
+  mesh.run(5);
+  assert_eq!(
+    mesh.take_outcome(peeker),
+    Some(Outcome::Completed(Var::None))
+  );
+}
