@@ -92,7 +92,10 @@ jobs:
     # selection, registers, spills). The images are pinned: instruction counts
     # depend on their Valgrind and C library, which each baseline records. The
     # measured baseline is uploaded either way; after an intended change,
-    # commit it with the reason (bench/instructions/README.md).
+    # commit it with the reason (bench/instructions/README.md). On a pull
+    # request it also measures the base the same way and reports the
+    # difference on both targets (job summary, `compare-*` artifacts):
+    # a change is judged on both architectures, not only the one at hand.
     strategy:
       fail-fast: false
       matrix:
@@ -104,6 +107,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: sudo apt-get update && sudo apt-get install -y valgrind
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -113,3 +118,24 @@ jobs:
         with:
           name: instructions-${{ matrix.target }}
           path: fresh/${{ matrix.target }}.txt
+      - name: Compare with the pull request's base
+        if: always() && github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          git worktree add -q --detach "$RUNNER_TEMP/base" "$BASE"
+          (cd "$RUNNER_TEMP/base" && python3 bench/instructions/run.py --write "$RUNNER_TEMP/base.txt")
+          mkdir -p compare
+          python3 bench/instructions/run.py --check "$RUNNER_TEMP/base.txt" > "compare/$TARGET.txt" 2>&1 || true
+          {
+            echo "### Instructions per iteration against the base ($TARGET)"
+            echo '```'
+            grep -vE '^\s+(Compiling|Finished|Downloaded|Downloading|Updating|Blocking)' "compare/$TARGET.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-${{ matrix.target }}
+          path: compare/${{ matrix.target }}.txt
