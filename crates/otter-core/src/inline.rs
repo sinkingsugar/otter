@@ -708,6 +708,18 @@ impl Frames {
 /// are no callbacks, suspension points, frame resizes or escaping references.
 /// Code must be lowered and entry must be at a segment boundary (flow start or
 /// immediately after a fallback/constructor), as enforced by both flow loops.
+///
+/// What this function's code may hold (2026-10-11): operations on plain
+/// values (`Var::is_plain`), and fixed reads or writes of one storage kind
+/// (an element by index, a struct table's slot, a push), whose code does
+/// not depend on what other kinds exist. Everything else (a copy or drop of
+/// a value owning storage, a lookup by key, generic cases, errors) is one
+/// call out of line. The compiler allocates registers and lays out blocks
+/// for the whole loop at once, so code here moves every operation: kept to
+/// this, a new kind of value (an object, an image) cannot change it. Its
+/// price was one call on each copy of a string, sequence or table into a
+/// variable (`assign_copy`); plain operations got cheaper with it
+/// (docs/runtime-performance-overview.md, lesson 9).
 pub(crate) fn run<C: VmCalls>(
   code: &[Instruction],
   mut index: usize,
@@ -813,33 +825,35 @@ pub(crate) fn run<C: VmCalls>(
             Operand::Const(v) => v,
             Operand::Bound(b) => &*frames.slot(*b),
           };
-          // The common reads inline (an element by index, an entry by
-          // key); the generic lookup, with its errors, stays out of line.
-          let new = match (&*value, key) {
-            (Var::Seq(items), Var::Int(i)) if *i >= 0 && (*i as usize) < items.len() => {
-              copy(&items[*i as usize])
-            }
-            (Var::Table(entries), Var::String(k)) => entries.get(k).map(copy).unwrap_or(Var::None),
-            _ => data::take_value(&*value, key)?,
-          };
-          assign(&mut scratch, new);
+          // An element by index inline: a fixed read of one kind. Every
+          // other lookup out of line.
+          if let (Var::Seq(items), Var::Int(i)) = (&*value, key)
+            && *i >= 0
+            && (*i as usize) < items.len()
+          {
+            let new = copy(&items[*i as usize]);
+            assign(&mut scratch, new);
+          } else if let Err(e) = take_op(&*value, key, &mut scratch) {
+            return Err(*e);
+          }
           value = &scratch;
         }
         Op::TakeSlot(index) => {
-          // The slot read inline; the errors stay out of line.
-          let slot = match &*value {
+          // The slot read inline: a fixed read of one kind.
+          if let Some(v) = match &*value {
             Var::Table(entries) => entries.slot(*index),
             _ => None,
-          };
-          let new = match slot {
-            Some(v) => copy(v),
-            None => data::take_slot(&*value, *index)?,
-          };
-          assign(&mut scratch, new);
+          } {
+            let new = copy(v);
+            assign(&mut scratch, new);
+          } else if let Err(e) = take_slot_op(&*value, *index, &mut scratch) {
+            return Err(*e);
+          }
           value = &scratch;
         }
         Op::Push(b) => {
-          // The accumulator never points into a sequence's buffer (a Take
+          // A fixed operation of one kind (a sequence), inline. The
+          // accumulator never points into a sequence's buffer (a Take
           // copies its element out), so only an input that is the
           // destination itself (a sequence pushing itself) needs a
           // snapshot before the slot is mutated.
@@ -1057,6 +1071,34 @@ fn arith_name(op: BinOp) -> &'static str {
     BinOp::Multiply => "Math.Multiply",
     BinOp::Divide => "Math.Divide",
   }
+}
+
+/// `Take` past `run`'s inline read (an element of a sequence by index): an
+/// entry by key, then the generic lookup with its errors. Out of line, as
+/// everything in `run` that is not a fixed operation on one kind (see
+/// `run`). The result goes straight into `scratch` and a failure is boxed,
+/// so the call returns one register.
+#[inline(never)]
+fn take_op(value: &Var, key: &Var, scratch: &mut Var) -> std::result::Result<(), Box<Error>> {
+  let new = match (value, key) {
+    (Var::Table(entries), Var::String(k)) => entries.get(k).map(copy).unwrap_or(Var::None),
+    _ => data::take_value(value, key).map_err(Box::new)?,
+  };
+  assign(scratch, new);
+  Ok(())
+}
+
+/// `TakeSlot` past `run`'s inline slot read: a value that is not a struct
+/// table, with its error, out of line as `take_op`.
+#[inline(never)]
+fn take_slot_op(
+  value: &Var,
+  index: usize,
+  scratch: &mut Var,
+) -> std::result::Result<(), Box<Error>> {
+  let new = data::take_slot(value, index).map_err(Box::new)?;
+  assign(scratch, new);
+  Ok(())
 }
 
 /// Out of line so `run`'s own frame stays small: a VM call's state would

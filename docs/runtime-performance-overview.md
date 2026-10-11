@@ -273,6 +273,38 @@ experiment and full VM rerun:
    5 percent faster, the VM suite unchanged against `34fddd7`. CI's
    `hot-asm` job now fails on any change to these summaries, so growth is a
    decision recorded in a commit, not a side effect.
+9. **`inline::run` holds plain operations and fixed reads of one kind,
+   nothing else (2026-10-11).** Adding an object variant to `Var` grew
+   `run` by 76 instructions (84 on aarch64) without changing what any
+   workload executed: the VM's `Set` inlined the value copy and drop, an
+   arm per storage kind. The compiler allocates registers and lays out
+   blocks for the whole loop at once, so any code there moves every
+   operation (lesson 6), and the plain fast paths should not depend on what
+   complex kinds exist. Measured with the instruction gate (exact counts,
+   `bench/instructions`), on `0121099`:
+   - one function per operation behind a dispatch loop (isolation by
+     construction): +34 to +67 percent on plain operations (a call per
+     operation, the accumulator in memory). Rejected. Guaranteed tail
+     calls (`become`) would make it cheap; they are not stable;
+   - the rarer storage kinds through one out-of-line arm of the inlined
+     copy: 13 more instructions on every string, sequence and table copy
+     (the whole match saves registers around the call); a catch-all arm
+     instead turned the jump table into a chain of compares (up to 13
+     percent). Rejected;
+   - the heap copy out of line alone: one more instruction per operation
+     everywhere (a register reloaded in the loop head);
+   - adopted: the heap copy (`assign_copy_slow`), `Take` by key and its
+     generic cases, and `TakeSlot`'s errors out of line; an element by
+     index, a struct table's slot and `Push` stay inline (fixed code for one
+     kind). Plain operations equal or faster (`add-int` −4.4 percent,
+     inlined calls −4.4, `assign-int` −1.8, `take-seq` −1.2; entity and
+     depth equal); a heap copy into a variable +4 instructions (`assign`
+     of strings, sequences and tables +4 to +5 percent, `update` +0.1 to
+     +1.7), `push` +1 to +2 (register allocation, the same code),
+     `var-key-take-16` +0.4. `run` is 1,172 instructions, from 1,371.
+   The rule is written on `run` itself: a new kind of value goes out of
+   line, so it cannot change `run`; the instruction gate and hot-asm show
+   any slip.
 
 Keep the VM foundation and pursue collection ownership/access and short mixed
 flows next. The latest results and remaining misses belong in the
