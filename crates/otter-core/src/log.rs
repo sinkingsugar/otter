@@ -1,31 +1,71 @@
-//! Where `Log` writes. Lines go to standard output unless they are being
-//! captured ([`capture`]), which is how tests read what a program logged.
+//! Where `Log` writes. Lines go to standard output unless a sink is set:
+//! a buffer the caller reads afterwards ([`capture`], how tests read what a
+//! program logged), or a stream that hands each line to the host as it is
+//! written ([`Sink::stream`]; a session takes one with
+//! `Session::set_log_sink`).
 //!
-//! A capture belongs to the thread that starts it and to work started from
+//! A sink belongs to the thread that sets it and to work started from
 //! there on other threads: `otter_io` carries the current [`Sink`] into
 //! blocking and async tasks ([`current`], [`with_sink`]), so a host shard
-//! logging from the blocking pool is captured too.
+//! logging from the blocking pool reaches it too.
 
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
-/// Where captured lines go. Cheap to clone; shared across threads.
-#[derive(Clone, Default)]
-pub struct Sink(Arc<Mutex<Vec<String>>>);
+use crate::instance::InstanceId;
+
+/// One logged line, as a stream receives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+  pub text: String,
+  /// The instance that logged it, when a shard did (`Log`); `None` for
+  /// lines the runtime itself writes.
+  pub instance: Option<InstanceId>,
+}
+
+/// Where lines go. Cheap to clone; shared across threads.
+#[derive(Clone)]
+pub struct Sink(Kind);
+
+#[derive(Clone)]
+enum Kind {
+  Buffer(Arc<Mutex<Vec<String>>>),
+  Stream(Arc<dyn Fn(Line) + Send + Sync>),
+}
+
+impl Default for Sink {
+  /// A buffer ([`capture`]).
+  fn default() -> Sink {
+    Sink(Kind::Buffer(Arc::default()))
+  }
+}
 
 impl Sink {
-  fn push(&self, line: String) {
-    // A poisoned sink (a panic while pushing) still records lines.
-    match self.0.lock() {
-      Ok(mut lines) => lines.push(line),
-      Err(poisoned) => poisoned.into_inner().push(line),
+  /// A sink that calls `f` with each line as it is written, on the thread
+  /// that writes it (a worker's lines arrive from the worker's thread).
+  /// `f` must not block: it runs inside the activation that logged.
+  pub fn stream(f: impl Fn(Line) + Send + Sync + 'static) -> Sink {
+    Sink(Kind::Stream(Arc::new(f)))
+  }
+
+  fn push(&self, line: Line) {
+    match &self.0 {
+      // A poisoned buffer (a panic while pushing) still records lines.
+      Kind::Buffer(lines) => match lines.lock() {
+        Ok(mut lines) => lines.push(line.text),
+        Err(poisoned) => poisoned.into_inner().push(line.text),
+      },
+      Kind::Stream(f) => f(line),
     }
   }
 
   fn take(&self) -> Vec<String> {
-    match self.0.lock() {
-      Ok(mut lines) => std::mem::take(&mut *lines),
-      Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    match &self.0 {
+      Kind::Buffer(lines) => match lines.lock() {
+        Ok(mut lines) => std::mem::take(&mut *lines),
+        Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+      },
+      Kind::Stream(_) => Vec::new(),
     }
   }
 }
@@ -34,20 +74,30 @@ thread_local! {
   static CAPTURE: RefCell<Option<Sink>> = const { RefCell::new(None) };
 }
 
-/// Writes one log line.
+/// Writes one line from the runtime itself (no instance).
 pub fn emit(line: String) {
-  CAPTURE.with(|c| match &*c.borrow() {
-    Some(sink) => sink.push(line),
-    None => println!("{line}"),
+  emit_line(Line {
+    text: line,
+    instance: None,
   });
 }
 
-/// The capture active on this thread, to hand to work started elsewhere.
+/// Writes one line.
+pub fn emit_line(line: Line) {
+  // Cloned out first, so a stream that logs in turn does not find the
+  // capture borrowed.
+  match CAPTURE.with(|c| c.borrow().clone()) {
+    Some(sink) => sink.push(line),
+    None => println!("{}", line.text),
+  }
+}
+
+/// The sink active on this thread, to hand to work started elsewhere.
 pub fn current() -> Option<Sink> {
   CAPTURE.with(|c| c.borrow().clone())
 }
 
-/// Runs `f` with `sink` as this thread's capture (none: print), restoring
+/// Runs `f` with `sink` as this thread's sink (none: print), restoring
 /// the previous one afterwards, even if `f` panics.
 pub fn with_sink<R>(sink: Option<Sink>, f: impl FnOnce() -> R) -> R {
   struct Restore(Option<Option<Sink>>);
@@ -95,5 +145,30 @@ mod tests {
       emit("from here".into());
     });
     assert_eq!(lines, ["from a worker", "from here"]);
+  }
+
+  #[test]
+  fn a_stream_receives_each_line_as_it_is_written() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let into = seen.clone();
+    let sink = Sink::stream(move |line| into.lock().unwrap().push(line));
+    with_sink(Some(sink.clone()), || {
+      emit("first".into());
+      // Each line is there before the next is written.
+      assert_eq!(seen.lock().unwrap().len(), 1);
+      emit_line(Line {
+        text: "second".into(),
+        instance: Some(7),
+      });
+      let worker = current();
+      std::thread::spawn(move || with_sink(worker, || emit("from a worker".into())))
+        .join()
+        .expect("worker");
+    });
+    let lines = seen.lock().unwrap().clone();
+    let texts: Vec<_> = lines.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(texts, ["first", "second", "from a worker"]);
+    assert_eq!(lines[1].instance, Some(7));
+    assert_eq!(lines[0].instance, None);
   }
 }

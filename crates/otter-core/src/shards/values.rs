@@ -176,13 +176,16 @@ impl LeafShard for Log {
   fn activate(
     prefix: &Self::Compiled,
     _: &mut (),
-    _: &mut impl LeafCtx,
+    ctx: &mut impl LeafCtx,
     input: &Var,
   ) -> Result<Flow> {
     let value = input.text();
-    crate::log::emit(match prefix {
-      Some(p) => format!("{p}: {value}"),
-      None => value,
+    crate::log::emit_line(crate::log::Line {
+      text: match prefix {
+        Some(p) => format!("{p}: {value}"),
+        None => value,
+      },
+      instance: Some(ctx.instance()),
     });
     Ok(Flow::Next(input.clone()))
   }
