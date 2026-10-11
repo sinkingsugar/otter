@@ -131,6 +131,7 @@ pub struct ActivationCtx<'a> {
   pub(crate) max_call_depth: usize,
   /// The meter of a compose-time evaluation; `None` at run time.
   pub(crate) meter: Option<&'a crate::compose_time::Meter>,
+  pub(crate) services: &'a crate::service::Services,
 }
 
 impl ActivationCtx<'_> {
@@ -199,6 +200,10 @@ impl LeafCtx for ActivationCtx<'_> {
 
   fn meter(&self) -> Option<&crate::compose_time::Meter> {
     self.meter
+  }
+
+  fn services(&self) -> &crate::service::Services {
+    self.services
   }
 }
 
@@ -293,8 +298,11 @@ pub trait ControlShard: 'static {
   type Compiled: Send + Sync + 'static;
   /// The progress of one activation. Starts at `Default` and is set back to
   /// it whenever the shard completes (whatever the outcome) or a child's
-  /// `Stop`, `Restart` or `Return` passes through; dropped on cleanup. It
-  /// lives for one activation, so it holds no resource.
+  /// `Stop`, `Restart` or `Return` passes through, and dropped on cleanup,
+  /// cancellation included: every exit drops what it held. So it may hold
+  /// guards whose `Drop` releases a resource or schedules its release (a
+  /// rollback queued to a database service, a dialog dismissed through the
+  /// host), and never blocks (docs/host-requirements.md H4).
   type State: Default + 'static;
 
   const NAME: &'static str;

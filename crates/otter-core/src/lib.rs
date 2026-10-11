@@ -25,6 +25,7 @@ mod lifecycle;
 pub mod log;
 pub mod object;
 pub mod reload;
+pub mod service;
 pub mod shard;
 pub mod shards;
 pub mod signature;

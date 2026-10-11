@@ -752,23 +752,41 @@ impl Lowerer<'_> {
 
   fn type_block(&mut self, block: &Block) -> Option<Type> {
     match &block.kind {
-      BlockKind::Shard { name, params: None } => match named_type(&name.node) {
+      BlockKind::Shard { name, params: None } => match named_type(&name.node)
+        .or_else(|| self.catalog.object_type(&name.node).map(|o| o.to_type()))
+      {
         Some(ty) => Some(ty),
         None => {
+          let objects = self.catalog.objects();
+          let mut hint = TYPE_NAMES.join(", ");
+          if !objects.is_empty() {
+            hint.push_str("; objects: ");
+            hint.push_str(
+              &objects
+                .iter()
+                .map(|o| o.name)
+                .collect::<Vec<_>>()
+                .join(", "),
+            );
+          }
           self.problem(
             Problem::construct(
               name.span,
               "generic",
               "unknown-type",
               format!(
-                "unknown type `{}` (types: {}, `[T]`, `{{key: T}}`, `T | None`)",
+                "unknown type `{}` (types: {hint}, `[T]`, `{{key: T}}`, `T | None`)",
                 name.node,
-                TYPE_NAMES.join(", ")
               ),
             )
             .did_you_mean(closest(
               &name.node,
-              TYPE_NAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+              TYPE_NAMES
+                .iter()
+                .copied()
+                .chain(objects.iter().map(|o| o.name))
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
               3,
             )),
           );

@@ -61,6 +61,7 @@ pub struct Mesh {
   wake_mode: WakeMode,
   max_call_depth: usize,
   eval_limits: crate::compose_time::EvalLimits,
+  services: crate::service::Services,
 }
 
 impl Default for Mesh {
@@ -92,7 +93,18 @@ impl Mesh {
       wake_mode: WakeMode::default(),
       max_call_depth: if cfg!(target_os = "espidf") { 32 } else { 256 },
       eval_limits: crate::compose_time::EvalLimits::default(),
+      services: crate::service::Services::default(),
     }
+  }
+
+  /// The services shards look up at activation (docs/host-requirements.md
+  /// H3). A preserving reload's candidate shares them.
+  pub fn services(&self) -> &crate::service::Services {
+    &self.services
+  }
+
+  pub fn services_mut(&mut self) -> &mut crate::service::Services {
+    &mut self.services
   }
 
   /// Limit nested named invocations independently of the compose nesting limit.
@@ -244,6 +256,7 @@ impl Mesh {
     next.max_call_depth = self.max_call_depth;
     next.eval_limits = self.eval_limits;
     next.reset_policy = self.reset_policy;
+    next.services = self.services.clone();
     next
   }
 
@@ -546,6 +559,7 @@ impl Mesh {
       revisions,
       table,
       max_call_depth,
+      services,
       ..
     } = self;
     for instance in instances.iter_mut() {
@@ -564,6 +578,7 @@ impl Mesh {
         revisions,
         table,
         *max_call_depth,
+        services,
       );
     }
     for (wire, input) in std::mem::take(&mut self.spawn_queue) {
@@ -697,6 +712,7 @@ fn step(
   revisions: &Revisions,
   table: &Arc<FunctionRegistry>,
   max_call_depth: usize,
+  services: &crate::service::Services,
 ) {
   if !instance.started {
     instance.started = true;
@@ -757,6 +773,7 @@ fn step(
         iteration: *iteration,
         max_call_depth,
         meter: None,
+        services,
       };
       state.activate(&mut ctx, input)
     }))
