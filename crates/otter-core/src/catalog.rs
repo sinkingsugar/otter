@@ -54,14 +54,14 @@ impl Catalog {
       shards.push(ty);
     }
     shards.sort_by_key(|s| s.name());
-    let mut index: Vec<_> = shards
-      .iter()
-      .flat_map(|&s| {
-        std::iter::once(s.name())
-          .chain(s.desc.aliases.iter().copied())
-          .map(move |n| (n, s))
-      })
-      .collect();
+    // One allocation of the exact size: growing would leave freed buffers
+    // behind, and the heap a host starts with is part of what it measures.
+    let names = shards.iter().map(|s| 1 + s.desc.aliases.len()).sum();
+    let mut index = Vec::with_capacity(names);
+    for &s in &shards {
+      index.push((s.name(), s));
+      index.extend(s.desc.aliases.iter().map(|&alias| (alias, s)));
+    }
     index.sort_by_key(|&(name, _)| name);
     Ok(Catalog {
       shards,
