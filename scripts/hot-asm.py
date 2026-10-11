@@ -6,6 +6,7 @@ change to the interpreter loop or the engine step before benchmarking it
     python3 scripts/hot-asm.py                      # this checkout
     python3 scripts/hot-asm.py --compare a965e32    # and a revision, side by side
     python3 scripts/hot-asm.py --check bench/hot-asm/aarch64-apple-darwin.txt
+    python3 scripts/hot-asm.py --check ... --fresh fresh.txt   # also write the summary (CI's artifact)
 
 Builds `otter` in release (in CARGO_TARGET_DIR, or the checkout's target),
 finds each function below by its mangled name, and reports its instruction
@@ -173,6 +174,7 @@ def main():
     p.add_argument("--compare", help="a revision to build and compare with this checkout")
     p.add_argument("--check", type=Path, help="a stored summary this checkout must match")
     p.add_argument("--out", type=Path, help="directory for the normalized disassembly")
+    p.add_argument("--fresh", type=Path, help="also write this checkout's summary here (a baseline to commit)")
     args = p.parse_args()
     tool = objdump()
     target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
@@ -181,6 +183,9 @@ def main():
     current = analyze(build(ROOT, target), args.out, tool)
     text = render(current)
     print(text, end="")
+    if args.fresh:
+        args.fresh.parent.mkdir(parents=True, exist_ok=True)
+        args.fresh.write_text(text)
     if args.compare:
         with tempfile.TemporaryDirectory(prefix="hot-asm-") as tmp:
             tree = Path(tmp) / "tree"
