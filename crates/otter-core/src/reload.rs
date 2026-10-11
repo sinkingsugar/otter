@@ -47,6 +47,11 @@ pub struct Revisions {
   pub revision: u64,
   /// Registry lookups made at call entries, for tests and diagnostics.
   pub lookups: Cell<u64>,
+  /// The mesh's services (`Mesh::services`). Kept here because every
+  /// activation already holds this struct: reaching them costs the
+  /// scheduler nothing per activation, where a pointer of their own cost
+  /// two instructions each (instruction gate, 2026-10-11).
+  pub(crate) services: crate::service::Services,
 }
 
 impl Default for Revisions {
@@ -55,6 +60,7 @@ impl Default for Revisions {
       functions: HashMap::default(),
       revision: 0,
       lookups: Cell::new(0),
+      services: Default::default(),
     }
   }
 }

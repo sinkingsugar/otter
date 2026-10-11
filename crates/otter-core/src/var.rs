@@ -1424,7 +1424,10 @@ fn copy_slow(value: &Var) -> Var {
 /// anything else with the references counted in place. Copying a string,
 /// sequence or table into a variable is the operation itself here, and a
 /// call per copy cost the heap assign cases about 2 ns each (2026-10-10).
-/// Explicit, so its size does not grow with `Var`'s glue.
+/// Explicit, so its size does not grow with `Var`'s glue. Moving the heap
+/// copy out of line again (2026-10-11) shrank `inline::run` but made the
+/// plain paths worse: one more instruction per `Math.Add`, the dispatch
+/// restructured (instruction gate).
 #[inline(always)]
 pub(crate) fn assign_copy(slot: &mut Var, value: &Var) {
   if slot.is_plain() && value.is_plain() {

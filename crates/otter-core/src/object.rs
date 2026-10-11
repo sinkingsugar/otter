@@ -61,14 +61,20 @@ pub trait Object: Any + Send + Sync {
   fn object_type(&self) -> &'static ObjectType;
 }
 
-/// An object with its identity: what a [`Var::Object`] holds.
-pub struct ObjectBox<T: ?Sized> {
+/// An object with its identity: what a [`Var::Object`] holds. Sized, with
+/// the object boxed inside, so the value holds a thin `Arc` whose reference
+/// count sits where a sequence's does: the VM's inlined value copy and drop
+/// then treat an object like the storage kinds before it, and adding the
+/// variant left `inline::run` unchanged. Through `Arc<dyn Object>`, finding
+/// the count read the alignment from the vtable, and `run` grew by 76
+/// instructions. Reading the object costs one more pointer, at the shard.
+pub struct ObjectBox {
   id: u64,
-  value: T,
+  value: Box<dyn Object>,
 }
 
 /// A shared object, as a value holds it.
-pub type ObjectRef = Arc<ObjectBox<dyn Object>>;
+pub type ObjectRef = Arc<ObjectBox>;
 
 /// The next object's identity. 64 bits so it never wraps (identity is
 /// equality); the ESP32 targets have no 64-bit atomics and count under a
@@ -89,12 +95,12 @@ fn next_id() -> u64 {
   id
 }
 
-impl ObjectBox<dyn Object> {
+impl ObjectBox {
   /// Boxes `value` with a new identity.
   pub fn new<T: Object>(value: T) -> ObjectRef {
     Arc::new(ObjectBox {
       id: next_id(),
-      value,
+      value: Box::new(value),
     })
   }
 
@@ -109,23 +115,23 @@ impl ObjectBox<dyn Object> {
   }
 
   pub fn get(&self) -> &dyn Object {
-    &self.value
+    &*self.value
   }
 
   /// The object as `T`, if it is one.
   pub fn downcast_ref<T: Object>(&self) -> Option<&T> {
-    (&self.value as &dyn Any).downcast_ref::<T>()
+    (&*self.value as &dyn Any).downcast_ref::<T>()
   }
 }
 
 /// `Test.Session#3`: the type and the identity.
-impl fmt::Display for ObjectBox<dyn Object> {
+impl fmt::Display for ObjectBox {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{}#{}", self.object_type().name, self.id)
   }
 }
 
-impl fmt::Debug for ObjectBox<dyn Object> {
+impl fmt::Debug for ObjectBox {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     fmt::Display::fmt(self, f)
   }

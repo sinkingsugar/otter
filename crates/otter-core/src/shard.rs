@@ -131,7 +131,6 @@ pub struct ActivationCtx<'a> {
   pub(crate) max_call_depth: usize,
   /// The meter of a compose-time evaluation; `None` at run time.
   pub(crate) meter: Option<&'a crate::compose_time::Meter>,
-  pub(crate) services: &'a crate::service::Services,
 }
 
 impl ActivationCtx<'_> {
@@ -203,7 +202,7 @@ impl LeafCtx for ActivationCtx<'_> {
   }
 
   fn services(&self) -> &crate::service::Services {
-    self.services
+    &self.revisions.services
   }
 }
 

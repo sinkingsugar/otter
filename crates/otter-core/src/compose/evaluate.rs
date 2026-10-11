@@ -302,7 +302,6 @@ fn run(wire: Arc<CompiledWire>, meter: &Meter) -> Result<Var> {
       iteration: 0,
       max_call_depth: meter.limits().depth,
       meter: Some(meter),
-      services: crate::service::Services::empty(),
     };
     engine.activate(&mut ctx, &Var::None)
   }));
