@@ -1363,6 +1363,15 @@ fn copy_slow(value: &Var) -> Var {
   clone_value(value)
 }
 
+/// `*slot = value.clone()` when either owns storage (the caller tested
+/// that): the copy, then the old value released, with the references
+/// counted in place. The VM's heap `Set` (`inline::copy_into`).
+#[inline(always)]
+pub(crate) fn assign_copy_owning(slot: &mut Var, value: &Var) {
+  let copied = clone_value(value);
+  drop_value(std::mem::replace(slot, copied));
+}
+
 /// `*slot = value.clone()`, with the references counted in place: the
 /// slow tier's `Set` (`inline::slow_op`; plain values are copied by `run`
 /// itself).

@@ -46,7 +46,7 @@ impl BinOp {
     }
   }
 
-  fn int(self, a: i64, b: i64) -> Option<i64> {
+  pub(crate) fn int(self, a: i64, b: i64) -> Option<i64> {
     match self {
       BinOp::Add => a.checked_add(b),
       BinOp::Subtract => a.checked_sub(b),
@@ -55,7 +55,7 @@ impl BinOp {
     }
   }
 
-  fn f64(self, a: f64, b: f64) -> f64 {
+  pub(crate) fn f64(self, a: f64, b: f64) -> f64 {
     match self {
       BinOp::Add => a + b,
       BinOp::Subtract => a - b,
@@ -68,7 +68,7 @@ impl BinOp {
   /// computing in f64 and rounding once (double rounding is innocuous when
   /// the wide format has at least 2p+2 bits; f64 has 53 against f32's 24),
   /// so the vector fast paths below agree with the component rule.
-  fn f32(self, a: f32, b: f32) -> f32 {
+  pub(crate) fn f32(self, a: f32, b: f32) -> f32 {
     match self {
       BinOp::Add => a + b,
       BinOp::Subtract => a - b,

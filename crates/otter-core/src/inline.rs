@@ -18,7 +18,7 @@ use crate::shards::leaf::{self, LeafShard};
 use crate::shards::math::{self, BinOp};
 use crate::shards::values;
 use crate::types::{Shape, Type};
-use crate::var::{Float4, Table, Var, assign, assign_copy, copy, seq_mut};
+use crate::var::{Float4, Table, Var, assign, assign_copy, assign_copy_owning, copy, seq_mut};
 
 /// Opaque internal optimization hook. Ordinary shards use the default `None`.
 #[doc(hidden)]
@@ -732,6 +732,7 @@ fn overflow() -> Error {
 // do not recreate a mutable slice reference while an accumulator points into
 // it. Bounds checks precede every offset; the resulting pointer is only used
 // within `run` while both original slices remain exclusively borrowed.
+#[derive(Clone, Copy)]
 struct Frames {
   locals: *mut Var,
   locals_len: usize,
@@ -791,15 +792,19 @@ pub(crate) fn run<C: VmCalls>(
   mesh: &mut [Var],
   calls: &C,
 ) -> Result<(usize, Var)> {
+  // The hot tier reads its own copy of the frame descriptor: through the
+  // tier, every slot address was computed by selecting an address and
+  // loading from it (one more instruction per slot).
+  let frames = Frames {
+    locals: locals.as_mut_ptr(),
+    locals_len: locals.len(),
+    locals_bytes: std::mem::size_of_val(locals),
+    mesh: mesh.as_mut_ptr(),
+    mesh_len: mesh.len(),
+    mesh_bytes: std::mem::size_of_val(mesh),
+  };
   let mut tier = Tier {
-    frames: Frames {
-      locals: locals.as_mut_ptr(),
-      locals_len: locals.len(),
-      locals_bytes: std::mem::size_of_val(locals),
-      mesh: mesh.as_mut_ptr(),
-      mesh_len: mesh.len(),
-      mesh_bytes: std::mem::size_of_val(mesh),
-    },
+    frames,
     // Own the incoming output so replacing it releases captured values
     // before later frame mutations (see `Tier::scratch`).
     scratch: input,
@@ -828,10 +833,13 @@ pub(crate) fn run<C: VmCalls>(
     // its operands before it writes, and writes only plain values over
     // plain ones (nothing to drop).
     unsafe {
-      let frames = &(*t).frames;
       'slow: {
         match &instruction.op {
-          Op::Fallback => break 'run,
+          // The run ends before these: the engine activates a fallback,
+          // `run_segment` builds a constructor's value. Directly, not
+          // through `slow_op`: a constructor ends every segment that builds
+          // a value.
+          Op::Fallback | Op::SeqMake(_) | Op::TableMake(..) => break 'run,
           Op::Const(v) => value = v,
           Op::GetLocal(offset) => value = frames.slot_offset::<false>(*offset),
           Op::GetMesh(offset) => value = frames.slot_offset::<true>(*offset),
@@ -919,11 +927,17 @@ pub(crate) fn run<C: VmCalls>(
               }
               _ => break 'slow,
             };
-            if !(item.is_plain() && (*scratch).is_plain()) {
+            if !item.is_plain() {
               break 'slow;
             }
+            // Copied out first: the read ends here, even when the
+            // collection is the scratch itself (a value just built).
             let item = std::ptr::read(item);
-            std::ptr::write(scratch, item);
+            if (*scratch).is_plain() {
+              std::ptr::write(scratch, item);
+            } else {
+              replace_scratch(scratch, item);
+            }
             value = scratch;
           }
           Op::TakeSlot(slot) => {
@@ -934,11 +948,17 @@ pub(crate) fn run<C: VmCalls>(
               },
               _ => break 'slow,
             };
-            if !(item.is_plain() && (*scratch).is_plain()) {
+            if !item.is_plain() {
               break 'slow;
             }
+            // Copied out first: the read ends here, even when the
+            // collection is the scratch itself (a value just built).
             let item = std::ptr::read(item);
-            std::ptr::write(scratch, item);
+            if (*scratch).is_plain() {
+              std::ptr::write(scratch, item);
+            } else {
+              replace_scratch(scratch, item);
+            }
             value = scratch;
           }
           Op::AddIntConst(rhs) => {
@@ -1043,20 +1063,54 @@ pub(crate) fn run<C: VmCalls>(
           // first (one instruction on every operation). A new operation
           // adds its name here: a table entry, no code.
           Op::Push(b) if !C::METERED => {
-            value = match push_into(frames.slot(*b), value, scratch) {
-              Ok(v) => v,
-              Err(e) => return Err(*e),
-            };
+            let target = frames.slot(*b);
+            // A plain value onto another sequence that is uniquely owned
+            // and has room: a reference check and a write. Growing, copy
+            // on write, a sequence pushing itself and errors in
+            // `push_into`.
+            if !std::ptr::eq(value, target)
+              && (*value).is_plain()
+              && let Var::Seq(items) = &mut *target
+              && let Some(items) = std::sync::Arc::get_mut(items)
+              && items.len() < items.capacity()
+            {
+              // Room checked above: a write and the length, without
+              // `Vec::push`'s growth path in this loop.
+              let len = items.len();
+              std::ptr::write(items.as_mut_ptr().add(len), std::ptr::read(value));
+              items.set_len(len + 1);
+            } else {
+              value = match push_into(target, value, scratch) {
+                Ok(v) => v,
+                Err(e) => return Err(*e),
+              };
+            }
           }
-          Op::Push(_)
-          | Op::SeqMake(_)
-          | Op::TableMake(..)
-          | Op::Arith(..)
-          | Op::Compare(..)
-          | Op::Equal(..)
-          | Op::Count
-          | Op::VmCall
-          | Op::Clear(_) => break 'slow,
+          // Typed arithmetic and numeric comparison on plain operands
+          // (`arith_into`, `compare_into`), as `math::arith` and
+          // `shards::compare` compute them; mixed shapes, overflow,
+          // division by zero and NaN comparisons go to the slow tier.
+          Op::Arith(op, rhs) => {
+            let rhs = match rhs {
+              Operand::Const(v) => v,
+              Operand::Bound(b) => &*frames.slot(*b),
+            };
+            if !arith_into(*op, &*value, rhs, numeric) {
+              break 'slow;
+            }
+            value = numeric;
+          }
+          Op::Compare(cmp, rhs) => {
+            let rhs = match rhs {
+              Operand::Const(v) => v,
+              Operand::Bound(b) => &*frames.slot(*b),
+            };
+            if !compare_into(*cmp, &*value, rhs, numeric) {
+              break 'slow;
+            }
+            value = numeric;
+          }
+          Op::Push(_) | Op::Equal(..) | Op::Count | Op::VmCall | Op::Clear(_) => break 'slow,
         }
         #[cfg(any(debug_assertions, feature = "output-checks"))]
         leaf::check_output(instruction.check.0, instruction.check.1, &*value)?;
@@ -1134,7 +1188,10 @@ const STOP: usize = usize::MAX - 1;
 const FAIL: usize = usize::MAX;
 
 /// The slow tier: every operation in full, the hot tier's included (their
-/// cases the hot arms leave: a value owning storage, a failure). One
+/// cases the hot arms leave: a value owning storage, a failure). Not a
+/// whole interpreter on its own: it never takes a jump. A jump reaches it
+/// only when its condition is not a Bool (or a loop counter not an Int), to
+/// fail; the hot tier takes every valid jump. One
 /// function behind one call site in `run`, so `run`'s code does not depend
 /// on what is here. Marked cold so the compiler keeps `run`'s registers for
 /// the hot path and spills around this call only.
@@ -1399,8 +1456,9 @@ fn arith_name(op: BinOp) -> &'static str {
 /// storage (a Take copies its element out).
 #[inline(never)]
 unsafe fn copy_into(target: *mut Var, value: *const Var) {
-  // SAFETY: see above.
-  unsafe { assign_copy(&mut *target, &*value) }
+  // SAFETY: see above. `run` sends here only when one of them owns
+  // storage, so the plain test is not repeated.
+  unsafe { assign_copy_owning(&mut *target, &*value) }
 }
 
 /// `Push`, from `run`'s hot tier: a small function of its own, as
@@ -1440,6 +1498,75 @@ unsafe fn push_into(
     }
     Ok(value)
   }
+}
+
+/// Replaces an owned scratch with a plain value, releasing it: a `Take` of
+/// a plain value out of a collection the scratch holds (one a constructor
+/// just built). A small function of its own, as `copy_into`; through the
+/// slow tier this cost a constructed table's read about 55 instructions.
+///
+/// SAFETY: `scratch` is the run's scratch, reached through its tier
+/// pointer, and nothing reads it during the call.
+#[inline(never)]
+unsafe fn replace_scratch(scratch: *mut Var, value: Var) {
+  // SAFETY: see above.
+  unsafe { assign(&mut *scratch, value) }
+}
+
+/// `Arith` on two numbers or two vectors of the same size, written to
+/// `numeric`, as `math::arith` computes them (the same `BinOp` methods);
+/// `false` for anything else, which the slow tier handles (mixed shapes,
+/// integer overflow, division by zero). A small function of its own: in
+/// `run`, its per-operation and per-component dispatch grew the loop to 926
+/// instructions and slowed every plain operation; through the slow tier, the
+/// entity tick's `Float3` add paid that tier's prologue and second dispatch.
+///
+/// SAFETY: `numeric` is the run's numeric slot, reached through its tier
+/// pointer; neither operand is it while it is written (both are read first).
+#[inline(never)]
+unsafe fn arith_into(op: BinOp, value: &Var, rhs: &Var, numeric: *mut Var) -> bool {
+  let result = match (value, rhs) {
+    (Var::Int(a), Var::Int(b)) => match op.int(*a, *b) {
+      Some(r) => Var::Int(r),
+      None => return false,
+    },
+    (Var::Float(a), Var::Float(b)) => Var::Float(op.f64(*a, *b)),
+    (Var::Float2(a), Var::Float2(b)) => Var::float2(op.f32(a[0], b[0]), op.f32(a[1], b[1])),
+    (Var::Float3(a), Var::Float3(b)) => {
+      Var::float3(op.f32(a[0], b[0]), op.f32(a[1], b[1]), op.f32(a[2], b[2]))
+    }
+    (Var::Float4(a), Var::Float4(b)) => Var::float4(
+      op.f32(a[0], b[0]),
+      op.f32(a[1], b[1]),
+      op.f32(a[2], b[2]),
+      op.f32(a[3], b[3]),
+    ),
+    _ => return false,
+  };
+  // SAFETY: see above; a numeric result owns nothing.
+  unsafe { std::ptr::write(numeric, result) };
+  true
+}
+
+/// `Compare` of two Ints or two Floats, written to `numeric` as
+/// `shards::compare` orders them; `false` for anything else (mixed numbers,
+/// NaN, other kinds), which the slow tier handles. Out of line as
+/// `arith_into`: in `run` it slowed the plain operations.
+///
+/// SAFETY: as `arith_into`.
+#[inline(never)]
+unsafe fn compare_into(cmp: Cmp, value: &Var, rhs: &Var, numeric: *mut Var) -> bool {
+  let ordering = match (value, rhs) {
+    (Var::Int(a), Var::Int(b)) => a.cmp(b),
+    (Var::Float(a), Var::Float(b)) => match a.partial_cmp(b) {
+      Some(o) => o,
+      None => return false,
+    },
+    _ => return false,
+  };
+  // SAFETY: see above; a Bool owns nothing.
+  unsafe { std::ptr::write(numeric, Var::Bool(cmp.holds(ordering))) };
+  true
 }
 
 /// Out of line so `run`'s own frame stays small: a VM call's state would
