@@ -1,5 +1,5 @@
 [package]
-name = "shards-esp32"
+name = "otter-esp32"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ publish = false
 resolver = "3"
 
 [[bin]]
-name = "shards-esp32"
+name = "otter-esp32"
 harness = false
 
 [features]
@@ -18,8 +18,8 @@ acceptance = ["dep:syn", "dep:quote"]
 
 [dependencies]
 esp-idf-sys = { version = "=0.38.1", features = ["binstart"] }
-shards-core = { path = "../../crates/shards-core", default-features = false }
-shards-lang = { path = "../../crates/shards-lang", default-features = false }
+otter-core = { path = "../../crates/otter-core", default-features = false }
+otter-lang = { path = "../../crates/otter-lang", default-features = false }
 
 [build-dependencies]
 syn = { version = "2", features = ["full", "parsing"], optional = true }

@@ -8,7 +8,7 @@
 
 > **Update (2026-10-04):** The **Shards 2.0 Rust core** is now the top engineering priority: a new repo and a new runtime implementation, designed in [`shards-2-compose-split.md`](shards-2-compose-split.md). The strategy in this document still holds. Items that touch the runtime (3.5 residency, 3.6 capabilities, 3.7 performance) target the 2.0 core rather than 1.x. 1.x work that is already shipped (3.1 `check`, 3.2 agent CLI and skill) carries over. See §6 for the updated sequencing.
 >
-> **Progress (2026-10-04):** the 2.0 core prototype exists in the private `sinkingsugar/shards2` repo and validates the design: compose output is shared across instances, two schedulers (stackful and stackless) pass the same acceptance suite, and real async I/O works through one shared implementation. **The stackless scheduler is the default; both are maintained**, one backend per mesh. Results, including matched comparisons with 1.x, are in that repo's `docs/stackless-experiment.md`.
+> **Progress (2026-10-04):** the 2.0 core prototype exists in the private `sinkingsugar/otter` repo and validates the design: compose output is shared across instances, two schedulers (stackful and stackless) pass the same acceptance suite, and real async I/O works through one shared implementation. **The stackless scheduler is the default; both are maintained**, one backend per mesh. Results, including matched comparisons with 1.x, are in that repo's `docs/stackless-experiment.md`.
 
 ---
 

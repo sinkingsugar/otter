@@ -15,17 +15,17 @@ fn acceptance() {
   use syn::{Item, parse_quote};
   let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
   for (name, path) in [
-    ("prototype", "../../crates/shards-core/tests/prototype.rs"),
-    ("metadata", "../../crates/shards-core/tests/metadata.rs"),
+    ("prototype", "../../crates/otter-core/tests/prototype.rs"),
+    ("metadata", "../../crates/otter-core/tests/metadata.rs"),
     (
       "host_contract",
-      "../../crates/shards-core/tests/host_contract.rs",
+      "../../crates/otter-core/tests/host_contract.rs",
     ),
-    ("registry", "../../crates/shards-core/tests/registry.rs"),
-    ("functions", "../../crates/shards-core/tests/functions.rs"),
-    ("values", "../../crates/shards-core/tests/values.rs"),
-    ("lang", "../../crates/shards-lang/tests/lang.rs"),
-    ("trampoline", "../../crates/shards-core/tests/trampoline.rs"),
+    ("registry", "../../crates/otter-core/tests/registry.rs"),
+    ("functions", "../../crates/otter-core/tests/functions.rs"),
+    ("values", "../../crates/otter-core/tests/values.rs"),
+    ("lang", "../../crates/otter-lang/tests/lang.rs"),
+    ("trampoline", "../../crates/otter-core/tests/trampoline.rs"),
   ] {
     println!("cargo:rerun-if-changed={path}");
     // This shared frontend fixture is relative to tests/lang.rs; retain its

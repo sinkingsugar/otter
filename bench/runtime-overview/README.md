@@ -8,7 +8,7 @@ benchmark-harness edits. The full VM suite is stored separately under
 Run sequentially, without other benchmarks/builds:
 
 ```sh
-cargo build --release -p shards-core -p shards-io --examples
+cargo build --release -p otter-core -p otter-io --examples
 python3 bench/runtime-overview/run.py ../shards/build/Release/shards /tmp/scheduler.json 2
 bash bench/http-concurrency/run.sh ../shards/build/Release/shards 3 > /tmp/http.txt
 ```

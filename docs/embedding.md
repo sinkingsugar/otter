@@ -1,22 +1,22 @@
-# Embedding Shards 2.0 and Writing Host Shards
+# Embedding Otter and Writing Host Shards
 
-How a Rust program (the host) adds its own shards and runs Shards scripts on them. The complete example, a host crate with a leaf shard, a blocking shard, a catalog and a script, is [`crates/shards-cli/tests/embedding.rs`](../crates/shards-cli/tests/embedding.rs). It is a test, so it stays correct; copy from it.
+How a Rust program (the host) adds its own shards and runs Shards scripts on them. The complete example, a host crate with a leaf shard, a blocking shard, a catalog and a script, is [`crates/otter-cli/tests/embedding.rs`](../crates/otter-cli/tests/embedding.rs). It is a test, so it stays correct; copy from it.
 
 ## 1. Crates
 
-- `shards-core`: values, types, the shard traits, compose, and the scheduler (`Mesh`).
-- `shards-lang`: source to wire definitions, `check` and `run`.
-- `shards-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work.
+- `otter-core`: values, types, the shard traits, compose, and the scheduler (`Mesh`).
+- `otter-lang`: source to wire definitions, `check` and `run`.
+- `otter-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work.
 
 Depend on them by path or git. Host shards live in the host's own crate, and nothing in this repository needs to know about them.
 
-**Build with the same flags.** Native builds here align branch targets (`.cargo/config.toml`: `-C llvm-args=-align-all-nofallthru-blocks=4` for aarch64 and x86_64), and the runtime's measured speed assumes it: without it the VM's speed depends on where unrelated code lands, up to 40 percent either way ([runtime overview](runtime-performance-overview.md), lesson 7). A host's own workspace does not inherit that file; copy the `[target...]` entry into the host's `.cargo/config.toml`. A release build of `shards-core` without it prints a warning (shown for path and workspace dependencies).
+**Build with the same flags.** Native builds here align branch targets (`.cargo/config.toml`: `-C llvm-args=-align-all-nofallthru-blocks=4` for aarch64 and x86_64), and the runtime's measured speed assumes it: without it the VM's speed depends on where unrelated code lands, up to 40 percent either way ([runtime overview](runtime-performance-overview.md), lesson 7). A host's own workspace does not inherit that file; copy the `[target...]` entry into the host's `.cargo/config.toml`. A release build of `otter-core` without it prints a warning (shown for path and workspace dependencies).
 
 ## 2. A host shard
 
 Every shard has one static description (`ShardDesc`). Its name, version, help, parameters, input and output come from there, and the decoder, catalog and documentation all read it. Prefix host shard names with a namespace (`Host.Reading`) so they cannot collide with core names; `Catalog::new` rejects duplicates, aliases included.
 
-Declare `effects: Effects` and `lifetime: Lifetime` from `shards_core::signature` in the description. Effects describe potential suspension, I/O, time, randomness and unknown behavior; use `Effects::NONE` only for operations with none of these. `ShardDesc::undocumented` defaults to unknown effects and lifetime. This is a trusted host contract. Stateless describes semantic lifetime: temporary state retained during a suspended operation does not make a shard stateful; state remembered across invocations does.
+Declare `effects: Effects` and `lifetime: Lifetime` from `otter_core::signature` in the description. Effects describe potential suspension, I/O, time, randomness and unknown behavior; use `Effects::NONE` only for operations with none of these. `ShardDesc::undocumented` defaults to unknown effects and lifetime. This is a trusted host contract. Stateless describes semantic lifetime: temporary state retained during a suspended operation does not make a shard stateful; state remembered across invocations does.
 
 Compose records mesh reads through `ComposeCtx::read_var` (also used by `Operand`) and writes through `mark_initialized`. A read-modify-write must use both. `var` is only a binding lookup and records no read. Use the compose helpers for child flows and wires so their effects and mesh access are included. `CompiledWire::signature()` exposes exact composed types and inferred mesh access; `ShardDesc::signature()` exposes native metadata through the same owned-or-borrowed view.
 
@@ -25,8 +25,8 @@ Choose the trait by what the shard does:
 | The shard | Implement | Notes |
 |---|---|---|
 | Returns at once (reads, computes, converts) | `LeafShard` | "Leaf" means it never suspends, not that it does little work. |
-| Does slow or blocking work (a long scan, a blocking library call, human-paced input) | `AsyncShard`, with `shards_io::runtime::spawn_blocking` | The work runs on the blocking pool. Only the waiting instance suspends; other wires keep running. |
-| Waits on async I/O | `AsyncShard`, with `shards_io::runtime::spawn` | Race every await against the cancellation token. |
+| Does slow or blocking work (a long scan, a blocking library call, human-paced input) | `AsyncShard`, with `otter_io::runtime::spawn_blocking` | The work runs on the blocking pool. Only the waiting instance suspends; other wires keep running. |
+| Waits on async I/O | `AsyncShard`, with `otter_io::runtime::spawn` | Race every await against the cancellation token. |
 | Runs nested flows: a retry, a timeout, a lock, a UI container | `ControlShard` | Its flows are parameters; the engine runs them, suspensions included. See below. |
 
 ### Control flow
@@ -35,7 +35,7 @@ A shard that runs flows the script passes it implements `ControlShard` and is at
 
 The engine runs the flows; the shard decides. `resume(compiled, state, ctx, input, completion)` is called when the shard is reached (`completion` is `None`) and again with each flow's outcome, `Ok(output)` or the error it failed with. It returns `ControlStep::Enter(index, input)` to run flow `index` with that input, or `ControlStep::Complete(value)` to finish; returning an error fails the shard, and returning an error it received propagates it. A flow may suspend: the instance yields, and `resume` is called again only when the flow finishes. A `Stop`, `Restart` or `Return` inside a flow propagates without calling `resume`. `State` (a `Default` type) holds the progress of one activation, such as an attempt count or a start time; the engine sets it back to its default whenever the shard completes or a signal passes through, and drops it on cleanup, so it never holds a resource. Cancellation while a flow is suspended cleans up that flow's state like any other.
 
-The core's `Maybe` is written this way (`shards/control.rs`), as is the `Test.Retry` example in `crates/shards-lang/tests/lang.rs`. The full `Shard` contract's `control` hook remains the core's own.
+The core's `Maybe` is written this way (`shards/control.rs`), as is the `Test.Retry` example in `crates/otter-lang/tests/lang.rs`. The full `Shard` contract's `control` hook remains the core's own.
 
 A script can also write control flow itself: a function parameter declared `Flow(input: T output: U)` takes a block, which the body runs with `Run` ([metaprogramming.md §3](metaprogramming.md#3-m9-flow-parameters)).
 
@@ -52,7 +52,7 @@ Compose runs once per wire shape, and its result is shared by every instance. It
 - **Never touch the host in compose** (process memory, files, devices, the clock). Do that at activation.
 - **Return precise output types.** A fixed record is `Type::fixed_table([...])`, so `r.key` composes to that field's type and a typo is a compose error with suggestions. A value that may be unknown is `Type::union([T, Type::none()])`; at runtime it is an explicit `none`, never a guess. Every key of a fixed table is present at runtime.
 - **Input types are enforced from the description.** `InputDesc::Types(&[...])` is checked before your compose runs, with a located `input-type-mismatch`; do not repeat it. When a type list cannot say the input (a record with given keys, `[Int]`), declare the full type with `InputDesc::Typed(record_type)`, a `fn() -> Type`, and a record missing a key fails `check` instead of failing at runtime. `InputDesc::Any` leaves the input to your compose. A shard that produces a value without using its input declares `InputDesc::Ignored` and accepts any input type, so it can start a statement anywhere.
-- **Produced values are checked against the compose output type** in debug builds (and in release with shards-core's `output-checks` feature): a leaf or async shard whose value drifts from the type it declared, for example a missing table key, fails the instance with a message naming the shard.
+- **Produced values are checked against the compose output type** in debug builds (and in release with otter-core's `output-checks` feature): a leaf or async shard whose value drifts from the type it declared, for example a missing table key, fails the instance with a message naming the shard.
 - **Report problems as structured diagnostics** (`Error::Diagnostic(Diagnostic::new(Phase::Compose, kind, code, message).shard(..).param(..))`). The frontend adds file, line, column and the occurrence path.
 
 ### Activation
@@ -68,16 +68,16 @@ Compose runs once per wire shape, and its result is shared by every instance. It
 Build one catalog from the core list and the host's list:
 
 ```rust
-Catalog::new(&[shards_core::shards::CATALOG, HOST_CATALOG])
+Catalog::new(&[otter_core::shards::CATALOG, HOST_CATALOG])
 ```
 
-Add `shards_io::CATALOG` if scripts use `Http.Get`. Then:
+Add `otter_io::CATALOG` if scripts use `Http.Get`. Then:
 
-- **Check without running:** `shards_lang::check(Source::new(path, text), &catalog, &defines)`. It returns the 1.x `{ok, file, diagnostics}` JSON envelope (`to_json()`), and `shards_lang::render` prints a diagnostic for humans.
+- **Check without running:** `otter_lang::check(Source::new(path, text), &catalog, &defines)`. It returns the 1.x `{ok, file, diagnostics}` JSON envelope (`to_json()`), and `otter_lang::render` prints a diagnostic for humans.
 - **Run:** `Program::load(source, &catalog, &defines)`, then `program.run()`. The report has each entry wire's outcome, plus failures of spawned instances.
 - **Script arguments:** `defines` maps `name` to a string, read as `@name` in scripts.
 - **Files:** `@include("lib.shs")` and `@read("data.txt")` (or `@read("blob.bin" bytes: true)`) read files while the program loads, relative to the file naming them. `Program::load` and `check` read the filesystem (`FsFiles`); `Program::load_with`, `check_with` and `Session::set_files` take any `Files`: `FsFiles { include_paths }` searches more directories after the including file's (the CLI's `-I`), and `MemoryFiles` holds files by name, for a host without a filesystem (a device carrying its scripts in flash) and for tests. A host's own `Files` implements `resolve` (the file a path names, pushing every name it looks at, found or not, to `looked`) and `contents` (a file's bytes now, by that name). `Program::files` and `Session::files_read` list what a program read; `FileWatcher` reloads when any name its last load looked at changes, compared by exact bytes through the session's `Files`: an edit, a file created where a missing include was looked for, or one created earlier in the search order. A file is included once per program however often it is named. Diagnostics name the file they are in.
-- **Logging:** `Log` writes to standard output; values print as text: whole floats without `.0`, other floats exact (1.x rounded to six digits). A host shard can log with `shards_core::log::emit`. `shards_core::log::capture` collects the lines a run logs, including lines logged by work it started through `shards_io` on other threads, which is useful in host tests.
+- **Logging:** `Log` writes to standard output; values print as text: whole floats without `.0`, other floats exact (1.x rounded to six digits). A host shard can log with `otter_core::log::emit`. `otter_core::log::capture` collects the lines a run logs, including lines logged by work it started through `otter_io` on other threads, which is useful in host tests.
 
 The language is the 1.x syntax with the changes in [surface-syntax-review.md](surface-syntax-review.md) and the deviations listed in [current-state.md](current-state.md). The ones scripts hit most:
 
@@ -96,7 +96,7 @@ Test host shards through scripts, as `embedding.rs` does: `Program::load`, then 
 
 ## 5. Warm sessions and hot reload
 
-Use `shards_lang::Session` when the host owns its event loop and long-lived
+Use `otter_lang::Session` when the host owns its event loop and long-lived
 services. Keep connections and other expensive resources in the host and
 look them up during shard activation. The same API runs on native, WASI and
 ESP-IDF.
@@ -106,7 +106,7 @@ There are two replacement modes:
 - **`reload_preserving`** keeps unchanged callers, locals, `Keep` and
   `Once` state, mesh values and suspended execution. Edited function bodies
   are selected at their next call (golden path §11). This is what
-  `shards2 watch` uses.
+  `otter watch` uses.
 - **`reload`** explicitly restarts the whole program on a fresh mesh. All
   script and mesh state, including host-declared mesh-variable schemas, is
   discarded. Host services owned outside the mesh survive either mode.
@@ -153,7 +153,7 @@ reset, and so does native shard state inside the body, since no shard
 declares a compatibility contract yet. Resets happen at the call site's
 next entry. Whether a reset is acceptable is the host's policy
 (`ResetPolicy`): a `Session` rejects such edits by default
-(`reload-resets-state`), and `shards2 watch` applies them, since running
+(`reload-resets-state`), and `otter watch` applies them, since running
 watch is the opt-in. `Session::reload_report` (and the `report` on
 `WatchEvent::Reloaded`) lists what was retained, reset and restarted, by
 name.
@@ -207,7 +207,7 @@ strict worker quiescence must enforce it in its service before admitting new
 work. Preserving an in-flight invocation avoids restarting that call, but
 does not solve every host-side cancellation race.
 
-Offline tests in `crates/shards-cli/tests/embedding.rs` verify warm service
+Offline tests in `crates/otter-cli/tests/embedding.rs` verify warm service
 reuse, cancellation on full reload, and pending-operation completion across
 preserving reload. The shared frontend suite verifies caller counters,
 unchanged `Once` state, deep call boundaries, mesh values, incompatible
@@ -218,8 +218,8 @@ Hosts can use the same pattern with recorded inputs to test without live I/O.
 ### Watching a file
 
 ```sh
-cargo run -p shards-cli -- watch live.shs
-cargo run -p shards-cli -- watch live.shs key:value
+cargo run -p otter-cli -- watch live.shs
+cargo run -p otter-cli -- watch live.shs key:value
 ```
 
 The CLI polls contents every 100 ms and requires two identical samples before
@@ -237,18 +237,18 @@ the same process. Enter `q`, send Ctrl-C, or close stdin to
 cancel the execution and exit cleanly. Successful shutdown does not mean
 every revision ran successfully.
 
-Embedding hosts can reuse the same watcher through `shards_lang::FileWatcher`.
+Embedding hosts can reuse the same watcher through `otter_lang::FileWatcher`.
 It owns content comparison, the two-sample save check, rejected-revision
 suppression, preserving reload and tick pacing. It installs no keyboard,
 signal, logging or async-runtime handlers. For a blocking host loop:
 
 ```rust
-use shards_core::Catalog;
-use shards_lang::{FileWatcher, Session, WatchControl, WatchEvent};
+use otter_core::Catalog;
+use otter_lang::{FileWatcher, Session, WatchControl, WatchEvent};
 use std::collections::HashMap;
 use std::sync::mpsc;
 
-let catalog = Catalog::new(&[shards_core::shards::CATALOG]).unwrap();
+let catalog = Catalog::new(&[otter_core::shards::CATALOG]).unwrap();
 let mut session = Session::new(); // or Session::with_mesh(...)
 let (commands, input) = mpsc::channel::<WatchControl>();
 // Hand `commands` to your UI/input thread. Send Restart or Stop as needed.
@@ -257,7 +257,7 @@ FileWatcher::new("live.shs").run(
     || input.try_recv().unwrap_or(WatchControl::Continue),
     |event| match event {
         WatchEvent::Rejected { source, diagnostics } => {
-            for d in diagnostics { eprint!("{}", shards_lang::render(&d, &source)); }
+            for d in diagnostics { eprint!("{}", otter_lang::render(&d, &source)); }
         }
         WatchEvent::ReadError(error) => eprintln!("{error}"),
         WatchEvent::Reloaded { finished, .. }

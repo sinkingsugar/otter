@@ -1,5 +1,5 @@
-// Steady-state benchmark for Shards 1.x, matched with shards2's
-// `bench_instances` entity (crates/shards-core/src/bench.rs): the same shard
+// Steady-state benchmark for Shards 1.x, matched with otter's
+// `bench_instances` entity (crates/otter-core/src/bench.rs): the same shard
 // sequence, one Pause per iteration (two ticks per iteration).
 // Spawns `instances` entities, waits until all ran once, warms up 10 ticks,
 // then times `ticks` ticks as a batch and counts completed iterations

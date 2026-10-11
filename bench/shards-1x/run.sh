@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs the 1.x side of the matched scheduler comparison (shards2's
+# Runs the 1.x side of the matched scheduler comparison (otter's
 # docs/stackless-experiment.md): steady state, and resume cost vs depth.
 # Usage: bench/shards-1x/run.sh path/to/1.x/shards [runs]
 set -eu
@@ -20,7 +20,7 @@ for n in 100 1000 10000; do
   done
 done
 
-# Depth script: matched with shards2's bench_depth. `depth` nested Do wires,
+# Depth script: matched with otter's bench_depth. `depth` nested Do wires,
 # then a bottom wire that increments a counter and pauses forever, so every
 # measured tick is a pure resume (expected resumes: instances * ticks).
 gen_depth() {

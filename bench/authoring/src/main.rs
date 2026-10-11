@@ -1,26 +1,26 @@
 //! Authoring eval runner (docs/golden-path.md §8).
 //!
 //! ```text
-//! authoring-eval verify [--shards2 PATH]
-//! authoring-eval reference [--variant NAME] [--shards2 PATH]
+//! authoring-eval verify [--otter PATH]
+//! authoring-eval reference [--variant NAME] [--otter PATH]
 //! authoring-eval run --model NAME --cmd "<shell command>" --out FILE
 //!     [--format text|claude-json] [--variant NAME] [--rounds N] [--jobs N]
-//!     [--trials N] [--only TEXT] [--transcripts DIR] [--shards2 PATH]
+//!     [--trials N] [--only TEXT] [--transcripts DIR] [--otter PATH]
 //! ```
 //!
 //! `verify` checks every task's reference solution against its expected
 //! output, without a model. `reference` prints what the model receives:
 //! the variant's language primer (`reference/<variant>.md`) followed by
-//! `shards2 catalog` and `shards2 describe` for every shard.
+//! `otter catalog` and `otter describe` for every shard.
 //!
 //! `run` sends each task with the reference to `sh -c <cmd>` on stdin,
 //! from an empty temporary directory, and reads the reply from stdout
 //! (`text`), or from Claude Code's `--output-format json` envelope
 //! (`claude-json`, which also reports tokens and the resolved model). The
 //! last complete fenced code block of the reply is the program.
-//! `shards2 check --json` diagnostics go back to the model for at most
+//! `otter check --json` diagnostics go back to the model for at most
 //! `--rounds` repairs (default 5); a program that checks is then run with
-//! `shards2 run --json` and its log compared with the task's expected
+//! `otter run --json` and its log compared with the task's expected
 //! lines. One CSV row per task and trial is appended to `--out` as it
 //! finishes.
 
@@ -32,11 +32,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage:
-  authoring-eval verify [--shards2 PATH]
-  authoring-eval reference [--variant NAME] [--shards2 PATH]
+  authoring-eval verify [--otter PATH]
+  authoring-eval reference [--variant NAME] [--otter PATH]
   authoring-eval run --model NAME --cmd \"<shell command>\" --out FILE
       [--format text|claude-json] [--variant NAME] [--rounds N] [--jobs N]
-      [--trials N] [--only TEXT] [--transcripts DIR] [--shards2 PATH]";
+      [--trials N] [--only TEXT] [--transcripts DIR] [--otter PATH]";
 
 const CSV_HEADER: &str = "Task,Model,ModelId,Variant,Trial,SemanticSuccess,FirstPassSuccess,\
 FirstFailure,RepairRounds,Tokens,OutputTokens,LatencyMs,Failure";
@@ -195,12 +195,9 @@ fn kill_group(pid: u32) {
   let _ = pid;
 }
 
-/// An absolute path to `shards2`: commands run from scratch directories.
-fn shards2_path(explicit: Option<&str>) -> Result<PathBuf, String> {
-  let found = match explicit
-    .map(str::to_string)
-    .or(std::env::var("SHARDS2").ok())
-  {
+/// An absolute path to `otter`: commands run from scratch directories.
+fn otter_path(explicit: Option<&str>) -> Result<PathBuf, String> {
+  let found = match explicit.map(str::to_string).or(std::env::var("OTTER").ok()) {
     Some(p) => PathBuf::from(p),
     None => {
       // Where cargo builds: `CARGO_TARGET_DIR` when set, so a stale
@@ -210,17 +207,15 @@ fn shards2_path(explicit: Option<&str>) -> Result<PathBuf, String> {
         .unwrap_or_else(|| manifest_dir().join("../../target"));
       ["release", "debug"]
         .iter()
-        .map(|profile| target.join(profile).join("shards2"))
+        .map(|profile| target.join(profile).join("otter"))
         .find(|p| p.exists())
-        .ok_or(
-          "shards2 not found: build it (`cargo build --release -p shards-cli`) or pass --shards2",
-        )?
+        .ok_or("otter not found: build it (`cargo build --release -p otter-cli`) or pass --otter")?
     }
   };
   std::fs::canonicalize(&found).map_err(|e| format!("{}: {e}", found.display()))
 }
 
-fn shards2(bin: &Path, args: &[&str], cwd: &Path) -> Result<Output, String> {
+fn otter(bin: &Path, args: &[&str], cwd: &Path) -> Result<Output, String> {
   let mut cmd = Command::new(bin);
   cmd.args(args).current_dir(cwd);
   run_with_timeout(cmd, "", SHARDS_TIMEOUT)
@@ -234,21 +229,21 @@ fn reference(bin: &Path, variant: &str) -> Result<String, String> {
   let primer =
     std::fs::read_to_string(&primer_path).map_err(|e| format!("{}: {e}", primer_path.display()))?;
   let cwd = std::env::temp_dir();
-  let index = shards2(bin, &["catalog"], &cwd)?;
+  let index = otter(bin, &["catalog"], &cwd)?;
   if index.status != Some(0) {
-    return Err(format!("shards2 catalog failed: {}", index.stderr));
+    return Err(format!("otter catalog failed: {}", index.stderr));
   }
   let json: serde_json::Value =
     serde_json::from_str(&index.stdout).map_err(|e| format!("catalog json: {e}"))?;
   let mut out = primer.trim_end().to_string();
-  out.push_str("\n\n## Shard catalog\n\nOne `shards2 describe` record per shard:\n\n");
+  out.push_str("\n\n## Shard catalog\n\nOne `otter describe` record per shard:\n\n");
   for shard in json["shards"].as_array().ok_or("catalog: no shards")? {
     let name = shard["name"]
       .as_str()
       .ok_or("catalog: shard without name")?;
-    let d = shards2(bin, &["describe", name], &cwd)?;
+    let d = otter(bin, &["describe", name], &cwd)?;
     if d.status != Some(0) {
-      return Err(format!("shards2 describe {name} failed: {}", d.stderr));
+      return Err(format!("otter describe {name} failed: {}", d.stderr));
     }
     out.push_str(d.stdout.trim());
     out.push('\n');
@@ -282,7 +277,7 @@ struct Verdict {
   detail: String,
 }
 
-/// The verdict of a `shards2 run --json` report: the run must succeed and
+/// The verdict of a `otter run --json` report: the run must succeed and
 /// log exactly the expected lines. Wire results are not part of the log.
 fn judge(report: &serde_json::Value, expected: &[String]) -> (bool, &'static str) {
   let log: Vec<&str> = report["log"].as_array().map_or(Vec::new(), |l| {
@@ -299,7 +294,7 @@ fn judge(report: &serde_json::Value, expected: &[String]) -> (bool, &'static str
 
 /// Runs a checked program and compares its log with the expected lines.
 fn test(bin: &Path, dir: &Path, expected: &[String]) -> Result<Verdict, String> {
-  let run = shards2(bin, &["run", "--json", "solution.shs"], dir)?;
+  let run = otter(bin, &["run", "--json", "solution.shs"], dir)?;
   let detail = format!(
     "exit {:?}\n{}\nstderr:\n{}",
     run.status,
@@ -344,7 +339,7 @@ impl Drop for Scratch {
 /// Checks a program in `dir`; returns the report and whether it is ok.
 fn check(bin: &Path, dir: &Path, program: &str) -> Result<(serde_json::Value, String), String> {
   std::fs::write(dir.join("solution.shs"), program).map_err(|e| e.to_string())?;
-  let out = shards2(bin, &["check", "--json", "solution.shs"], dir)?;
+  let out = otter(bin, &["check", "--json", "solution.shs"], dir)?;
   let json: serde_json::Value = serde_json::from_str(out.stdout.trim())
     .map_err(|e| format!("check --json: {e}: {}{}", out.stdout, out.stderr))?;
   Ok((json, out.stdout.trim().to_string()))
@@ -475,8 +470,8 @@ fn extract_program(reply: &str) -> Option<String> {
   last
 }
 
-const INSTRUCTIONS: &str = "The program is checked with `shards2 check` and then run with \
-`shards2 run`; the lines it logs are compared exactly with the expected output, so log nothing \
+const INSTRUCTIONS: &str = "The program is checked with `otter check` and then run with \
+`otter run`; the lines it logs are compared exactly with the expected output, so log nothing \
 else. Reply with the complete program in a single fenced code block and nothing else.";
 
 fn first_prompt(config: &RunConfig, task: &Task) -> String {
@@ -489,7 +484,7 @@ fn first_prompt(config: &RunConfig, task: &Task) -> String {
 
 fn repair_prompt(config: &RunConfig, task: &Task, program: &str, report: &str) -> String {
   format!(
-    "{}\nYour previous program:\n```shards\n{}```\n\n`shards2 check --json` reported:\n{}\n\n\
+    "{}\nYour previous program:\n```shards\n{}```\n\n`otter check --json` reported:\n{}\n\n\
      Fix the program. {INSTRUCTIONS}\n",
     first_prompt(config, task),
     program,
@@ -720,10 +715,10 @@ fn main_inner() -> Result<bool, String> {
   let args = parse_args()?;
   let flag = |n: &str| args.flags.get(n).map(String::as_str);
   let known: &[&str] = match args.command.as_str() {
-    "verify" => &["shards2"],
-    "reference" => &["shards2", "variant"],
+    "verify" => &["otter"],
+    "reference" => &["otter", "variant"],
     "run" => &[
-      "shards2",
+      "otter",
       "variant",
       "model",
       "cmd",
@@ -740,7 +735,7 @@ fn main_inner() -> Result<bool, String> {
   if let Some(unknown) = args.flags.keys().find(|k| !known.contains(&k.as_str())) {
     return Err(format!("unknown option --{unknown}"));
   }
-  let bin = shards2_path(flag("shards2"))?;
+  let bin = otter_path(flag("otter"))?;
   let variant = flag("variant").unwrap_or("current").to_string();
   match args.command.as_str() {
     "verify" => verify(&bin),
@@ -877,12 +872,12 @@ mod tests {
   /// so the tasks stay solvable as the language changes.
   #[test]
   fn reference_solutions_pass() {
-    let catalog = shards_core::Catalog::new(&[shards_core::shards::CATALOG]).unwrap();
+    let catalog = otter_core::Catalog::new(&[otter_core::shards::CATALOG]).unwrap();
     for task in load_tasks(None).unwrap() {
-      let source = shards_lang::Source::new(&task.id, task.reference.clone().unwrap());
-      let program = shards_lang::Program::load(source, &catalog, &Default::default())
+      let source = otter_lang::Source::new(&task.id, task.reference.clone().unwrap());
+      let program = otter_lang::Program::load(source, &catalog, &Default::default())
         .unwrap_or_else(|(_, d)| panic!("{}: {d:?}", task.id));
-      let (report, lines) = shards_core::log::capture(|| program.run().unwrap());
+      let (report, lines) = otter_core::log::capture(|| program.run().unwrap());
       assert!(report.succeeded(), "{}", task.id);
       assert_eq!(lines, task.expected, "{}", task.id);
     }

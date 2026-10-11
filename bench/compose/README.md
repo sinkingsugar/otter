@@ -2,7 +2,7 @@
 
 What loading and composing scripts costs, and a preserving reload. It started with compose-time evaluation (M8): a constant read in many places is one shared value, and compose had walked such values path by path, so a few lines of script took seconds and gigabytes. These checks keep that from coming back unnoticed, in three layers.
 
-## Tests: `crates/shards-lang/tests/compose_cost.rs`
+## Tests: `crates/otter-lang/tests/compose_cost.rs`
 
 These run in `cargo test` (native only) and use no timing:
 
@@ -13,12 +13,12 @@ These run in `cargo test` (native only) and use no timing:
 
 Against the core before the fixes (30677d3), the allocation ratios fail at 530× and 370×, and the watchdog fails the walks.
 
-## Benchmark: `crates/shards-lang/examples/bench_compose.rs`
+## Benchmark: `crates/otter-lang/examples/bench_compose.rs`
 
 ```sh
-cargo run --release -p shards-lang --example bench_compose
-cargo run --release -p shards-lang --example bench_compose -- --check bench/compose/baseline.txt
-cargo run --release -p shards-lang --example bench_compose -- --write bench/compose/baseline.txt
+cargo run --release -p otter-lang --example bench_compose
+cargo run --release -p otter-lang --example bench_compose -- --check bench/compose/baseline.txt
+cargo run --release -p otter-lang --example bench_compose -- --write bench/compose/baseline.txt
 ```
 
 The workloads:

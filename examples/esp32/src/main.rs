@@ -61,13 +61,13 @@ mod acceptance {
 
 use std::collections::HashMap;
 
-use shards_core::{Catalog, Outcome, Var};
-use shards_lang::{Program, Source};
+use otter_core::{Catalog, Outcome, Var};
+use otter_lang::{Program, Source};
 
 fn main() {
   esp_idf_sys::link_patches();
 
-  let catalog = Catalog::new(&[shards_core::shards::CATALOG]).expect("core catalog");
+  let catalog = Catalog::new(&[otter_core::shards::CATALOG]).expect("core catalog");
   let program = Program::load(
     Source::new("smoke.shs", include_str!("../smoke.shs")),
     &catalog,

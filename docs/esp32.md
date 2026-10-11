@@ -1,7 +1,7 @@
 # ESP32 firmware builds
 
-The [firmware example](../examples/esp32/) embeds `shards-core` and
-`shards-lang` in an ESP-IDF application. It parses an included script, runs it
+The [firmware example](../examples/esp32/) embeds `otter-core` and
+`otter-lang` in an ESP-IDF application. It parses an included script, runs it
 on the stackless scheduler, checks its result and suspension, and prints
 `Shards ESP32 smoke test passed: 42` with the tick count and its stack and heap
 low-water marks to the serial console.
@@ -15,7 +15,7 @@ low-water marks to the serial console.
 This uses Rust `std` on ESP-IDF, not bare-metal `no_std`. The runtime is
 the same engine as on desktop and WASI; the only target-specific defaults in
 the core are the device call-depth limit and the device-sized test fixtures.
-`shards-io`, the desktop CLI, networking, GPIO and other peripheral shards are
+`otter-io`, the desktop CLI, networking, GPIO and other peripheral shards are
 outside this initial build target.
 
 A script that uses `@include` or `@read` on the device loads with
@@ -52,7 +52,7 @@ cd examples/esp32
 MCU=esp32c3 cargo +nightly-2026-10-03 build --locked --release --target riscv32imc-esp-espidf
 ```
 
-When `shards-core` or `shards-lang` gain or change a dependency, refresh the
+When `otter-core` or `otter-lang` gain or change a dependency, refresh the
 example's lockfile with `cargo update -w` in `examples/esp32`: the firmware
 builds with `--locked`, and root workspace builds do not touch that lockfile.
 
@@ -69,7 +69,7 @@ Install [espflash](https://github.com/esp-rs/espflash), connect a board matching
 the target, and run from the example directory (ESP32 shown):
 
 ```sh
-espflash flash --monitor target/xtensa-esp32-espidf/release/shards-esp32
+espflash flash --monitor target/xtensa-esp32-espidf/release/otter-esp32
 ```
 
 The CI artifacts contain an ELF, the lockfile and SDK configuration. Flash the
@@ -84,7 +84,7 @@ builds need the SDL2, slirp, pixman, libgcrypt and GLib shared libraries. Then,
 from the example directory:
 
 ```sh
-../../scripts/esp32-qemu.sh esp32s3 target/xtensa-esp32s3-espidf/release/shards-esp32
+../../scripts/esp32-qemu.sh esp32s3 target/xtensa-esp32s3-espidf/release/otter-esp32
 ```
 
 The script merges bootloader, partition table and app into a flash image, boots
@@ -137,7 +137,7 @@ and Rust's [ESP-IDF target documentation](https://doc.rust-lang.org/rustc/platfo
 
 ## M4 acceptance build
 
-CI builds with `--features acceptance`. The example build script derives a direct runner from `shards-core/tests/{prototype,metadata,host_contract,registry,trampoline}.rs` and `shards-lang/tests/lang.rs`, preserving test cfg attributes and using the default mesh. The regular smoke example remains available without this feature. Device tests omit panic-unwind-only behavior (ESP-IDF aborts on panic), native filesystem watching and host allocator instrumentation. Deep-call tests obey the device's default invocation limit of 32 and use a smaller over-limit source to fit the heap. The success marker is printed only after all enabled suites finish; a panic or missing marker fails QEMU.
+CI builds with `--features acceptance`. The example build script derives a direct runner from `otter-core/tests/{prototype,metadata,host_contract,registry,trampoline}.rs` and `otter-lang/tests/lang.rs`, preserving test cfg attributes and using the default mesh. The regular smoke example remains available without this feature. Device tests omit panic-unwind-only behavior (ESP-IDF aborts on panic), native filesystem watching and host allocator instrumentation. Deep-call tests obey the device's default invocation limit of 32 and use a smaller over-limit source to fit the heap. The success marker is printed only after all enabled suites finish; a panic or missing marker fails QEMU.
 
 The shared-suite gate exposed heap and stack limits hidden by the smoke script. Recursive compose overflowed a 64 KiB stack; the 96 KiB attempt left too little heap for the original 100-instance case. Runtime follow-ups share occurrence metadata and reserve exact frame/state/child capacities. A temporary-suite-task attempt then failed to allocate a contiguous 128 KiB frontend stack after earlier suites on C3. The current runner reserves 128 KiB at boot and reports cumulative low-water marks after each suite. This budget is pending a successful full run on all three chips; historical smoke measurements above do not establish it.
 

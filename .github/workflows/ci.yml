@@ -26,12 +26,12 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --release --workspace
       # Small builds: shard documentation prose compiled out, contract kept.
-      - run: cargo test -p shards-core -p shards-io --no-default-features --test metadata --test catalog
-      - run: cargo test -p shards-lang --no-default-features
+      - run: cargo test -p otter-core -p otter-io --no-default-features --test metadata --test catalog
+      - run: cargo test -p otter-lang --no-default-features
       # Release builds must run flows nested to the compose limit (compose still recurses).
-      - run: cargo test --release -p shards-lang --test lang nesting_up_to_the_limit
+      - run: cargo test --release -p otter-lang --test lang nesting_up_to_the_limit
       # As in 1.x, TLS is an explicit feature; make sure the rustls-ring build works.
-      - run: cargo clippy -p shards-io --all-targets --features rustls-ring -- -D warnings
+      - run: cargo clippy -p otter-io --all-targets --features rustls-ring -- -D warnings
 
   wasm:
     # The engine runs on wasm without Asyncify; this runs the acceptance
@@ -44,11 +44,11 @@ jobs:
         with:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p shards-core -p shards-lang --target wasm32-wasip1 --lib --tests -- -D warnings
+      - run: cargo clippy -p otter-core -p otter-lang --target wasm32-wasip1 --lib --tests -- -D warnings
       - name: Run acceptance, metadata and frontend tests on wasm
         run: |
-          cargo test -p shards-core --test prototype --test metadata --test trampoline --test host_contract --test registry --test functions --test values --target wasm32-wasip1 --no-run
-          cargo test -p shards-lang --test lang --target wasm32-wasip1 --no-run
+          cargo test -p otter-core --test prototype --test metadata --test trampoline --test host_contract --test registry --test functions --test values --target wasm32-wasip1 --no-run
+          cargo test -p otter-lang --test lang --target wasm32-wasip1 --no-run
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/prototype-*.wasm | head -1)"
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/metadata-*.wasm | head -1)"
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/trampoline-*.wasm | head -1)"
@@ -79,7 +79,7 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run --release -p shards-lang --example bench_compose -- --check bench/compose/baseline.txt
-      - run: cargo run --release -p shards-core --example bench_tables -- 200000
-      - run: cargo run --release -p shards-core --example bench_instances -- 1000
-      - run: cargo run --release -p shards-core --example bench_depth -- --progress
+      - run: cargo run --release -p otter-lang --example bench_compose -- --check bench/compose/baseline.txt
+      - run: cargo run --release -p otter-core --example bench_tables -- 200000
+      - run: cargo run --release -p otter-core --example bench_instances -- 1000
+      - run: cargo run --release -p otter-core --example bench_depth -- --progress

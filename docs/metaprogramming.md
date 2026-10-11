@@ -113,7 +113,7 @@ In the same milestone, host crates get a supported way to run nested flows, whic
 ### 3.4 Gate
 
 - `Retry` and `Timed` written as `@fn` with flow parameters. `Retry` stops on the first success and, after the last attempt fails, fails with that attempt's error. Tested for: repeated execution, a block that suspends, a caller local updated from inside the block, cancellation while the block is suspended (every state cleaned once), and an error caught by a `Maybe` around the call.
-- A native composite with a `Flow` parameter, defined in a crate other than `shards-core` (a test crate is fine), passes the same cases.
+- A native composite with a `Flow` parameter, defined in a crate other than `otter-core` (a test crate is fine), passes the same cases.
 - The inlined and the framed paths behave the same: caller mutation, errors and cancellation, each tested on both.
 - A benchmark of `ForEach` written as a function against the native loop. Record the ratio first; set a threshold afterwards.
 - A `Return` leaving a block is `control-in-flow`; a `Return` inside a function the block calls, and `Stop` inside a block, work.
@@ -203,7 +203,7 @@ Locals resolve by name and lexical context. Since 2.0 forbids shadowing, the rem
 ### 4.6 Diagnostics and tooling
 
 - `PathStep::Expansion { macro, call_site }`: an error in generated code shows the generated operation, the macro definition and the call site.
-- `shards2 expand file.shs` prints the expanded program as readable source, renaming introduced names only where they would print ambiguously. `--json` adds lexical contexts and provenance, which printed names alone cannot show.
+- `otter expand file.shs` prints the expanded program as readable source, renaming introduced names only where they would print ambiguously. `--json` adds lexical contexts and provenance, which printed names alone cannot show.
 
 ### 4.7 Gate
 

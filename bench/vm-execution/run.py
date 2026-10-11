@@ -166,7 +166,7 @@ def provenance(args, engines):
         "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
         "script_generator_sha256": sha256(Path(__file__)),
     }
-    for label, binary in [("1x", args.shards1), ("2", args.shards2)]:
+    for label, binary in [("1x", args.shards1), ("2", args.otter)]:
         info["binaries"][label] = {"path": str(binary), "sha256": sha256(binary), "bytes": binary.stat().st_size}
     for label, repo in [("2", ROOT), ("1x", args.source1)]:
         if repo:
@@ -226,7 +226,7 @@ def summarize(rows, out):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("shards1", type=Path, help="fresh Release 1.x executable (inline dispatch enabled)")
-    p.add_argument("--shards2", type=Path, default=ROOT / "target/release/shards2")
+    p.add_argument("--otter", type=Path, default=ROOT / "target/release/otter")
     p.add_argument("--source1", type=Path, help="1.x checkout, for provenance")
     p.add_argument("--out", type=Path, required=True, help="new output directory, including generated scripts")
     p.add_argument("--cpu", type=int, help="pin this process and children to one allowed CPU (Linux)")
@@ -245,13 +245,13 @@ def main():
             or len(set(args.widths)) != len(args.widths) or (args.iterations is not None and args.iterations < 1)
             or not 0 < args.target_ms <= args.max_ms):
         p.error("invalid counts, widths or timing targets")
-    args.shards1, args.shards2 = args.shards1.resolve(), args.shards2.resolve()
+    args.shards1, args.otter = args.shards1.resolve(), args.otter.resolve()
     if args.cpu is not None:
         os.sched_setaffinity(0, {args.cpu})
     args.out.mkdir(parents=True, exist_ok=False)
     scripts = args.out / "scripts"
     scripts.mkdir()
-    engines = {"1x": [str(args.shards1)], "2-stackless": [str(args.shards2), "run"]}
+    engines = {"1x": [str(args.shards1)], "2-stackless": [str(args.otter), "run"]}
     (args.out / "metadata.json").write_text(json.dumps(provenance(args, engines), indent=2) + "\n")
     rng = random.Random(args.seed)
     jobs = [(case, width) for case in args.cases for width in args.widths]

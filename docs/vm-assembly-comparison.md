@@ -9,7 +9,7 @@ exact objdump commands and raw excerpts are in
 No debug build, tracing instrumentation, or toy replacement loop was used.
 
 The comparison is `shards::activateShards` in 1.x versus
-`shards_core::inline::run` in 2.0. Both contain the hot inline handlers; comparing
+`otter_core::inline::run` in 2.0. Both contain the hot inline handlers; comparing
 only out-of-line shard methods would miss these paths. 1.x handler addresses
 were resolved using its generated `InlineShard` enum and the relative jump
 table at `0x936da8c`. The excerpts below omit surrounding dispatch and error

@@ -1,5 +1,5 @@
 // The 1.x client of the HTTP concurrency benchmark (see run.sh). Matched
-// with shards-io's bench_http example: N wires, each doing one Http.Get
+// with otter-io's bench_http example: N wires, each doing one Http.Get
 // (Timeout: 30) against the shared latency server. Spawning (which in 1.x
 // also clones and composes each copy) is timed as creation; waiting for every
 // request to finish is timed as execution. Failed requests are counted, so a

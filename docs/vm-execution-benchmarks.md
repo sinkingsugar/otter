@@ -53,7 +53,7 @@ Builds:
   flag. The checkout reported a dirty dependency submodule; this is recorded
   in metadata, not represented as a completely pristine source tree.
 - **2.0 default:** runtime at `77dd307`, fresh
-  `cargo build --release -p shards-cli`, pinned Rust 1.98.1, default release
+  `cargo build --release -p otter-cli`, pinned Rust 1.98.1, default release
   settings and features; no `output-checks`.
 - **2.0 sensitivity build:** same source, ThinLTO, one codegen unit and
   `target-cpu=broadwell`. This tests whether stronger compiler settings close
@@ -137,9 +137,9 @@ Reproduce the sensitivity build and selection with:
 ```sh
 CARGO_TARGET_DIR=/tmp/shards-vm-lto CARGO_PROFILE_RELEASE_LTO=thin \
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 RUSTFLAGS='-C target-cpu=broadwell' \
-  cargo build --offline --release -p shards-cli
+  cargo build --offline --release -p otter-cli
 python3 bench/vm-execution/run.py ../shards/build/Release/shards \
-  --shards2 /tmp/shards-vm-lto/release/shards2 --source1 ../shards --cpu 2 \
+  --otter /tmp/shards-vm-lto/release/otter --source1 ../shards --cpu 2 \
   --cases const-int const-string get-seq add-int add-float4 assign-seq assign-table \
   --widths 0 64 256 --out target/vm-execution/tuned-run
 ```
@@ -433,7 +433,7 @@ timing alone does not prove an asymptotic bound.
 The complete local check set passed again, including native and WASI shared
 regressions, release nesting limits, docs-off tests and both clippy variants.
 Release core tests with `output-checks`, frontend constructor tests with
-`shards-core/output-checks`, and all five inline executor Miri tests also
+`otter-core/output-checks`, and all five inline executor Miri tests also
 passed. Independent verification of the review fix remains a separate step.
 
 ## Inline segment input lifetime review follow-up

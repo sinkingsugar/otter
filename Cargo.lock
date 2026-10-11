@@ -13,9 +13,9 @@ name = "authoring-eval"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "otter-core",
+ "otter-lang",
  "serde_json",
- "shards-core",
- "shards-lang",
 ]
 
 [[package]]
@@ -609,6 +609,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "otter-cli"
+version = "0.1.0"
+dependencies = [
+ "otter-core",
+ "otter-io",
+ "otter-lang",
+ "tokio",
+]
+
+[[package]]
+name = "otter-core"
+version = "0.1.0"
+
+[[package]]
+name = "otter-io"
+version = "0.1.0"
+dependencies = [
+ "otter-core",
+ "reqwest",
+ "ring",
+ "rustls",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "otter-lang"
+version = "0.1.0"
+dependencies = [
+ "otter-core",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -937,39 +970,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "shards-cli"
-version = "0.1.0"
-dependencies = [
- "shards-core",
- "shards-io",
- "shards-lang",
- "tokio",
-]
-
-[[package]]
-name = "shards-core"
-version = "0.1.0"
-
-[[package]]
-name = "shards-io"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "ring",
- "rustls",
- "shards-core",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "shards-lang"
-version = "0.1.0"
-dependencies = [
- "shards-core",
 ]
 
 [[package]]

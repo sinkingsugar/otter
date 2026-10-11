@@ -656,6 +656,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "otter-core"
+version = "0.1.0"
+
+[[package]]
+name = "otter-esp32"
+version = "0.1.0"
+dependencies = [
+ "embuild",
+ "esp-idf-sys",
+ "otter-core",
+ "otter-lang",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "otter-lang"
+version = "0.1.0"
+dependencies = [
+ "otter-core",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -845,29 +868,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "shards-core"
-version = "0.1.0"
-
-[[package]]
-name = "shards-esp32"
-version = "0.1.0"
-dependencies = [
- "embuild",
- "esp-idf-sys",
- "quote",
- "shards-core",
- "shards-lang",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "shards-lang"
-version = "0.1.0"
-dependencies = [
- "shards-core",
 ]
 
 [[package]]

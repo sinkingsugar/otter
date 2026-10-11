@@ -188,7 +188,7 @@ experiment and full VM rerun:
      aligned to 64 bytes (`-C llvm-args=-align-all-functions=6`) old and new
      land at the same address and measure the same, for 7.6 percent more code.
      That flag is not adopted (a build-profile decision, and hosts that build
-     `shards-core` as a dependency would not get it); block alignment is
+     `otter-core` as a dependency would not get it); block alignment is
      (lesson 7).
 
    Neither the loop-alignment flag nor advancing the index before dispatch
@@ -240,7 +240,7 @@ experiment and full VM rerun:
    (`.cargo/config.toml`, `-align-all-nofallthru-blocks=4`, about 5 percent
    more code; wasm and the ESP32 targets do not match it): comparisons stop
    depending on luck, and shipped speed with them. Hosts that build
-   `shards-core` from another workspace need the same flag to get the
+   `otter-core` from another workspace need the same flag to get the
    measured speed. `hot-asm.py` ignores the padding. Compare builds only
    with the same flags on both sides.
    What a host gets without the flag, for the code at lesson 8 (same

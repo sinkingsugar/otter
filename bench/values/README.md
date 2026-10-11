@@ -1,9 +1,9 @@
 # Value layout and table storage (golden path M6)
 
-Two one-time measurements recorded here, as golden-path.md §7.2 and §7.3 ask: table storage before and after struct tables, and `Var` alignment 32 against 16. Both use `crates/shards-core/examples/bench_tables.rs`; the alignment comparison adds the instance and depth benchmarks. All numbers: release build, Rust 1.93.0 (the pinned 1.98.1 was being installed on a slow link; the benchmark binaries differ only by storage or alignment), aarch64-apple-darwin, no CPU pinning, one run each unless noted. The runs were short and on a laptop: compare columns within a table, not across machines.
+Two one-time measurements recorded here, as golden-path.md §7.2 and §7.3 ask: table storage before and after struct tables, and `Var` alignment 32 against 16. Both use `crates/otter-core/examples/bench_tables.rs`; the alignment comparison adds the instance and depth benchmarks. All numbers: release build, Rust 1.93.0 (the pinned 1.98.1 was being installed on a slow link; the benchmark binaries differ only by storage or alignment), aarch64-apple-darwin, no CPU pinning, one run each unless noted. The runs were short and on a laptop: compare columns within a table, not across machines.
 
 ```sh
-cargo run --release -p shards-core --example bench_tables -- 200000
+cargo run --release -p otter-core --example bench_tables -- 200000
 ```
 
 Each VM workload is a wire with a `Repeat` of 200,000 iterations over the body, timed as one mesh run after one warm-up run; allocations are counted by the example's allocator. `const-take-16` reads one field of a retained 16-key record by a literal key; `var-key-take-16` reads it by a key held in a variable; `make-take-N` builds an N-key record from locals (`Table.Make`) and reads one field; `rebuild-16` rebuilds while the previous record is retained by a variable; `chain-16` runs two same-shape constructors in one segment; `build-64` and `derive-64` use the host API (`TableBuilder`, `into_builder`).

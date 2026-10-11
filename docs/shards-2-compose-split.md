@@ -2,7 +2,7 @@
 
 > **Source:** copied from [`fragcolor-xyz/shards`](https://github.com/fragcolor-xyz/shards) at `2127b074e` (`docs/shards-2-compose-split.md`). This repo's copy is canonical from here on. File paths such as `shards/core/...` refer to the 1.x repo.
 
-**Status:** Validated by the prototype in `crates/shards-core` (2026-10-04); see §5 for the results. The runtime has one scheduler, the directly resumable engine of golden path M4; the stackful prototype scheduler was deleted after the M4 gate ([`stackless-experiment.md`](stackless-experiment.md)). Top engineering priority.
+**Status:** Validated by the prototype in `crates/otter-core` (2026-10-04); see §5 for the results. The runtime has one scheduler, the directly resumable engine of golden path M4; the stackful prototype scheduler was deleted after the M4 gate ([`stackless-experiment.md`](stackless-experiment.md)). Top engineering priority.
 **Audience:** Core team / contributors
 **Scope:** The core design for Shards 2.0, a new Rust runtime in a new repo. Compose output becomes a shared, read-only artifact, separate from the small runtime state each instance owns. Also covers what carries over from 1.x (§3.6) and how to validate the design before porting (§5).
 
@@ -209,7 +209,7 @@ In order:
 
    **Nested suspension acceptance test:** run two instances of one shared compiled sub-wire through nested calls, and suspend them at different execution points with distinct state. Cancel one instance and verify that its cleanup runs exactly once. Resume the other and verify that its continuation, state, and final result are unaffected; its cleanup must run exactly once when it finishes. Further scheduler ticks must neither resume the cancelled instance nor repeat cleanup. This exercises state isolation across suspension and the hard scheduling cases in §3.4.
 
-   **Prototype status (2026-10-04):** implemented in `crates/shards-core`, following [`prototype-shard-contract.md`](prototype-shard-contract.md): the `Shard` trait (`Compiled`/`State`), interned types, a two-step compose cache over recorded reads, `Local`/`Mesh` bindings, and a single-threaded stackful scheduler (`corosensei`, 128 KB stacks as in 1.x Release) with runtime-owned, exactly-once cleanup. Sixteen shards, including `Do`, `Pause`, `Spawn` and a `Probe` test shard. The acceptance tests in `crates/shards-core/tests/prototype.rs` pass:
+   **Prototype status (2026-10-04):** implemented in `crates/otter-core`, following [`prototype-shard-contract.md`](prototype-shard-contract.md): the `Shard` trait (`Compiled`/`State`), interned types, a two-step compose cache over recorded reads, `Local`/`Mesh` bindings, and a single-threaded stackful scheduler (`corosensei`, 128 KB stacks as in 1.x Release) with runtime-owned, exactly-once cleanup. Sixteen shards, including `Do`, `Pause`, `Spawn` and a `Probe` test shard. The acceptance tests in `crates/otter-core/tests/prototype.rs` pass:
 
    - 100 spawned instances share one compose; spawning composes nothing.
    - Instances keep isolated state.

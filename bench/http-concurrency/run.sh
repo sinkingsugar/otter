@@ -24,7 +24,7 @@ STATS="http://127.0.0.1:$PORT"
 # 1000 concurrent connections need more than the common 1024 descriptor limit.
 ulimit -n 16384 2> /dev/null || ulimit -n "$(ulimit -Hn)"
 
-(cd "$ROOT" && cargo build --release -q -p shards-io --examples)
+(cd "$ROOT" && cargo build --release -q -p otter-io --examples)
 SERVER="$ROOT/target/release/examples/latency_server"
 CLIENT_20="$ROOT/target/release/examples/bench_http"
 

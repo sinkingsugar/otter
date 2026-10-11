@@ -45,7 +45,7 @@ The surveys' working files are not part of this repository; the numbers above ar
 
 ### H3. Services
 
-**Need.** Database connections per database, the model cache, the HTTP client pool, the async runtime and shell sessions are process- or mesh-wide resources that shards look up at activation. `shards-io`'s HTTP client cache is process-wide only because "the prototype has no mesh services yet" (its module header). 1.x uses per-mesh `AnyStorage`.
+**Need.** Database connections per database, the model cache, the HTTP client pool, the async runtime and shell sessions are process- or mesh-wide resources that shards look up at activation. `otter-io`'s HTTP client cache is process-wide only because "the prototype has no mesh services yet" (its module header). 1.x uses per-mesh `AnyStorage`.
 
 **Proposal.** A typed service map on the mesh: the host inserts services before running (`mesh.services_mut().insert(db)`), and shards fetch them at activation through `LeafCtx` (`ctx.service::<Db>()`), never in compose. A module provides a default service when the host inserts none. Objects (H1) are what scripts hold; services are what owns and pools the underlying resources (a `Db.Connection` object refers to its database in the `Db` service).
 
@@ -62,7 +62,7 @@ The surveys' working files are not part of this repository; the numbers above ar
 **Need.** 1.x's `Await` moves an arbitrary sub-flow onto worker threads (209 sites: queries, JSON, files, model calls, image work). Scripts also start wires and wait for their results (`Expect`, `Wait`), detach long-running ones, step a wire manually (`Step`), and run child meshes (`Branch`). 2.0 has `AsyncShard` and a `Spawn` that passes its input through and returns no handle.
 
 **Proposal.**
-- **No generic `Await`.** Work that blocks becomes an async shard whose operation runs on `shards_io::runtime::spawn_blocking` (it exists) or as a task. Moving arbitrary script code to another thread contradicts the single-threaded engine and the frame model. Each 1.x `Await` site is rewritten to call the async form of its work (most wrap one query, one parse, one decode).
+- **No generic `Await`.** Work that blocks becomes an async shard whose operation runs on `otter_io::runtime::spawn_blocking` (it exists) or as a task. Moving arbitrary script code to another thread contradicts the single-threaded engine and the frame model. Each 1.x `Await` site is rewritten to call the async form of its work (most wrap one query, one parse, one decode).
 - **Instances as values.** `Spawn` outputs an instance handle (an object, H1). `Wire.Wait(handle)` suspends until the instance finishes and outputs its result or fails with its error; `Wire.Stop(handle)` cancels it.
 - **Structured by default.** A spawned instance belongs to its spawner and is cancelled when the spawner ends. `detach: true` gives it to the mesh. This replaces `Detach` and most of `Branch`. A separate child mesh is not needed until a host shows a case that instance groups cannot express.
 - **`Step`** (advance another wire by one iteration from this one): not provided; the survey's uses are UI ticking, which the host drives.
@@ -135,7 +135,7 @@ The surveys' working files are not part of this repository; the numbers above ar
 
 **Need.** Every 1.x codebase fails `check` on syntax alone (thousands of errors per large codebase, nearly all mechanical).
 
-**Proposal.** `shards2 migrate`: rewrites parameter labels, the assignment operators, `And`/`Or`, sequence and table forms and known renames, and leaves each semantic change as a diagnostic at its site:
+**Proposal.** `otter migrate`: rewrites parameter labels, the assignment operators, `And`/`Or`, sequence and table forms and known renames, and leaves each semantic change as a diagnostic at its site:
 - `Do` on caller scope becomes a function with explicit arguments;
 - `Set ... Global: true` becomes mesh state;
 - persistence across iterations of a looped wire becomes `Keep`;
@@ -217,7 +217,7 @@ The first ordering, written for porting the surveyed host as it is. §7 supersed
 
 The surveyed host is not being ported as it is. It is being replaced by **an agent-orchestrator host**: a Rust node that runs on every machine (iOS included, in-process), with native apps and a CLI as clients. Agents and tools are written in Shards; the store, sync, providers and UI are not. That host embeds 2.0 the way `embedding.md` already describes. So the C API and foreign shards (H10), the 1.x migration tool (H13), most of the modules and the UI concerns drop out, while objects, services, concurrency and runtime compilation become the critical path. The host's first milestones (its store, chat with attachments, a CLI, external agent workers, the iOS client) need nothing new from 2.0 except an iOS build, so both sides can proceed in parallel. Its native agent loop is the first point that needs the work below.
 
-**P0. Rename.** The project is renamed to Otter before the next feature work, so the work below lands under its final names. Scope (crates, binary, repository, language and file extension) to be settled first.
+**P0. Rename (done 2026-10-11).** The project is Otter: crates `otter-core`, `otter-lang`, `otter-io`, `otter-cli`, the `otter` command, the repository. The language keeps the name Shards and the `.shs` extension.
 
 **Track A: the core decisions, in order** (the host's native loop needs A1 to A3):
 1. **Objects and services** (H1, H3), specified together with guard cleanup (H4) and the cancellation rules (H6). Gate: a host object (a fake session) created, used and released by scripts; a service looked up at activation; release on success, error, `Stop`, `Return` and cancellation; hot-asm unchanged, or the difference explained; the ESP32 suites still fit.
@@ -231,7 +231,7 @@ The surveyed host is not being ported as it is. It is being replaced by **an age
 
 **Track C: modules, after A1:** local shell and SSH (one shared session layer), HTTP extensions (methods, headers, bytes, streaming reads), llm embeddings first (own `-sys` crate over llama.cpp), and the memory-index shards over a service.
 
-**Track D: targets, early and cheap:** a CI job that builds `shards-core`, `shards-lang` and `shards-io` as a static library for iOS device and simulator (H11), since the host's node runs in-process on the phone.
+**Track D: targets, early and cheap:** a CI job that builds `otter-core`, `otter-lang` and `otter-io` as a static library for iOS device and simulator (H11), since the host's node runs in-process on the phone.
 
 **Later:** observability (H14) once A2 lands; platform branching (H9) when a host needs it.
 

@@ -5,7 +5,7 @@ Measures the execution of precomposed, warmed shard chains on 1.x and both
 results, interpretation, and build details. Python 3 standard library only.
 
 ```sh
-cargo build --release -p shards-cli
+cargo build --release -p otter-cli
 # Build your 1.x checkout in Release with SHARDS_INLINE_EVERYTHING=ON.
 python3 bench/vm-execution/run.py ../shards/build/Release/shards \
   --source1 ../shards --cpu 2 --out target/vm-execution/run-1

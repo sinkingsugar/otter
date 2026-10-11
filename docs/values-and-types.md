@@ -138,7 +138,7 @@ Raised in review (2026-10-05) against 1.x, whose tables are a `flat_map` over a 
 
 - **Copy semantics stay copy-on-write.** Passing a table or assigning it only bumps a reference count; 1.x's main reason for `cloneVar` does not exist here.
 - **Storage:** struct tables (interned shape, one slot per key) for fixed types, a sorted flat vector for the rest; `BTreeMap` is gone. A same-shape constructor segment overwrites the slots it uniquely owns (1.x's allocation-free steady state without copy semantics), and `Take` with a literal key resolves to a slot at compose.
-- **The benchmark** (small fixed records, same-shape rebuilds, retained snapshots followed by a rebuild, growing dynamic tables; time and allocations) is `crates/shards-core/examples/bench_tables.rs`; its before/after numbers are recorded once. The `Var` layout (32 bytes, §2) was decided alongside.
+- **The benchmark** (small fixed records, same-shape rebuilds, retained snapshots followed by a rebuild, growing dynamic tables; time and allocations) is `crates/otter-core/examples/bench_tables.rs`; its before/after numbers are recorded once. The `Var` layout (32 bytes, §2) was decided alongside.
 - **Stable references to table entries** (a 1.x requirement) are not needed by value reads or compose-resolved field access; do not add them without a use.
 - **A runtime set value** (removed from 1.x in 2024) waits for a ported script that needs one. Its membership rules must be settled first: whether `1` and `1.0` are one element, how NaN behaves, and iteration order. `Var`'s bitwise identity equality is deliberately not the language's equality, so it cannot be used as is.
 

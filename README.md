@@ -1,8 +1,8 @@
-# Shards 2.0
+# Otter
 
-A new Rust implementation of the [Shards](https://github.com/fragcolor-xyz/shards) runtime.
+Otter is a new Rust implementation of the [Shards](https://github.com/fragcolor-xyz/shards) runtime: Shards 2.0. The language is still Shards (`.shs` files); Otter is the runtime, the frontend and the `otter` command. Renamed from shards2 on 2026-10-11; older records and benchmark results use the old names.
 
-**Status:** core prototype and language frontend working (2026-10-07): the compiled/state split on one directly resumable (stackless) engine, real async I/O (`Http.Get`), a hand-written frontend with `check --json`, hot reload, wasm (WASI) and ESP32 (QEMU) builds. Functions (`@fn`, golden path M5) and recursion (M7) are in, with private frames and state-preserving reload of edited bodies; values are 32 bytes with f32 vectors and struct tables (M6). **Next:** the authoring eval reruns and reviews that close the golden path ([`docs/golden-path.md`](docs/golden-path.md)). Current status is in `docs/current-state.md`.
+**Status:** core prototype and language frontend working (2026-10-07): the compiled/state split on one directly resumable (stackless) engine, real async I/O (`Http.Get`), a hand-written frontend with `check --json`, hot reload, wasm (WASI) and ESP32 (QEMU) builds. Functions (`@fn`, golden path M5) and recursion (M7) are in, with private frames and state-preserving reload of edited bodies; values are 32 bytes with f32 vectors and struct tables (M6). Compose-time evaluation and flow parameters (M8, M9) followed. **Next:** the priorities in [`docs/host-requirements.md`](docs/host-requirements.md) §7. Current status is in `docs/current-state.md`.
 
 ## Starting work
 
@@ -23,7 +23,7 @@ C++ libraries are still used, but called from Rust; in 1.x, C++ is the host.
 - [`docs/prototype-shard-contract.md`](docs/prototype-shard-contract.md): the shard contract the prototype implements.
 - [`docs/stackless-experiment.md`](docs/stackless-experiment.md): the scheduler experiment and decision (historical: the stackful scheduler was deleted after golden path M4), shared shard APIs (`LeafShard`, `AsyncShard`), real I/O, and matched benchmarks against 1.x.
 - [`docs/values-and-types.md`](docs/values-and-types.md): tables, float vectors and type sets for the frontend slice.
-- [`docs/embedding.md`](docs/embedding.md): embedding Shards 2.0 in a Rust host and writing host shards.
+- [`docs/embedding.md`](docs/embedding.md): embedding Otter in a Rust host and writing host shards.
 - [`docs/surface-syntax-review.md`](docs/surface-syntax-review.md): the 1.x grammar reviewed for agent authoring, and the proposed parser decisions.
 - [`docs/ai-first-roadmap.md`](docs/ai-first-roadmap.md): the overall strategy (reference copy; canonical in the 1.x repo).
 
@@ -35,19 +35,19 @@ The [runtime performance overview](docs/runtime-performance-overview.md) covers 
 
 ```sh
 cargo test --workspace                                                        # acceptance tests
-cargo run --release -p shards-core --example bench_instances -- 1000          # instance benchmark
-cargo run --release -p shards-core --example bench_depth                      # resume cost vs depth
-cargo run --release -p shards-core --example bench_async                      # polling vs notification
+cargo run --release -p otter-core --example bench_instances -- 1000          # instance benchmark
+cargo run --release -p otter-core --example bench_depth                      # resume cost vs depth
+cargo run --release -p otter-core --example bench_async                      # polling vs notification
 bench/shards-1x/run.sh path/to/1.x/shards                                     # the same benchmarks on 1.x
 bench/http-concurrency/run.sh path/to/1.x/shards                              # HTTP concurrency, 1.x vs 2.0
 ```
 
 ## Crates
 
-- `crates/shards-core`: the runtime core: compose, the scheduler (`stackless/`: frame arena, engine, mesh), lifecycle helpers, and the prototype shards (`LeafShard`/`AsyncShard` implementations, plus control flow).
-- `crates/shards-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only; TLS via the `rustls-ring` or `native-tls` feature.
-- `crates/shards-lang`: the language frontend: parser, lowering to wire definitions with a source map, `check`/`run`, and host-driven `Session` execution with state-preserving reload of edited functions.
-- `crates/shards-cli`: the `shards2` command: `cargo run -p shards-cli -- check --json file.shs`, `run`, `watch`, `describe`, `search`. File watching and warm host sessions are covered in [the embedding guide](docs/embedding.md#5-warm-sessions-and-hot-reload).
+- `crates/otter-core`: the runtime core: compose, the scheduler (`stackless/`: frame arena, engine, mesh), lifecycle helpers, and the prototype shards (`LeafShard`/`AsyncShard` implementations, plus control flow).
+- `crates/otter-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only; TLS via the `rustls-ring` or `native-tls` feature.
+- `crates/otter-lang`: the language frontend: parser, lowering to wire definitions with a source map, `check`/`run`, and host-driven `Session` execution with state-preserving reload of edited functions.
+- `crates/otter-cli`: the `otter` command: `cargo run -p otter-cli -- check --json file.shs`, `run`, `watch`, `describe`, `search`. File watching and warm host sessions are covered in [the embedding guide](docs/embedding.md#5-warm-sessions-and-hot-reload).
 
 ## Development
 

@@ -7,7 +7,7 @@ change to the interpreter loop or the engine step before benchmarking it
     python3 scripts/hot-asm.py --compare a965e32    # and a revision, side by side
     python3 scripts/hot-asm.py --check bench/hot-asm/aarch64-apple-darwin.txt
 
-Builds `shards2` in release (in CARGO_TARGET_DIR, or the checkout's target),
+Builds `otter` in release (in CARGO_TARGET_DIR, or the checkout's target),
 finds each function below by its mangled name, and reports its instruction
 count, stack loads and stores (spills and reloads), indirect branches, and
 the functions it calls rather than inlines. The full disassembly, normalized
@@ -55,8 +55,8 @@ def objdump():
 
 def build(root, target_dir):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target_dir))
-    subprocess.run(["cargo", "build", "--release", "-q", "-p", "shards-cli"], cwd=root, env=env, check=True)
-    return target_dir / "release" / "shards2"
+    subprocess.run(["cargo", "build", "--release", "-q", "-p", "otter-cli"], cwd=root, env=env, check=True)
+    return target_dir / "release" / "otter"
 
 
 def symbols(binary):
@@ -85,7 +85,7 @@ def demangle_all(names):
 def short(name):
     """A crate path without the crate name and its hash."""
     name = re.sub(r"\[[0-9a-f]+\]", "", name)
-    return name.replace("shards_core::", "")
+    return name.replace("otter_core::", "")
 
 
 def disassemble(tool, binary, symbol):
@@ -120,7 +120,7 @@ def summarize(lines):
     calls, other = set(), 0
     for target in targets:
         name = names.get(target, target)
-        if "shards_core::" in name:
+        if "otter_core::" in name:
             calls.add(short(name))
         else:
             other += 1
@@ -163,7 +163,7 @@ def render(report):
         s = entry[0]
         out.append(f"{label}: {s['instructions']} instructions, {s['stack loads']} stack loads, "
                    f"{s['stack stores']} stack stores, {s['indirect branches']} indirect branches")
-        out.append(f"  calls {', '.join(s['calls']) or 'nothing in shards_core'}; "
+        out.append(f"  calls {', '.join(s['calls']) or 'nothing in otter_core'}; "
                    f"{s['other calls']} call sites outside it (allocation, drops, panics)")
     return "\n".join(out) + "\n"
 

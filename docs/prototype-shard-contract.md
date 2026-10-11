@@ -1,6 +1,6 @@
 # Prototype Shard Contract: Decisions Replacing `shards.h`
 
-**Status:** Agreed (2026-10-04), after review by Astra and the maintainer, and implemented in `crates/shards-core`. Later additions (panic boundary, definite initialization, lifecycle rules, wake modes, shared `LeafShard`/`AsyncShard` APIs) are recorded in the relevant sections and in [`stackless-experiment.md`](stackless-experiment.md).
+**Status:** Agreed (2026-10-04), after review by Astra and the maintainer, and implemented in `crates/otter-core`. Later additions (panic boundary, definite initialization, lifecycle rules, wake modes, shared `LeafShard`/`AsyncShard` APIs) are recorded in the relevant sections and in [`stackless-experiment.md`](stackless-experiment.md).
 **Scope:** The interface decisions the §5 prototype in [`shards-2-compose-split.md`](shards-2-compose-split.md) needs. In 1.x, all of these are fixed by the C ABI in `include/shards/shards.h`. Each decision below is marked as either:
 
 - **Prototype only:** a choice the prototype can make and throw away.

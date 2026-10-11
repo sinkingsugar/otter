@@ -1,6 +1,6 @@
 [package]
 name = "authoring-eval"
-description = "Authoring eval runner for Shards 2.0 (golden-path.md §8)"
+description = "Authoring eval runner for Otter (golden-path.md §8)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,5 +17,5 @@ serde_json = "1"
 libc = "0.2"
 
 [dev-dependencies]
-shards-core = { path = "../../crates/shards-core" }
-shards-lang = { path = "../../crates/shards-lang" }
+otter-core = { path = "../../crates/otter-core" }
+otter-lang = { path = "../../crates/otter-lang" }

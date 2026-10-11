@@ -7,7 +7,7 @@ exclude = ["examples/esp32"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/sinkingsugar/shards2"
+repository = "https://github.com/sinkingsugar/otter"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

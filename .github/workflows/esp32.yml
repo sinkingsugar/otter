@@ -7,8 +7,8 @@ on:
     branches: [main]
     paths: &firmware-paths
       - Cargo.toml
-      - crates/shards-core/**
-      - crates/shards-lang/**
+      - crates/otter-core/**
+      - crates/otter-lang/**
       - examples/esp32/**
       - .github/workflows/esp32.yml
       - scripts/esp32-qemu.sh
@@ -81,7 +81,7 @@ jobs:
       - name: Collect generated SDK configuration
         run: |
           mkdir -p artifact
-          cp target/${{ matrix.target }}/release/shards-esp32 artifact/
+          cp target/${{ matrix.target }}/release/otter-esp32 artifact/
           # Take the configuration from this build's esp-idf-sys output
           # directory: the restored cache can hold stale ones.
           out_dir=$(jq -r 'select(.reason == "build-script-executed" and (.package_id | test("esp-idf-sys[@#]"))) | .out_dir' "$RUNNER_TEMP/build.json")
@@ -119,4 +119,4 @@ jobs:
           echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/espflash" >> "$GITHUB_PATH"
       - name: Run firmware in QEMU
-        run: ../../scripts/esp32-qemu.sh ${{ matrix.chip }} target/${{ matrix.target }}/release/shards-esp32 180
+        run: ../../scripts/esp32-qemu.sh ${{ matrix.chip }} target/${{ matrix.target }}/release/otter-esp32 180

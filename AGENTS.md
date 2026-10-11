@@ -4,7 +4,7 @@ Shared working instructions for coding agents in this repository.
 
 ## What this is
 
-Shards 2.0: a new Rust implementation of the Shards runtime. The 1.x implementation (C++ core with Rust modules) lives at `fragcolor-xyz/shards`, usually checked out at `../shards`. Use it to learn what a feature is for, and for tests and reusable Rust code, but do not copy its runtime architecture. Its author's view: the intent was good, the execution often was not. Do not treat 1.x behavior as correct by default: when "1.x does X", decide whether X is good, choose the better design, and list the difference under "Deviations from 1.x" in `docs/current-state.md`.
+Otter (Shards 2.0): a new Rust implementation of the Shards runtime, renamed from shards2 on 2026-10-11; the language keeps the name Shards and the `.shs` extension. The 1.x implementation (C++ core with Rust modules) lives at `fragcolor-xyz/shards`, usually checked out at `../shards`. Use it to learn what a feature is for, and for tests and reusable Rust code, but do not copy its runtime architecture. Its author's view: the intent was good, the execution often was not. Do not treat 1.x behavior as correct by default: when "1.x does X", decide whether X is good, choose the better design, and list the difference under "Deviations from 1.x" in `docs/current-state.md`.
 
 Status: the core prototype is done and validates the design. The runtime has **one scheduler**: the iterative, directly resumable engine in `stackless/` (golden path M4). The stackful prototype scheduler was deleted after the M4 gate passed; nothing is written for two backends any more.
 
@@ -32,10 +32,10 @@ This repository should be usable without previous chat history or private agent 
 
 ## Layout
 
-- `crates/shards-core`: compose (`compose.rs`), the shard contract (`shard.rs`), the scheduler (`stackless/`: frame arena, engine, mesh), shared lifecycle helpers (`lifecycle.rs`), and the prototype shards (`shards/`).
-- `crates/shards-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only.
-- `crates/shards-lang`: the language frontend: hand-written lexer and parser with spans, lowering to `WireDef`/`ShardDef` with a source map, and `check`/`run` (`docs/surface-syntax-review.md`).
-- `crates/shards-cli`: the `shards2` command (`check [--json]`, `run`, `watch`, `describe`, `search`, `catalog`).
+- `crates/otter-core`: compose (`compose.rs`), the shard contract (`shard.rs`), the scheduler (`stackless/`: frame arena, engine, mesh), shared lifecycle helpers (`lifecycle.rs`), and the prototype shards (`shards/`).
+- `crates/otter-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only.
+- `crates/otter-lang`: the language frontend: hand-written lexer and parser with spans, lowering to `WireDef`/`ShardDef` with a source map, and `check`/`run` (`docs/surface-syntax-review.md`).
+- `crates/otter-cli`: the `otter` command (`check [--json]`, `run`, `watch`, `describe`, `search`, `catalog`).
 - `bench/`: benchmarks matched with 1.x (`shards-1x/`, `http-concurrency/`), compose costs gated in CI (`compose/`), and the authoring eval (`authoring/`, golden path §8; its README says how to run it).
 - `examples/esp32`: ESP-IDF firmware embedding the core and frontend on the stackless scheduler; a separate workspace with its own lockfile (`docs/esp32.md`).
 
@@ -51,12 +51,12 @@ This repository should be usable without previous chat history or private agent 
 Choose the shard API by what the shard does:
 
 - **Cannot suspend** (most shards): implement `LeafShard` (`shards/leaf.rs`). "Leaf" means it never suspends, not that it does little work.
-- **Waits on async I/O**: implement `AsyncShard` (`shards/async_shard.rs`) once. `start` returns one future per operation, from owned inputs. Spawn I/O through `shards-io`'s shared runtime (`shards_io::runtime::spawn`); never put a runtime or reactor inside a shard, and never block. Race every await of in-flight work against the cancellation token: dropping a Tokio `JoinHandle` alone only detaches the task.
+- **Waits on async I/O**: implement `AsyncShard` (`shards/async_shard.rs`) once. `start` returns one future per operation, from owned inputs. Spawn I/O through `otter-io`'s shared runtime (`otter_io::runtime::spawn`); never put a runtime or reactor inside a shard, and never block. Race every await of in-flight work against the cancellation token: dropping a Tokio `JoinHandle` alone only detaches the task.
 - **Runs nested flows, outside the core** (a retry, a timeout, a container): implement `ControlShard` (`shard.rs`, `docs/embedding.md`): `resume` says which flow to enter with what input, or what to output; the engine runs the flows. `Maybe` is written this way.
 - **Suspends or runs nested flows, in the core** (control flow like `When`, `Repeat`, `Match`): implements the full `Shard` contract (`shard.rs`). Its description, compose logic and compiled type live in `shards/mod.rs` or `shards/control.rs`; a composite exposes a `Control` description and the engine (`stackless/engine.rs`) enters its children and owns and resets its continuation (adapters in `stackless/shards.rs`). A directly suspending leaf (like `Pause`) keeps its resume point in `State` and resets it on every exit other than `Suspend`, including errors. Keep this set small and explicit.
 - **Lifecycle**: use `lifecycle.rs` (`cleanup_each`, `instantiate_all`) for anything that instantiates or cleans up child flows, so every cleanup is attempted even when one panics.
 - **Describing a shard** (`docs/shard-metadata-and-compose.md`): give it a `ShardDesc` with its parameter declarations as a `static`, and read arguments in compose through the decoded `Args` accessors, not by position. Write all prose (summary, help, parameter help) through `shard_doc!`, so the `docs` feature can compile it out for small builds. Never duplicate a name, version or parameter list: attach the implementation to the one description (`ShardType::new(desc).implemented_by::<S>()`), and add the shard to its crate's `CATALOG` list. Report compose errors as structured `Error::Diagnostic`s.
-- **Tests**: acceptance tests live in `tests/prototype.rs`, `tests/trampoline.rs`, `shards-io/tests/http.rs` and `shards-lang/tests/lang.rs`; the ESP32 firmware reruns the core and frontend suites in QEMU, so new behavior gets a test there, with device-sized fixtures where a case would exceed the device's memory.
+- **Tests**: acceptance tests live in `tests/prototype.rs`, `tests/trampoline.rs`, `otter-io/tests/http.rs` and `otter-lang/tests/lang.rs`; the ESP32 firmware reruns the core and frontend suites in QEMU, so new behavior gets a test there, with device-sized fixtures where a case would exceed the device's memory.
 
 ## Scope
 
@@ -68,15 +68,15 @@ The prototype milestone is complete. Next is porting the language front end and 
 - `cargo test --workspace`
 - `cargo fmt --all` and `cargo fmt --manifest-path examples/esp32/Cargo.toml --all` before committing (2-space indent, see `rustfmt.toml`)
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- docs off: `cargo test -p shards-core -p shards-io --no-default-features --test metadata --test catalog` and `cargo test -p shards-lang --no-default-features`
-- release nesting: `cargo test --release -p shards-lang --test lang nesting_up_to_the_limit`
-- TLS: `cargo clippy -p shards-io --all-targets --features rustls-ring -- -D warnings`
-- wasm lint: `cargo clippy -p shards-core -p shards-lang --target wasm32-wasip1 --lib --tests -- -D warnings`
+- docs off: `cargo test -p otter-core -p otter-io --no-default-features --test metadata --test catalog` and `cargo test -p otter-lang --no-default-features`
+- release nesting: `cargo test --release -p otter-lang --test lang nesting_up_to_the_limit`
+- TLS: `cargo clippy -p otter-io --all-targets --features rustls-ring -- -D warnings`
+- wasm lint: `cargo clippy -p otter-core -p otter-lang --target wasm32-wasip1 --lib --tests -- -D warnings`
 - hot code: `python3 scripts/hot-asm.py --check bench/hot-asm/aarch64-apple-darwin.txt` (on Apple Silicon) summarizes the disassembly of the VM loop and the engine step; run it with `--compare REV` before and after any change to `inline.rs` or `stackless/engine.rs`, and refresh the baseline when the change is intended, saying why in the commit (`docs/runtime-performance-overview.md`, lessons 6 and 7). CI's `hot-asm` job (macOS) fails on any difference. Native builds use `.cargo/config.toml`'s block alignment; compare builds only with the same flags
-- compose costs: `cargo run --release -p shards-lang --example bench_compose -- --check bench/compose/baseline.txt` (CI's `bench` job; after an intended allocation change, regenerate with `--write` and say why in the commit, see `bench/compose/README.md`)
-- wasm tests: `cargo test -p shards-core --test prototype --test metadata --target wasm32-wasip1 --no-run` and `cargo test -p shards-lang --test lang --target wasm32-wasip1 --no-run`, then run each emitted test `.wasm` with `node scripts/run-wasi.mjs <path>`. Install the target with `rustup target add wasm32-wasip1` if needed. Benchmark examples are native-only; do not use `--all-targets` for wasm.
+- compose costs: `cargo run --release -p otter-lang --example bench_compose -- --check bench/compose/baseline.txt` (CI's `bench` job; after an intended allocation change, regenerate with `--write` and say why in the commit, see `bench/compose/README.md`)
+- wasm tests: `cargo test -p otter-core --test prototype --test metadata --target wasm32-wasip1 --no-run` and `cargo test -p otter-lang --test lang --target wasm32-wasip1 --no-run`, then run each emitted test `.wasm` with `node scripts/run-wasi.mjs <path>`. Install the target with `rustup target add wasm32-wasip1` if needed. Benchmark examples are native-only; do not use `--all-targets` for wasm.
 
-The toolchain is pinned in `rust-toolchain.toml`. CI runs fmt, clippy and tests on Linux and macOS, clippy for the `rustls-ring` build, the suite on wasm (Node WASI), and the compose cost check. A separate workflow links the ESP32 firmware for three chips and boots each in Espressif's QEMU (`scripts/esp32-qemu.sh`) when the core, frontend or example change; it needs no local run, but when `shards-core` or `shards-lang` gain or change a dependency, refresh `examples/esp32/Cargo.lock` (`cargo update -w` in `examples/esp32`), since the firmware builds with `--locked`.
+The toolchain is pinned in `rust-toolchain.toml`. CI runs fmt, clippy and tests on Linux and macOS, clippy for the `rustls-ring` build, the suite on wasm (Node WASI), and the compose cost check. A separate workflow links the ESP32 firmware for three chips and boots each in Espressif's QEMU (`scripts/esp32-qemu.sh`) when the core, frontend or example change; it needs no local run, but when `otter-core` or `otter-lang` gain or change a dependency, refresh `examples/esp32/Cargo.lock` (`cargo update -w` in `examples/esp32`), since the firmware builds with `--locked`.
 
 
 ## Git

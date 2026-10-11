@@ -16,7 +16,7 @@ The tables below retain the original experiment's evidence.
 
 ## 1. What was built
 
-Code: `crates/shards-core/src/stackless/`.
+Code: `crates/otter-core/src/stackless/`.
 
 - **Compose is shared, not duplicated.** Compose became generic over a small `Backend` trait (the kind of compiled node). Both schedulers use the same wire definitions, cache, dependency recording and definite-initialization checks. Compose logic for every shard lives once, in `shards/mod.rs`, as generic helpers; both implementations call them. The stackful code path is unchanged in behavior (`Backend` defaults to `Stackful`).
 - **Suspension is a return value.** A stackless `activate` returns `Step`: the stackful `Flow` variants, plus `Suspend`.
@@ -145,7 +145,7 @@ Open before deciding (revised after review by Astra):
 
 ## 7. Follow-up: one implementation for both schedulers
 
-Keeping both schedulers is affordable only if most shards are written once. Two prototype APIs (`crates/shards-core/src/shards/`) do that; the acceptance target was one leaf implementation and one async implementation running unchanged on both backends, with matching success, failure, cancellation and cleanup behavior.
+Keeping both schedulers is affordable only if most shards are written once. Two prototype APIs (`crates/otter-core/src/shards/`) do that; the acceptance target was one leaf implementation and one async implementation running unchanged on both backends, with matching success, failure, cancellation and cleanup behavior.
 
 - **`LeafShard`** (`leaf.rs`): for shards that cannot suspend. "Leaf" means "never suspends", not "does little work": an I/O wrapper qualifies only if it returns without blocking. One implementation, with an activation context generic over both schedulers (`LeafCtx`: frames and instance id); its result is adapted to `Flow` or `Step` at the backend boundary. The 9 leaf shards (`Const`, `Set`, `Update`, `Get`, `Inc`, `Add`, `IsLess`, `IsMoreEqual`, `Probe`) now have a single implementation each, and their per-backend copies are gone. `Spawn` stays per-backend: its compiled form holds a backend-specific wire.
 - **`AsyncShard`** (`async_shard.rs`): for shards that wait on an async operation. `start` builds the operation's future once per activation, from owned inputs; the adapter keeps that same future in the shard's state and polls it on every resume until it completes. While pending, the stackful adapter calls `ctx.wait()` and the stackless one returns `Suspend` after `ctx.set_waiting()`; both use the same per-instance waker. Cancellation drops the pending future before the shard's state, and resources held by earlier shards, are released. Futures need not be `Send`.
@@ -177,9 +177,9 @@ Notification-driven resumption matters more than the scheduler choice for waitin
 
 **What remains doubled:** the shards that suspend or run nested flows: `Pause`, `When`, `While`, `Once`, `Repeat`, `Do`, plus `Spawn`. That is a small set today, but not a fixed one. Future modules may add shards that run nested flows (transactions, retries, timeouts), and each would need both implementations and parity tests. The boundary should stay explicit: a module that only adds leaf and async shards writes each once.
 
-## 8. Follow-up: real async I/O (`shards-io`)
+## 8. Follow-up: real async I/O (`otter-io`)
 
-`crates/shards-io` validates the `AsyncShard` adapter against real sockets. It follows the 1.x HTTP module (`shards/modules/http`):
+`crates/otter-io` validates the `AsyncShard` adapter against real sockets. It follows the 1.x HTTP module (`shards/modules/http`):
 
 - **One shared runtime, outside the shards** (`runtime.rs`): a multi-threaded Tokio runtime with 4 workers, like 1.x's `TOKIO_RUNTIME`. A shard spawns its work there and gets an `IoTask`, which the `AsyncShard` adapter polls from the mesh thread with the instance's waker. Shards never touch the reactor directly, and the mesh never blocks.
 - **`Http.Get`** (`http.rs`): the 1.x request path. The `reqwest` client is cached by configuration with a 50 s pool idle timeout. The request races a cancellation token. A non-success status fails with the (truncated) body. TLS is an explicit feature (`rustls-ring` or `native-tls`), as in 1.x. Differences from 1.x: the client cache is process-wide (1.x caches it per mesh), and only `url` and `timeout` are supported.
@@ -189,9 +189,9 @@ Notification-driven resumption matters more than the scheduler choice for waitin
 Two library behaviors were confirmed by deliberately breaking the code:
 
 - **Dropping a Tokio `JoinHandle` only detaches the task.** If `IoTask`'s drop does not cancel the token, the request keeps running and the connection stays open; both cancellation tests fail.
-- **The 1.x pattern does not cancel body reads.** 1.x races only `send()` against its token, not `response.text()`. Replicating that, cancelling midway through a body leaves the connection open until the body completes or the request times out. `shards-io` races the body read too. This is inferred for 1.x from its code and reproduced in 2.0; it was not run against 1.x itself.
+- **The 1.x pattern does not cancel body reads.** 1.x races only `send()` against its token, not `response.text()`. Replicating that, cancelling midway through a body leaves the connection open until the body completes or the request times out. `otter-io` races the body read too. This is inferred for 1.x from its code and reproduced in 2.0; it was not run against 1.x itself.
 
-**Tests** (`crates/shards-io/tests/http.rs`, against a local server with controlled responses; all on both schedulers; 12/12, stable over 10 repeated runs and in Release):
+**Tests** (`crates/otter-io/tests/http.rs`, against a local server with controlled responses; all on both schedulers; 12/12, stable over 10 repeated runs and in Release):
 
 - a successful response, in both wake modes;
 - connection refused, and a 404 with its body in the error;
@@ -231,10 +231,10 @@ cargo test --workspace
 cargo run --release --example bench_instances -- 1000                  # creation, memory, steady state
 cargo run --release --example bench_depth                              # resume cost vs depth
 cargo run --release --example bench_async                              # polling vs notification
-cargo test -p shards-io                                                # real HTTP against a local server
+cargo test -p otter-io                                                # real HTTP against a local server
 bench/http-concurrency/run.sh path/to/1.x/shards                       # HTTP concurrency, 1.x vs 2.0
 bench/shards-1x/run.sh path/to/1.x/shards                              # the same two benchmarks on 1.x
-cargo test -p shards-core --test prototype --target wasm32-wasip1 --no-run
+cargo test -p otter-core --test prototype --target wasm32-wasip1 --no-run
 node scripts/run-wasi.mjs target/wasm32-wasip1/debug/deps/prototype-*.wasm
 ```
 

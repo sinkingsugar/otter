@@ -11,7 +11,7 @@ Related: [shard contract](prototype-shard-contract.md), [core design](shards-2-c
 
 As inspected at `76f6f56`:
 
-- `ShardType` in `crates/shards-core/src/shard.rs` contains a name, implementation version, and compose entry points for the backends. It has no parameter schema, help, examples, or input/output descriptions.
+- `ShardType` in `crates/otter-core/src/shard.rs` contains a name, implementation version, and compose entry points for the backends. It has no parameter schema, help, examples, or input/output descriptions.
 - Compose propagates output types through the flow. Individual shard compose functions check their supported inputs and parameters, resolve bindings, and compose children. `ComposeCtx` provides dependency recording and definite-initialization tracking.
 - Parameters arrive as a positional `Vec<ParamValue>`; arity checks, defaults, and decoding are handwritten. `ParamValue` distinguishes literals, variable references, wire references, and nested flows.
 - There is no agent-facing shard catalog or equivalent of the 1.x `docs`, `enumerate`, and `search` interface. Rust source comments alone do not provide that interface.
@@ -46,7 +46,7 @@ Argument form and value type are distinct. A string literal, a reference to a St
 
 Metadata is shared by `LeafShard`, `AsyncShard` and the control-flow shards. **The description lives on `ShardType` itself, in one place**; the implementation is attached to it and never carries its own name, version or documentation.
 
-**Implementation presence is derived, not declared:** a `ShardType` knows whether an implementation is attached, and composing a described shard without one is a `not-implemented` error. Only genuine target restrictions (for example, `shards-io` being native-only) are declared.
+**Implementation presence is derived, not declared:** a `ShardType` knows whether an implementation is attached, and composing a described shard without one is a `not-implemented` error. Only genuine target restrictions (for example, `otter-io` being native-only) are declared.
 
 A runtime catalog aggregates the shards linked into that runtime and rejects duplicate identities. Reading it must not compose programs, instantiate shards, start reactors, or perform network/file I/O. **Registration is explicit:** each crate exposes a list of its shard types, and a runtime builds its catalog from those lists. No linker-section or global-constructor registration: it is less predictable on wasm and in static builds, and 1.x's registration side effects are what we are moving away from.
 
@@ -149,12 +149,12 @@ Still open: the ergonomic Rust API for decoded arguments, the catalog registrati
 
 ## 9. First slice: what was built (2026-10-04)
 
-- **Descriptions** (`crates/shards-core/src/describe.rs`): `ShardDesc` on every `ShardType`, with summary, help, parameter declarations (name, accepted forms, value types, required/optional/default), input and output descriptions, and target restrictions. Undescribed shards use `ShardDesc::undocumented` and keep positional arguments; named arguments to them are rejected.
+- **Descriptions** (`crates/otter-core/src/describe.rs`): `ShardDesc` on every `ShardType`, with summary, help, parameter declarations (name, accepted forms, value types, required/optional/default), input and output descriptions, and target restrictions. Undescribed shards use `ShardDesc::undocumented` and keep positional arguments; named arguments to them are rejected.
 - **Structural drift prevention:** the implementation is attached with `ShardType::new(desc).implemented_by::<S>()`, and attaching one whose name or version differs from the description **fails to compile** (a const assertion; covered by a `compile_fail` doctest). `LeafShard`/`AsyncShard` take their identity from their `DESC`; `When`'s implementation takes its identity from `WHEN_DESC`. Each parameter list is a single `static`, read by both the decoder and the catalog.
 - **Decoding** (`args.rs`): positional and named arguments (`Arg`, `ShardDef::with_args`), defaults, accepted forms and literal types, with diagnostics for missing, unknown, duplicate, wrong-form, wrong-type, positional-after-named and too many arguments. Compose reads the result through checked accessors on `Args`.
 - **Diagnostics** (`diagnostic.rs`): `Error::Diagnostic`, with 1.x field names, `basic_type` using 1.x `SHType` codes, a fine-grained `code`, and `param`; `did_you_mean`/`candidates` omitted. Decoding errors are phase `construct`; the three shards' compose checks are phase `compose` (`input-type-mismatch`, `predicate-not-bool`, `invalid-argument-value`, `wrong-variable-type`). A described shard without an implementation is a `not-implemented` diagnostic.
-- **Catalog** (`catalog.rs`): `Catalog::new(&[shards_core::shards::CATALOG, shards_io::CATALOG])` from explicit per-crate lists, rejecting duplicates; `index_json`, `describe_json` and `search`, under the schema `shards2-catalog/1`. Describing `Http.Get` does not start its runtime (tested).
-- **Small builds:** the `docs` cargo feature (on by default; forwarded by `shards-io`). Without it, all prose written through `shard_doc!` compiles to empty strings; the argument contract is unchanged. CI runs the metadata tests both ways.
+- **Catalog** (`catalog.rs`): `Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG])` from explicit per-crate lists, rejecting duplicates; `index_json`, `describe_json` and `search`, under the schema `otter-catalog/1`. Describing `Http.Get` does not start its runtime (tested).
+- **Small builds:** the `docs` cargo feature (on by default; forwarded by `otter-io`). Without it, all prose written through `shard_doc!` compiles to empty strings; the argument contract is unchanged. CI runs the metadata tests both ways.
 
 **Review fixes (Astra, after `6d14265`):**
 
@@ -171,7 +171,7 @@ Still open: the ergonomic Rust API for decoded arguments, the catalog registrati
 
 Variable declaration/write metadata and front-end work remain separate, as agreed.
 
-Tests: `crates/shards-core/tests/metadata.rs` (natively and on wasm) and `crates/shards-io/tests/catalog.rs`, plus named-argument and compose-diagnostic cases in `crates/shards-io/tests/http.rs` against the local server. Not done, as planned: cache normalization, variable declaration/write metadata, and the CLI. Describing the other shards was done afterwards (above).
+Tests: `crates/otter-core/tests/metadata.rs` (natively and on wasm) and `crates/otter-io/tests/catalog.rs`, plus named-argument and compose-diagnostic cases in `crates/otter-io/tests/http.rs` against the local server. Not done, as planned: cache normalization, variable declaration/write metadata, and the CLI. Describing the other shards was done afterwards (above).
 
 ## Golden path M3: signatures and inference
 

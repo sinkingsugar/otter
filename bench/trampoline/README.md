@@ -2,10 +2,10 @@
 
 Baseline engine: `c0aaa3961b1d2de4e9b7f9512b49c668c064d727` (M3). Candidate source and executable hashes are in `2026-10-06-gate-metadata.json`. Both release builds use the same `bench_depth.rs` from this directory's implementing checkout and the unchanged `bench_instances` workload. `run.py` alternates engines in rotating/reversed order, uses 1,000 instances, checks work counts and retains raw stdout beside its CSV.
 
-Reproduce by extracting the baseline commit into a separate checkout, copying the candidate `crates/shards-core/examples/bench_depth.rs` over its benchmark, and building core examples in both checkouts with the pinned toolchain:
+Reproduce by extracting the baseline commit into a separate checkout, copying the candidate `crates/otter-core/examples/bench_depth.rs` over its benchmark, and building core examples in both checkouts with the pinned toolchain:
 
 ```sh
-cargo build --release -p shards-core --examples
+cargo build --release -p otter-core --examples
 python3 bench/trampoline/run.py /path/to/baseline/target/release/examples target/release/examples /tmp/m4-gate.csv 5
 ```
 
@@ -18,7 +18,7 @@ The measurements separate:
 
 `2026-10-06-initial.csv` and `2026-10-06-screening.csv` are preliminary measurements. Their runner did not retain/validate the mixed-work count; they are not the final gate evidence. The gate CSV and matching log supersede them for gate decisions. No workload was shortened or changed in response to a missed threshold.
 
-The structural gate is in `crates/shards-core/tests/trampoline.rs`: pending re-polls dispatch zero parents at depths 1/4/16/32, full completion dispatches each parent once, stale wakes cannot resume a replacement instance, and repeated suspend/complete cycles do not grow live allocations or retained owners. Shared acceptance tests cover control signals, cancellation, cleanup panics, partial initialization and preserving reload. Arena stale-handle and generation-exhaustion cases also run under Miri.
+The structural gate is in `crates/otter-core/tests/trampoline.rs`: pending re-polls dispatch zero parents at depths 1/4/16/32, full completion dispatches each parent once, stale wakes cannot resume a replacement instance, and repeated suspend/complete cycles do not grow live allocations or retained owners. Shared acceptance tests cover control signals, cancellation, cleanup panics, partial initialization and preserving reload. Arena stale-handle and generation-exhaustion cases also run under Miri.
 
 ## Results (2026-10-06)
 

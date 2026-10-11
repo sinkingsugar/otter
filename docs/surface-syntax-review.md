@@ -53,7 +53,7 @@ The 1.x AST shapes are still a useful reference for what to produce.
 
 **Parser**
 
-1. **Write the parser by hand** (lexer plus recursive descent) in `shards-lang`. Spans on every node, error recovery, multiple diagnostics per check, and messages that name language constructs. The 1.x grammar is the reference for what is accepted.
+1. **Write the parser by hand** (lexer plus recursive descent) in `otter-lang`. Spans on every node, error recovery, multiple diagnostics per check, and messages that name language constructs. The 1.x grammar is the reference for what is accepted.
 
 **Accepted syntax** (what the 2.0 parser accepts beyond the 1.x behavior)
 

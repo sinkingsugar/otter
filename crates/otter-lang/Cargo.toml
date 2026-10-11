@@ -1,0 +1,17 @@
+[package]
+name = "otter-lang"
+description = "Otter: the Shards language frontend: source to wire definitions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["docs"]
+docs = ["otter-core/docs"]
+
+[dependencies]
+otter-core = { path = "../otter-core", default-features = false }
