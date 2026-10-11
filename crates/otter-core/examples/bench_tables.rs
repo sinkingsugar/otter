@@ -11,10 +11,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use otter_core::compose::WireDef;
-use otter_core::shards::data::TABLE_MAKE;
-use otter_core::shards::defs::*;
-use otter_core::{Mesh, ShardDef, Table, Type, Var};
+use otter_core::bench::tables::key;
+use otter_core::{Mesh, ShardDef, Table, Type, Var, bench};
 
 struct CountingAlloc;
 
@@ -46,46 +44,6 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
-fn key(i: usize) -> String {
-  format!("k{i:02}")
-}
-
-/// `Table.Make` of `n` keys reading the locals `v0..vn`.
-fn table_make(n: usize) -> ShardDef {
-  let keys = Var::from_seq(std::sync::Arc::new(
-    (0..n).map(|i| Var::string(&key(i))).collect(),
-  ));
-  let mut params = vec![val(keys)];
-  params.extend((0..n).map(|i| var(&format!("v{i}"))));
-  ShardDef::new(&TABLE_MAKE, params)
-}
-
-fn literal_table(n: usize) -> Var {
-  Var::table((0..n).map(|i| (key(i), Var::Int(i as i64))))
-}
-
-/// A wire that declares `v0..v15`, `acc`, `t` and `key`, then repeats
-/// `body` `iterations` times.
-fn wire(body: Vec<ShardDef>, iterations: i64) -> WireDef {
-  let mut flow: Vec<ShardDef> = (0..16)
-    .flat_map(|i| [konst(Var::Int(i)), declare(&format!("v{i}"))])
-    .collect();
-  flow.extend([
-    konst(Var::Int(0)),
-    declare("acc"),
-    konst(literal_table(16)),
-    declare("t"),
-    konst(Var::string("k07")),
-    declare("key"),
-    repeat(body, val(Var::Int(iterations))),
-  ]);
-  WireDef {
-    name: "bench".into(),
-    looped: false,
-    flow,
-  }
-}
-
 struct Sample {
   ns: f64,
   allocs: f64,
@@ -108,7 +66,7 @@ fn measure(iterations: usize, mut run: impl FnMut()) -> Sample {
 }
 
 fn vm(name: &str, iterations: usize, body: Vec<ShardDef>) {
-  let def = wire(body, iterations as i64);
+  let def = bench::tables::wire(body, iterations as i64);
   let sample = measure(iterations, || {
     let mut mesh = Mesh::new();
     mesh.add_wire(def.clone());
@@ -146,40 +104,9 @@ fn main() {
     std::mem::size_of::<Var>(),
     std::mem::align_of::<Var>()
   );
-  let take = |k: &str| take(val(Var::string(k)));
-  // Read a retained 16-key record by a literal key.
-  vm(
-    "const-take-16",
-    iterations,
-    vec![get("t"), take("k07"), update("acc")],
-  );
-  // Read it by a key held in a variable.
-  vm(
-    "var-key-take-16",
-    iterations,
-    vec![
-      get("t"),
-      otter_core::shards::defs::take(var("key")),
-      ShardDef::new(&otter_core::shards::values::EXPECT_INT, vec![]),
-      update("acc"),
-    ],
-  );
-  // Build a record from locals and read one field.
-  vm(
-    "make-take-4",
-    iterations,
-    vec![table_make(4), take("k02"), update("acc")],
-  );
-  vm(
-    "make-take-16",
-    iterations,
-    vec![table_make(16), take("k07"), update("acc")],
-  );
-  // Rebuild while the previous record is retained by `t`.
-  vm("rebuild-16", iterations, vec![table_make(16), update("t")]);
-  // Two same-shape constructors in one segment: the second reuses the
-  // first's unique storage.
-  vm("chain-16", iterations, vec![table_make(16), table_make(16)]);
+  for (name, body) in bench::tables::cases() {
+    vm(name, iterations, body);
+  }
 
   // Host API: a growing dynamic table, and deriving a changed table from a
   // shared one.

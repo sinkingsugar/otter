@@ -6,7 +6,7 @@ Checkpoint: 2026-10-11 (the project is renamed Otter: crates `otter-*`, the `ott
 
 Priorities as of 2026-10-11 are in [host-requirements.md §7](host-requirements.md#7-priorities-2026-10-11): the rename to Otter (done), then objects and services, concurrency and runtime compilation (the needs of an agent-orchestrator host now being built on 2.0), with catalog breadth, early modules and an iOS build in parallel, and M10 after or alongside the first two.
 
-First: strict performance gates ([performance-gates.md](performance-gates.md)): instructions and allocations per iteration under Valgrind on Linux CI, against a committed baseline, plus a local wall-clock A/B tool. Not started. Then Track A1 (objects, services, guard cleanup, cancellation rules; H1, H3, H4 and H6 accepted 2026-10-11) on a `host-objects` branch with a draft pull request.
+First: strict performance gates ([performance-gates.md](performance-gates.md)), on the `host-objects` branch. The instruction and allocation gate is implemented ([bench/instructions](../bench/instructions/README.md)): 85 workloads, instructions, allocations and bytes per iteration under Cachegrind, exact (tolerance 0, after seeding the runtime's hash maps, `otter_core::hash`), with CI's `instructions` job on a pinned `ubuntu-24.04`. Verified locally (Arch Linux, Valgrind 3.25.1): five runs identical, and a one-instruction change to the VM loop fails every workload. The committed baseline comes from CI's artifact; until then the job fails for want of it. Remaining: the wall-clock A/B tool (`scripts/perf-ab.py`). Then Track A1 (objects, services, guard cleanup, cancellation rules; H1, H3, H4 and H6 accepted 2026-10-11) on a `host-objects` branch with a draft pull request.
 
 ## Implemented
 

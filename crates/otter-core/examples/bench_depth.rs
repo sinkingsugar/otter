@@ -10,7 +10,7 @@ use otter_core::instance::LeafCtx;
 use otter_core::shards::async_shard::{AsyncShard, async_type};
 use otter_core::shards::defs::*;
 use otter_core::{Composed, FunctionDef, Result, ShardDef, ShardDesc, ShardType};
-use otter_core::{Type, Var, WireDef};
+use otter_core::{Type, Var, bench};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,41 +50,15 @@ const INSTANCES: usize = 1000;
 const WARMUP: u32 = 10;
 const TICKS: u32 = 1000;
 
-/// `depth` nested functions, each calling the next; the deepest holds the
-/// leaf. Every level declares the mesh counter it reaches through its
-/// callees (golden path §3.1).
 fn functions(depth: usize, progress: bool) -> Vec<FunctionDef> {
-  let level = |n: usize, body: Vec<ShardDef>| {
-    FunctionDef::new(&format!("Level{n}"), Type::none(), Type::any())
-      .uses(&["resumes"])
-      .mutates(&["resumes"])
-      .body(body)
+  let leaf = if progress {
+    // Retain the pre-M4 workload unchanged: each Pause completes on resume,
+    // then While performs work and starts a new Pause at the bottom.
+    bench::depth::progress_leaf()
+  } else {
+    vec![ShardDef::new(&WAIT, vec![]), inc("resumes")]
   };
-  let mut functions = vec![level(
-    depth,
-    if progress {
-      // Retain the pre-M4 workload unchanged: each Pause completes on resume,
-      // then While performs work and starts a new Pause at the bottom.
-      vec![while_(
-        vec![konst(Var::Bool(true))],
-        vec![inc("resumes"), pause()],
-      )]
-    } else {
-      vec![ShardDef::new(&WAIT, vec![]), inc("resumes")]
-    },
-  )];
-  for n in 0..depth {
-    functions.push(level(n, vec![call(&format!("Level{}", n + 1), vec![])]));
-  }
-  functions
-}
-
-fn wires() -> Vec<WireDef> {
-  vec![WireDef {
-    name: "root".into(),
-    looped: true,
-    flow: vec![call("Level0", vec![])],
-  }]
+  bench::depth::functions(depth, leaf)
 }
 
 macro_rules! run_depth {
@@ -94,7 +68,7 @@ macro_rules! run_depth {
     for def in functions($depth, $progress) {
       mesh.add_function(def);
     }
-    for def in wires() {
+    for def in bench::depth::wires() {
       mesh.add_wire(def);
     }
     let root = mesh.compile("root", Type::none()).expect("compile");
