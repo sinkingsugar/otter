@@ -1131,7 +1131,7 @@ impl fmt::Display for Var {
         bytes_text(b, &mut text);
         f.write_str(&text)
       }
-      Var::Object(o) => write!(f, "{}", &***o),
+      Var::Object(o) => write!(f, "{}", ***o),
       Var::Seq(items) => {
         write!(f, "[")?;
         for (i, item) in items.iter().enumerate() {
