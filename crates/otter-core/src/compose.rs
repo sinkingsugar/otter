@@ -5,7 +5,7 @@
 //! and input type), then revalidates their recorded dependencies; it composes
 //! only on a miss.
 
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -2283,13 +2283,13 @@ impl ComposeCache {
   /// A cache with a custom primary-key hash (tests force collisions with it).
   pub fn with_hash_fn(hash_fn: HashFn) -> ComposeCache {
     ComposeCache {
-      entries: HashMap::new(),
-      functions: HashMap::new(),
+      entries: HashMap::default(),
+      functions: HashMap::default(),
       hash_fn,
       stats: CacheStats::default(),
       recursive_refs: Vec::new(),
       group: None,
-      evaluations: HashMap::new(),
+      evaluations: HashMap::default(),
       eval_floors: Vec::new(),
       record_origins: false,
       record_call_sites: false,
@@ -2344,7 +2344,7 @@ impl ComposeCache {
         composing,
         deps: Vec::new(),
         restart_deps: Vec::new(),
-        functions: HashMap::new(),
+        functions: HashMap::default(),
         diagnostic_path: vec![PathStep::Wire(def.name.clone())],
         local_paths: Vec::new(),
         current_args: None,
@@ -2446,7 +2446,7 @@ impl ComposeCache {
         composing,
         deps: Vec::new(),
         restart_deps: Vec::new(),
-        functions: HashMap::new(),
+        functions: HashMap::default(),
         diagnostic_path: vec![PathStep::Function(def.name.clone())],
         local_paths: Vec::new(),
         current_args: None,

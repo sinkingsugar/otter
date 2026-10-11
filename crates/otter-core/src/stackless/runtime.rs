@@ -1,7 +1,7 @@
 //! The mesh: scheduling over the directly resumable frame runner. Each tick
 //! resumes the active innermost leaf; a Suspend parks its frame.
 
-use std::collections::{HashMap, HashSet};
+use crate::hash::{HashMap, HashSet};
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -80,11 +80,11 @@ impl Mesh {
       layout: FrameLayout::default(),
       frame: Vec::new(),
       spawn_queue: Vec::new(),
-      wires: HashMap::new(),
-      functions: HashMap::new(),
+      wires: HashMap::default(),
+      functions: HashMap::default(),
       cache,
-      prepared_functions: HashMap::new(),
-      table: Arc::new(HashMap::new()),
+      prepared_functions: HashMap::default(),
+      table: Arc::new(HashMap::default()),
       reset_policy: ResetPolicy::default(),
       report: ReloadReport::default(),
       instances: Vec::new(),
@@ -285,7 +285,7 @@ impl Mesh {
       }
     }
     let mut report = ReloadReport::default();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for instance in &self.instances {
       if removed.contains(&instance.id) || instance.outcome.is_some() {
         continue;

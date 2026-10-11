@@ -1,6 +1,6 @@
 //! Host-driven execution with transactional source replacement.
 
-use std::collections::{HashMap, HashSet};
+use otter_core::hash::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -127,7 +127,7 @@ impl Session {
     &mut self,
     source: Source,
     catalog: &Catalog,
-    defines: &HashMap<String, String>,
+    defines: &std::collections::HashMap<String, String>,
   ) -> Result<Program, (Source, Vec<Diagnostic>)> {
     let recording = Recording {
       inner: &*self.files,
@@ -166,7 +166,7 @@ impl Session {
       active: Some(Execution {
         mesh,
         entries: Vec::new(),
-        failed: HashSet::new(),
+        failed: HashSet::default(),
         ticks: 0,
         iterations: None,
         frame_interval: None,
@@ -189,7 +189,7 @@ impl Session {
     &mut self,
     source: Source,
     catalog: &Catalog,
-    defines: &HashMap<String, String>,
+    defines: &std::collections::HashMap<String, String>,
   ) -> Result<Vec<Finished>, (Source, Vec<Diagnostic>)> {
     let program = self.load(source, catalog, defines)?;
     let mut mesh = program.mesh();
@@ -212,7 +212,7 @@ impl Session {
     let next = Execution {
       mesh,
       entries: scheduled,
-      failed: HashSet::new(),
+      failed: HashSet::default(),
       ticks: 0,
       iterations: run.and_then(|r| r.iterations).map(|n| n as u64),
       frame_interval: run
@@ -303,7 +303,7 @@ impl Session {
     &mut self,
     source: Source,
     catalog: &Catalog,
-    defines: &HashMap<String, String>,
+    defines: &std::collections::HashMap<String, String>,
   ) -> Result<Vec<Finished>, (Source, Vec<Diagnostic>)> {
     if self.active.is_none() {
       return self.reload(source, catalog, defines);
@@ -318,7 +318,7 @@ impl Session {
     };
     // Match scheduled occurrences, not only names (one wire may be scheduled
     // more than once). Finished entry IDs remain here after record retirement.
-    let mut retained = HashSet::new();
+    let mut retained = HashSet::default();
     let mut plan = Vec::new();
     for (name, wire) in entries {
       let old = active.entries.iter().find(|entry| {

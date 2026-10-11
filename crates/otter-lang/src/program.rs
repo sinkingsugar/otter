@@ -5,7 +5,7 @@
 //! compose problems. Compose diagnostics carry occurrence paths; the source
 //! map turns them into file, line and column.
 
-use std::collections::HashMap;
+use otter_core::hash::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use otter_core::diagnostic::{Diagnostic, Phase, json_str};
@@ -153,7 +153,7 @@ impl Program {
   pub fn load(
     source: Source,
     catalog: &Catalog,
-    defines: &HashMap<String, String>,
+    defines: &std::collections::HashMap<String, String>,
   ) -> Result<Program, (Source, Vec<Diagnostic>)> {
     Program::load_with(source, catalog, defines, &FsFiles::default())
   }
@@ -162,7 +162,7 @@ impl Program {
   pub fn load_with(
     mut source: Source,
     catalog: &Catalog,
-    defines: &HashMap<String, String>,
+    defines: &std::collections::HashMap<String, String>,
     files: &dyn Files,
   ) -> Result<Program, (Source, Vec<Diagnostic>)> {
     let (mut tree, mut problems) = parse(&source);
@@ -458,11 +458,10 @@ impl Program {
       .and_then(|r| r.fps)
       .and_then(|fps| Duration::try_from_secs_f64(1.0 / fps).ok());
     let iterations = run.and_then(|r| r.iterations);
-    let entry_ids: std::collections::HashSet<InstanceId> =
-      instances.iter().map(|(_, id)| *id).collect();
+    let entry_ids: HashSet<InstanceId> = instances.iter().map(|(_, id)| *id).collect();
     // Outcomes of finished entry instances, kept here so the mesh can drop
     // every finished record each tick.
-    let mut entry_outcomes: HashMap<InstanceId, Outcome> = HashMap::new();
+    let mut entry_outcomes: HashMap<InstanceId, Outcome> = HashMap::default();
     let mut spawned = Vec::new();
     let mut ticks = 0i64;
     let mut next = Instant::now();
@@ -526,7 +525,11 @@ impl RunReport {
 }
 
 /// Checks a source: syntax, lowering and compose.
-pub fn check(source: Source, catalog: &Catalog, defines: &HashMap<String, String>) -> CheckReport {
+pub fn check(
+  source: Source,
+  catalog: &Catalog,
+  defines: &std::collections::HashMap<String, String>,
+) -> CheckReport {
   check_with(source, catalog, defines, &FsFiles::default())
 }
 
@@ -534,7 +537,7 @@ pub fn check(source: Source, catalog: &Catalog, defines: &HashMap<String, String
 pub fn check_with(
   source: Source,
   catalog: &Catalog,
-  defines: &HashMap<String, String>,
+  defines: &std::collections::HashMap<String, String>,
   files: &dyn Files,
 ) -> CheckReport {
   let file = source.name.clone();

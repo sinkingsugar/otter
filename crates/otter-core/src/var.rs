@@ -372,7 +372,7 @@ pub(crate) struct Storage(*const (), Option<Shape>);
 /// What one walk over a value remembers per shared storage, created at the
 /// first insert: a walk over a value that shares nothing allocates nothing
 /// and seeds no hasher.
-pub(crate) struct Seen<K, V>(Option<std::collections::HashMap<K, V>>);
+pub(crate) struct Seen<K, V>(Option<crate::hash::HashMap<K, V>>);
 
 impl<K, V> Default for Seen<K, V> {
   fn default() -> Self {

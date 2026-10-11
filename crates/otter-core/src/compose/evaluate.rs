@@ -215,7 +215,7 @@ fn pipeline(
     composing,
     deps: Vec::new(),
     restart_deps: Vec::new(),
-    functions: HashMap::new(),
+    functions: HashMap::default(),
     diagnostic_path: Vec::new(),
     local_paths: Vec::new(),
     current_args: None,

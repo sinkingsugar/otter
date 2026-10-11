@@ -17,6 +17,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod flow;
 pub mod function;
+pub mod hash;
 #[doc(hidden)]
 pub mod inline;
 pub mod instance;

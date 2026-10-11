@@ -6,7 +6,7 @@
 //! Prototype: one process-wide registry that never frees a description.
 //! Recursive types are not supported.
 
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -95,9 +95,9 @@ impl Default for Registry {
   fn default() -> Registry {
     let mut reg = Registry {
       descs: Vec::new(),
-      ids: HashMap::new(),
+      ids: HashMap::default(),
       shapes: Vec::new(),
-      shape_ids: HashMap::new(),
+      shape_ids: HashMap::default(),
     };
     for (i, desc) in PRIMITIVES.iter().enumerate() {
       let desc: &'static TypeDesc = Box::leak(Box::new(desc.clone()));
