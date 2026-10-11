@@ -180,9 +180,12 @@ Other lifetime rules:
 - Unchanged stateful functions retain their state too. Their `Once` blocks
   do not repeat merely because another function was edited.
 - `Spawn` remains a static compiled dependency. Editing its target can
-  restart the code that owns that dependency. Spawned instances are detached:
-  compatible ones survive independently, while changed/removed ones are
-  cancelled. A spawned wire that calls an edited function selects the new
+  restart the code that owns that dependency. A spawned instance lives as
+  long as the instance that spawned it (or, with `detach: true`, as the
+  mesh): compatible ones survive the reload, while changed/removed ones
+  are cancelled, and a restarted owner's children are cancelled with it.
+  Handles (`Wire.Instance` values) keep naming the instance they were
+  given for, never its replacement. A spawned wire that calls an edited function selects the new
   body at its next call like any other caller.
 - Entry roots cancelled by a reload report `Cancelled`, including spawned
   children. Failed entries stay stopped until the next accepted reload, and

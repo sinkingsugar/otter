@@ -63,10 +63,11 @@ impl Catalog {
       })
       .collect();
     index.sort_by_key(|&(name, _)| name);
+    // The core's own object types (`Wire.Instance`), whatever the lists.
     Ok(Catalog {
       shards,
       index,
-      objects: Vec::new(),
+      objects: crate::wire_instance::OBJECTS.to_vec(),
     })
   }
 
