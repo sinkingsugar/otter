@@ -23,7 +23,6 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::Type;
 use crate::var::Var;
@@ -71,13 +70,30 @@ pub struct ObjectBox<T: ?Sized> {
 /// A shared object, as a value holds it.
 pub type ObjectRef = Arc<ObjectBox<dyn Object>>;
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// The next object's identity. 64 bits so it never wraps (identity is
+/// equality); the ESP32 targets have no 64-bit atomics and count under a
+/// lock, which creating an object can afford.
+#[cfg(target_has_atomic = "64")]
+fn next_id() -> u64 {
+  use std::sync::atomic::{AtomicU64, Ordering};
+  static NEXT: AtomicU64 = AtomicU64::new(1);
+  NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+fn next_id() -> u64 {
+  static NEXT: std::sync::Mutex<u64> = std::sync::Mutex::new(1);
+  let mut next = NEXT.lock().unwrap_or_else(|e| e.into_inner());
+  let id = *next;
+  *next += 1;
+  id
+}
 
 impl ObjectBox<dyn Object> {
   /// Boxes `value` with a new identity.
   pub fn new<T: Object>(value: T) -> ObjectRef {
     Arc::new(ObjectBox {
-      id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+      id: next_id(),
       value,
     })
   }

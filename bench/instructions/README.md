@@ -18,7 +18,9 @@ The workloads:
 - `entity/100`: a steady tick of 100 entity instances (`bench_instances`; N = 100 ticks);
 - `depth/1`, `depth/16`: 100 instances suspending and resuming through 1 and 16 nested calls (`bench_depth --progress`; N = 100 ticks);
 - `table/CASE`: `bench_tables`' six VM cases (N = 1000);
-- `reload`: a preserving reload of an edited function, then two ticks (N = 10 cycles).
+- `reload`: a preserving reload of an edited function, then two ticks (N = 10 cycles);
+- `object/assign`, `object/seq`, `object/table`: a host object copied between locals 8 times, into a 4-element sequence, into a 4-key record (N = 1000; docs/host-requirements.md H1);
+- `service/lookup`: 8 service lookups at activation by a host leaf (N = 1000; H3).
 
 Every workload checks the work it did (results, iteration and resume counts) and fails otherwise. The workload definitions are shared with the examples (`otter_core::bench`) and the matched VM suite, not copied.
 

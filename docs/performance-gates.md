@@ -29,7 +29,7 @@ Wall-clock time on shared CI runners is noisier than the regressions that matter
 - `bench_instances` steady ticks, `bench_depth` (suspend/resume through deep nesting), `bench_tables`;
 - the async path (`bench_async`) if its per-iteration count is stable under Valgrind's serialized threads; otherwise left to the wall-clock A/B;
 - a preserving reload cycle;
-- added with A1: object clone/drop through sequences, tables and mesh variables, and a service lookup at activation.
+- added with A1 (done): object clone/drop through locals, sequences and tables (`object/*`; mesh variables take the same `Var` copy and drop), and a service lookup at activation (`service/lookup`).
 
 The driver should reuse the VM suite's script generator rather than copying it (factor it into a module both harnesses import).
 

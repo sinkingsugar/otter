@@ -15,6 +15,9 @@
 //! - `table CASE ITERATIONS`: one of `bench_tables`' VM cases.
 //! - `reload CYCLES`: a preserving reload of an edited function, then two
 //!   ticks, per cycle.
+//! - `object CASE ITERATIONS`: host objects (docs/host-requirements.md H1)
+//!   copied between locals (`assign`), into sequences (`seq`) and tables
+//!   (`table`), and a service looked up at activation (`lookup`, H3).
 //!
 //! Every workload verifies the work it did, and fails otherwise.
 
@@ -22,7 +25,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use otter_core::{Catalog, Mesh, Type, Var, bench};
+use otter_core::{Catalog, Mesh, Outcome, Type, Var, bench};
 use otter_lang::{Program, Session, Source, render};
 
 struct CountingAlloc;
@@ -183,6 +186,138 @@ fn reload(cycles: i64) {
   assert_eq!(session.running(), 1);
 }
 
+/// Host shards for the object workloads: an object, and a service lookup.
+mod host {
+  use otter_core::describe::{InputDesc, OutputDesc, Params, ShardDesc, Targets, TypeName};
+  use otter_core::instance::{InstanceCtx, LeafCtx};
+  use otter_core::object::{Object, ObjectType};
+  use otter_core::shard::Flow;
+  use otter_core::shards::leaf::{LeafShard, leaf_type};
+  use otter_core::{Args, ComposeCtx, Composed, Error, Result, ShardType, Var};
+
+  pub static HANDLE: ObjectType = ObjectType::new("Gate.Handle");
+
+  pub struct Handle;
+
+  impl Object for Handle {
+    fn object_type(&self) -> &'static ObjectType {
+      &HANDLE
+    }
+  }
+
+  /// The service `Gate.Lookup` reads.
+  pub struct Registry;
+
+  const fn desc(name: &'static str, input: InputDesc, output: OutputDesc) -> ShardDesc {
+    ShardDesc {
+      params: Params::Declared(&[]),
+      input,
+      output,
+      targets: Targets::All,
+      effects: otter_core::signature::Effects {
+        io: true,
+        ..otter_core::signature::Effects::NONE
+      },
+      lifetime: otter_core::signature::Lifetime::Stateless,
+      ..ShardDesc::undocumented(name, 1)
+    }
+  }
+
+  pub struct Open;
+
+  impl LeafShard for Open {
+    type Compiled = ();
+    type State = ();
+    const DESC: ShardDesc = desc(
+      "Gate.Open",
+      InputDesc::Ignored,
+      OutputDesc::Fixed(TypeName::Object(&HANDLE)),
+    );
+
+    fn compose(_: &Args, _: &mut ComposeCtx<'_>) -> Result<Composed<()>> {
+      Ok(Composed {
+        compiled: (),
+        output: HANDLE.to_type(),
+      })
+    }
+
+    fn instantiate(_: &(), _: &mut InstanceCtx) -> Result<()> {
+      Ok(())
+    }
+
+    fn activate(_: &(), _: &mut (), _: &mut impl LeafCtx, _: &Var) -> Result<Flow> {
+      Ok(Flow::Next(Var::object(Handle)))
+    }
+  }
+
+  pub struct Lookup;
+
+  impl LeafShard for Lookup {
+    type Compiled = ();
+    type State = ();
+    const DESC: ShardDesc = desc("Gate.Lookup", InputDesc::Any, OutputDesc::Passthrough);
+
+    fn compose(_: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<()>> {
+      Ok(Composed {
+        compiled: (),
+        output: ctx.input(),
+      })
+    }
+
+    fn instantiate(_: &(), _: &mut InstanceCtx) -> Result<()> {
+      Ok(())
+    }
+
+    fn activate(_: &(), _: &mut (), ctx: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
+      match ctx.services().get::<Registry>() {
+        Some(_) => Ok(Flow::Next(input.clone())),
+        None => Err(Error::Activation("Gate.Lookup: no registry".into())),
+      }
+    }
+  }
+
+  pub static OPEN: ShardType = leaf_type::<Open>();
+  pub static LOOKUP: ShardType = leaf_type::<Lookup>();
+}
+
+/// The object workloads' loop bodies: 8 operations, or one constructor of
+/// 4 objects.
+fn object_body(case: &str) -> &'static str {
+  match case {
+    "assign" => {
+      "o | Update(slot) | Update(slot) | Update(slot) | Update(slot) | Update(slot) | Update(slot) | Update(slot) | Update(slot)"
+    }
+    "seq" => "[o o o o] | Update(items)",
+    "table" => "{a: o b: o c: o d: o} | Update(record)",
+    "lookup" => {
+      "none | Gate.Lookup | Gate.Lookup | Gate.Lookup | Gate.Lookup | Gate.Lookup | Gate.Lookup | Gate.Lookup | Gate.Lookup"
+    }
+    _ => panic!("unknown object case {case}"),
+  }
+}
+
+fn object(case: &str, iterations: i64) {
+  let catalog = Catalog::new(&[otter_core::shards::CATALOG, &[&host::OPEN, &host::LOOKUP]])
+    .and_then(|c| c.with_objects(&[&[&host::HANDLE]]))
+    .expect("catalog");
+  let text = format!(
+    "Gate.Open | Var(o)\nGate.Open | Var(slot)\n[o] | Var(items)\n{{a: o b: o c: o d: o}} | Var(record)\n0 | Var(done)\nRepeat({{ {} Inc(done) }} times: {iterations})\ndone",
+    object_body(case)
+  );
+  let mut services = otter_core::service::Services::default();
+  services.insert(host::Registry);
+  let mut session = Session::new();
+  session.set_services(services);
+  session
+    .reload(Source::new("object.shs", text), &catalog, &HashMap::new())
+    .unwrap_or_else(|(_, d)| panic!("{case}: {d:?}"));
+  let finished = session.tick();
+  match &finished[..] {
+    [f] if f.outcome == Outcome::Completed(Var::Int(iterations)) => {}
+    other => panic!("{case}: {other:?}"),
+  }
+}
+
 fn main() {
   let args: Vec<String> = std::env::args().skip(1).collect();
   match args.first().map(String::as_str) {
@@ -198,9 +333,13 @@ fn main() {
       int(&args, 2, "ITERATIONS"),
     ),
     Some("reload") => reload(int(&args, 1, "CYCLES")),
+    Some("object") => object(
+      args.get(1).expect("object CASE ITERATIONS"),
+      int(&args, 2, "ITERATIONS"),
+    ),
     _ => {
       eprintln!(
-        "usage: bench_gate script PATH | entity INSTANCES TICKS | depth DEPTH INSTANCES TICKS | table CASE ITERATIONS | reload CYCLES"
+        "usage: bench_gate script PATH | entity INSTANCES TICKS | depth DEPTH INSTANCES TICKS | table CASE ITERATIONS | reload CYCLES | object CASE ITERATIONS"
       );
       std::process::exit(2);
     }
