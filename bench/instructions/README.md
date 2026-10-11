@@ -4,7 +4,7 @@ Instructions, allocations and bytes per iteration of the runtime's hot workloads
 
 ```sh
 python3 bench/instructions/run.py --check                       # Linux with Valgrind: this target's baseline
-python3 bench/instructions/run.py --check --allocations-only    # any OS, natively
+python3 bench/instructions/run.py --check bench/instructions/aarch64-unknown-linux-gnu.txt --allocations-only   # any OS, natively
 python3 bench/instructions/run.py --write /tmp/before.txt       # a local baseline
 python3 bench/instructions/run.py --jitter 5                    # are the counts exact here?
 ```
