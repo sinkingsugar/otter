@@ -210,7 +210,7 @@ fn inline_assignment_preserves_other_aliases() {
 
 #[test]
 fn call_sites_check_the_reload_registry_once_per_revision() {
-  use std::collections::HashSet;
+  use otter_core::hash::HashSet;
   let declare = |mesh: &mut Mesh, both: bool| {
     // The probe keeps the body on the frame path (a small straight-line
     // body would be inlined into the caller, with no call site to check);
@@ -250,8 +250,10 @@ fn call_sites_check_the_reload_registry_once_per_revision() {
     let mut next = mesh.revision();
     declare(&mut next, both);
     next.compile("main", Type::none()).unwrap();
-    mesh.validate_reload(&mut next, &HashSet::new()).unwrap();
-    mesh.install_revision(next, &HashSet::new());
+    mesh
+      .validate_reload(&mut next, &HashSet::default())
+      .unwrap();
+    mesh.install_revision(next, &HashSet::default());
   };
   // An unchanged reload: one lookup for the call site, then plain calls.
   reload(&mut mesh, true);

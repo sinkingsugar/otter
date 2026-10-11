@@ -14,7 +14,7 @@
 //! under the function's own source-map root. Constructs that need shards
 //! not ported yet are rejected explicitly, with what to write instead.
 
-use std::collections::HashMap;
+use otter_core::hash::{HashMap, HashSet};
 use std::sync::Arc;
 
 use otter_core::describe::{self, Forms, ParamDecl};
@@ -166,7 +166,7 @@ pub struct Lowered {
 
 struct Lowerer<'a> {
   catalog: &'a Catalog,
-  defines: &'a HashMap<String, String>,
+  defines: &'a std::collections::HashMap<String, String>,
   problems: Vec<Problem>,
   map: SourceMap,
   /// The wire (or function root) being lowered.
@@ -182,7 +182,7 @@ struct Lowerer<'a> {
   const_stack: Vec<String>,
   /// Constants already lowered once: their problems were reported then,
   /// and lowering them again at a read reports nothing new.
-  consts_checked: std::collections::HashSet<String>,
+  consts_checked: HashSet<String>,
   /// Constants without a `#( )`, lowered once to a value every read
   /// shares (`None` when lowering failed, reported then).
   const_values: HashMap<String, Option<Var>>,
@@ -282,7 +282,7 @@ impl Target {
 pub fn lower(
   program: &Program,
   catalog: &Catalog,
-  defines: &HashMap<String, String>,
+  defines: &std::collections::HashMap<String, String>,
 ) -> (Lowered, Vec<Problem>) {
   let (lowered, problems, _) = lower_files(program, catalog, defines, None);
   (lowered, problems)
@@ -293,7 +293,7 @@ pub fn lower(
 pub fn lower_with(
   program: &Program,
   catalog: &Catalog,
-  defines: &HashMap<String, String>,
+  defines: &std::collections::HashMap<String, String>,
   source: &crate::Source,
   files: &dyn crate::Files,
 ) -> (Lowered, Vec<Problem>, Vec<String>) {
@@ -303,7 +303,7 @@ pub fn lower_with(
 fn lower_files<'a>(
   program: &Program,
   catalog: &'a Catalog,
-  defines: &'a HashMap<String, String>,
+  defines: &'a std::collections::HashMap<String, String>,
   files: Option<(&'a crate::Source, &'a dyn crate::Files)>,
 ) -> (Lowered, Vec<Problem>, Vec<String>) {
   let mut l = Lowerer {
@@ -313,11 +313,11 @@ fn lower_files<'a>(
     map: SourceMap::default(),
     wire: String::new(),
     temps: 0,
-    functions: HashMap::new(),
-    consts: HashMap::new(),
+    functions: HashMap::default(),
+    consts: HashMap::default(),
     const_stack: Vec::new(),
-    consts_checked: std::collections::HashSet::new(),
-    const_values: HashMap::new(),
+    consts_checked: HashSet::default(),
+    const_values: HashMap::default(),
     const_reads: 0,
     const_expansion: 0,
     const_overflow: None,

@@ -9,8 +9,8 @@
 //! and whether a reset is acceptable is the host's policy. Compiled
 //! artifacts are never mutated by a reload: selection is scoped to a mesh.
 
+use crate::hash::HashMap;
 use std::cell::Cell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::compose::{CompiledWire, ComposeEnv};
@@ -52,7 +52,7 @@ pub struct Revisions {
 impl Default for Revisions {
   fn default() -> Self {
     Self {
-      functions: HashMap::new(),
+      functions: HashMap::default(),
       revision: 0,
       lookups: Cell::new(0),
     }
