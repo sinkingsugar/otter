@@ -13,6 +13,7 @@ use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use crate::object::ObjectRef;
 use crate::types::{Shape, Type};
 
 #[derive(Default)]
@@ -35,6 +36,8 @@ pub enum Var {
   Table(ManuallyDrop<Table>),
   /// Raw bytes (a file read with `@read(... bytes: true)`, binary data).
   Bytes(ManuallyDrop<Arc<[u8]>>),
+  /// A host resource ([`crate::object`]): build with [`Var::object`].
+  Object(ManuallyDrop<ObjectRef>),
 }
 
 /// 1.x's `destroyVar`: a plain value needs nothing, inline; anything else
@@ -64,6 +67,7 @@ fn drop_storage(value: &mut Var) {
       Var::Seq(items) => ManuallyDrop::drop(items),
       Var::Table(table) => ManuallyDrop::drop(table),
       Var::Bytes(bytes) => ManuallyDrop::drop(bytes),
+      Var::Object(object) => ManuallyDrop::drop(object),
       _ => {}
     }
   }
@@ -84,6 +88,7 @@ impl fmt::Debug for Var {
       Var::Seq(v) => f.debug_tuple("Seq").field(&***v).finish(),
       Var::Table(v) => f.debug_tuple("Table").field(&**v).finish(),
       Var::Bytes(v) => f.debug_tuple("Bytes").field(&&***v).finish(),
+      Var::Object(v) => f.debug_tuple("Object").field(&**v).finish(),
     }
   }
 }
@@ -347,6 +352,35 @@ impl Var {
     }
   }
 
+  /// Whether the value is or holds (at any depth) an object. Storage held
+  /// in several places is visited once. Compose refuses such values as
+  /// constants: an object never lands in compose output
+  /// (docs/host-requirements.md H1).
+  pub fn holds_object(&self) -> bool {
+    // Only a collection can hold one without being one: the common literal
+    // (a number, a string) answers without setting up the walk.
+    match self {
+      Var::Object(_) => return true,
+      Var::Seq(_) | Var::Table(_) => {}
+      _ => return false,
+    }
+    fn walk(v: &Var, seen: &mut Seen<Storage, ()>) -> bool {
+      if let Some((key, true)) = v.storage() {
+        if seen.get(&key).is_some() {
+          return false;
+        }
+        seen.insert(key, ());
+      }
+      match v {
+        Var::Object(_) => true,
+        Var::Seq(items) => items.iter().any(|item| walk(item, seen)),
+        Var::Table(table) => table.iter().any(|(_, value)| walk(value, seen)),
+        _ => false,
+      }
+    }
+    walk(self, &mut Seen::default())
+  }
+
   /// The same value with every table (at any depth) in struct
   /// representation, its key shape interned. Compose applies this to
   /// literals, so a fixed-typed value is a struct table at runtime
@@ -513,6 +547,7 @@ impl Types {
       Var::Float4(_) => Type::float4(),
       Var::String(_) => Type::string(),
       Var::Bytes(_) => Type::bytes(),
+      Var::Object(o) => o.object_type().to_type(),
       Var::Seq(_) | Var::Table(_) => unreachable!("sequences and tables have storage"),
     }
   }
@@ -1042,6 +1077,7 @@ fn write_text(v: &Var, out: &mut String) {
     Var::Float4(c) => vector(out, "@f4(", c.iter().map(|x| shortest(*x))),
     Var::String(s) => out.push_str(s),
     Var::Bytes(b) => bytes_text(b, out),
+    Var::Object(o) => out.push_str(&o.to_string()),
     Var::Seq(items) => {
       out.push('[');
       for (i, item) in items.iter().enumerate() {
@@ -1102,6 +1138,7 @@ impl fmt::Display for Var {
         bytes_text(b, &mut text);
         f.write_str(&text)
       }
+      Var::Object(o) => write!(f, "{}", ***o),
       Var::Seq(items) => {
         write!(f, "[")?;
         for (i, item) in items.iter().enumerate() {
@@ -1140,6 +1177,7 @@ impl PartialEq for Var {
       (Var::Float4(a), Var::Float4(b)) => same_bits(&a.0, &b.0),
       (Var::String(a), Var::String(b)) => a == b,
       (Var::Bytes(a), Var::Bytes(b)) => a == b,
+      (Var::Object(a), Var::Object(b)) => a.id() == b.id(),
       (Var::Seq(a), Var::Seq(b)) => SameValues::default().seqs(a, b),
       (Var::Table(a), Var::Table(b)) => SameValues::default().tables(a, b),
       _ => false,
@@ -1267,6 +1305,7 @@ impl Hash for Var {
       }
       Var::String(v) => v.hash(state),
       Var::Bytes(v) => v.hash(state),
+      Var::Object(o) => o.id().hash(state),
       Var::Seq(v) => v.hash(state),
       Var::Table(v) => v.hash(state),
     }
@@ -1310,7 +1349,9 @@ fn assign_slow(slot: &mut Var, value: Var) {
 /// The slow paths' drop and clone: matched here, with each storage's
 /// reference count handled in place, rather than through `Var`'s drop and
 /// clone (which are calls once not inlined). Their size is off the hot
-/// path.
+/// path: the VM's `Set` reaches them out of line (`assign_copy_slow`), so a
+/// new storage kind's arms never enter `inline::run` (lesson 9 in
+/// docs/runtime-performance-overview.md).
 #[inline(always)]
 fn drop_value(value: Var) {
   let value = ManuallyDrop::new(value);
@@ -1324,6 +1365,7 @@ fn drop_value(value: Var) {
       Var::Seq(items) => Arc::decrement_strong_count(Arc::as_ptr(&**items)),
       Var::Table(table) => table.release(),
       Var::Bytes(bytes) => Arc::decrement_strong_count(Arc::as_ptr(&**bytes)),
+      Var::Object(object) => Arc::decrement_strong_count(Arc::as_ptr(&**object)),
       _ => {}
     }
   }
@@ -1340,6 +1382,7 @@ fn clone_value(value: &Var) -> Var {
       Var::Seq(items) => Arc::increment_strong_count(Arc::as_ptr(&**items)),
       Var::Table(table) => table.retain(),
       Var::Bytes(bytes) => Arc::increment_strong_count(Arc::as_ptr(&**bytes)),
+      Var::Object(object) => Arc::increment_strong_count(Arc::as_ptr(&**object)),
       _ => {}
     }
     std::ptr::read(value)

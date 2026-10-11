@@ -95,6 +95,16 @@ impl Mesh {
     }
   }
 
+  /// The services shards look up at activation (docs/host-requirements.md
+  /// H3). A preserving reload's candidate shares them.
+  pub fn services(&self) -> &crate::service::Services {
+    &self.revisions.services
+  }
+
+  pub fn services_mut(&mut self) -> &mut crate::service::Services {
+    &mut self.revisions.services
+  }
+
   /// Limit nested named invocations independently of the compose nesting limit.
   pub fn set_max_call_depth(&mut self, depth: usize) {
     self.max_call_depth = depth;
@@ -244,6 +254,7 @@ impl Mesh {
     next.max_call_depth = self.max_call_depth;
     next.eval_limits = self.eval_limits;
     next.reset_policy = self.reset_policy;
+    next.revisions.services = self.revisions.services.clone();
     next
   }
 

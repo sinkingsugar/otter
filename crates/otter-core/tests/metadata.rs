@@ -757,6 +757,8 @@ fn every_declared_parameter_accepts_exactly_its_documented_forms() {
         Some(TypeName::Seq) => Var::Seq(Default::default()),
         Some(TypeName::Table) => Var::table(Vec::<(&str, Var)>::new()),
         Some(TypeName::None) | Some(TypeName::Any) => Var::None,
+        // Objects have no literal (docs/host-requirements.md H1).
+        Some(TypeName::Object(t)) => panic!("{} declares a literal form for an object", t.name),
       };
       ParamValue::Value(v)
     } else if form == Forms::VARIABLE {

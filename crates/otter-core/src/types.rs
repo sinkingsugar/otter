@@ -37,6 +37,8 @@ pub enum TypeDesc {
   /// The output of something that never produces a value (`Stop`, a flow
   /// ending in it). Every type accepts it; it drops out of unions.
   Never,
+  /// Host objects of this type ([`crate::object::ObjectType`]), by name.
+  Object(&'static str),
 }
 
 /// A table's shape: known keys with their value types, and the value type of
@@ -285,6 +287,11 @@ impl Type {
     Type::intern(TypeDesc::Seq(inner))
   }
 
+  /// Host objects of the type named `name` (an [`crate::object::ObjectType`]'s).
+  pub fn object(name: &'static str) -> Type {
+    Type::intern(TypeDesc::Object(name))
+  }
+
   /// A table type. Keys are sorted; a repeated key panics (a bug in the
   /// caller, like a duplicate field in a struct literal).
   pub fn table<K: Into<Arc<str>>>(
@@ -407,6 +414,7 @@ pub fn structural_cmp(a: Type, b: Type) -> std::cmp::Ordering {
       TypeDesc::None => 11,
       TypeDesc::Never => 12,
       TypeDesc::Bytes => 13,
+      TypeDesc::Object(_) => 14,
     }
   }
   let (da, db) = (a.desc(), b.desc());
@@ -438,6 +446,7 @@ pub fn structural_cmp(a: Type, b: Type) -> std::cmp::Ordering {
         acc.then_with(|| structural_cmp(*p, *q))
       })
       .then_with(|| x.len().cmp(&y.len())),
+    (TypeDesc::Object(x), TypeDesc::Object(y)) => x.cmp(y),
     _ => Ordering::Equal,
   })
 }
@@ -508,6 +517,7 @@ impl fmt::Display for Type {
       TypeDesc::Float4 => write!(f, "Float4"),
       TypeDesc::String => write!(f, "String"),
       TypeDesc::Bytes => write!(f, "Bytes"),
+      TypeDesc::Object(name) => write!(f, "{name}"),
       TypeDesc::Seq(inner) => write!(f, "[{}]", Nested(*inner)),
       TypeDesc::Table(t) => {
         write!(f, "{{")?;
@@ -608,6 +618,7 @@ impl Admits {
       | (TypeDesc::Float4, Var::Float4(_))
       | (TypeDesc::String, Var::String(_))
       | (TypeDesc::Bytes, Var::Bytes(_)) => true,
+      (TypeDesc::Object(name), Var::Object(o)) => o.object_type().name == *name,
       (TypeDesc::Seq(e), Var::Seq(items)) => {
         let mut all = true;
         for v in items.iter() {

@@ -381,6 +381,19 @@ pub fn decode(desc: &ShardDesc, args: &[Arg]) -> Result<Args> {
       );
     }
     if let ParamValue::Value(v) = &arg.value {
+      if v.holds_object() {
+        return fail(
+          construct_error(
+            desc,
+            "object-in-constant",
+            format!(
+              "{}: {} is a constant holding an object; objects are passed at run time, through a variable",
+              desc.name, decl.name
+            ),
+          )
+          .param(decl.name, Some(index)),
+        );
+      }
       let ty = v.type_of();
       if !decl.accepts(ty) {
         return fail(

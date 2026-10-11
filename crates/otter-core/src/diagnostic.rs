@@ -322,6 +322,7 @@ fn basic_type(ty: Type) -> i32 {
     TypeDesc::String => 52,
     TypeDesc::Seq(_) => 56,
     TypeDesc::Table(_) => 57,
+    TypeDesc::Object(_) => 60,
     // A union has no single 1.x type; `name` carries its printed form.
     TypeDesc::Union(_) => -1,
   }

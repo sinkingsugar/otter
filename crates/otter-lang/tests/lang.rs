@@ -3802,3 +3802,483 @@ mod watched_files {
     assert!(lines.contains(&"2".to_string()), "{lines:?}");
   }
 }
+
+/// Host objects and services (docs/host-requirements.md H1, H3): a fake
+/// session opened through a service, used and released by scripts.
+mod host_session {
+  use std::sync::Arc;
+  use std::sync::Mutex;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  use otter_core::describe::{
+    Forms, InputDesc, OutputDesc, ParamDecl, Params, Requirement, ShardDesc, Targets, TypeName,
+  };
+  use otter_core::instance::{InstanceCtx, LeafCtx};
+  use otter_core::object::{Object, ObjectType};
+  use otter_core::shard::Flow;
+  use otter_core::shards::leaf::{LeafShard, leaf_type};
+  use otter_core::{Args, ComposeCtx, Composed, Error, Result, ShardType, Type, Var};
+
+  pub static SESSION: ObjectType = ObjectType::new("Test.Session");
+
+  /// The service: what the host owns. Counts opened and released sessions
+  /// and records what they were sent.
+  #[derive(Default)]
+  pub struct Sessions {
+    pub opened: AtomicUsize,
+    pub released: Arc<AtomicUsize>,
+    pub sent: Mutex<Vec<String>>,
+  }
+
+  /// The object scripts hold.
+  pub struct Session {
+    number: usize,
+    released: Arc<AtomicUsize>,
+  }
+
+  impl Object for Session {
+    fn object_type(&self) -> &'static ObjectType {
+      &SESSION
+    }
+  }
+
+  impl Drop for Session {
+    fn drop(&mut self) {
+      self.released.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  const fn effects() -> otter_core::signature::Effects {
+    otter_core::signature::Effects {
+      io: true,
+      ..otter_core::signature::Effects::NONE
+    }
+  }
+
+  pub struct Open;
+
+  impl LeafShard for Open {
+    type Compiled = ();
+    type State = ();
+    const DESC: ShardDesc = ShardDesc {
+      params: Params::Declared(&[]),
+      input: InputDesc::Ignored,
+      output: OutputDesc::Fixed(TypeName::Object(&SESSION)),
+      targets: Targets::All,
+      effects: effects(),
+      lifetime: otter_core::signature::Lifetime::Stateless,
+      ..ShardDesc::undocumented("Test.Open", 1)
+    };
+
+    fn compose(_: &Args, _: &mut ComposeCtx<'_>) -> Result<Composed<()>> {
+      Ok(Composed {
+        compiled: (),
+        output: SESSION.to_type(),
+      })
+    }
+
+    fn instantiate(_: &(), _: &mut InstanceCtx) -> Result<()> {
+      Ok(())
+    }
+
+    fn activate(_: &(), _: &mut (), ctx: &mut impl LeafCtx, _: &Var) -> Result<Flow> {
+      let Some(sessions) = ctx.services().get::<Sessions>() else {
+        return Err(Error::Activation("Test.Open: no Sessions service".into()));
+      };
+      let number = sessions.opened.fetch_add(1, Ordering::SeqCst) + 1;
+      Ok(Flow::Next(Var::object(Session {
+        number,
+        released: sessions.released.clone(),
+      })))
+    }
+  }
+
+  static SEND_PARAMS: &[ParamDecl] = &[ParamDecl::new(
+    "text",
+    "",
+    Forms::LITERAL,
+    &[TypeName::String],
+    Requirement::Required,
+  )];
+
+  pub struct Send;
+
+  impl LeafShard for Send {
+    type Compiled = Arc<str>;
+    type State = ();
+    const DESC: ShardDesc = ShardDesc {
+      params: Params::Declared(SEND_PARAMS),
+      input: InputDesc::Types(&[TypeName::Object(&SESSION)]),
+      output: OutputDesc::Passthrough,
+      targets: Targets::All,
+      effects: effects(),
+      lifetime: otter_core::signature::Lifetime::Stateless,
+      ..ShardDesc::undocumented("Test.Send", 1)
+    };
+
+    fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Arc<str>>> {
+      Ok(Composed {
+        compiled: Arc::from(args.string("text").expect("decoded")),
+        output: ctx.input(),
+      })
+    }
+
+    fn instantiate(_: &Arc<str>, _: &mut InstanceCtx) -> Result<()> {
+      Ok(())
+    }
+
+    fn activate(text: &Arc<str>, _: &mut (), ctx: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
+      let session = input.as_object::<Session>().expect("typed by compose");
+      let sessions = ctx.services().get::<Sessions>().expect("opened through it");
+      sessions
+        .sent
+        .lock()
+        .unwrap()
+        .push(format!("{}: {text}", session.number));
+      Ok(Flow::Next(input.clone()))
+    }
+  }
+
+  pub static OPEN: ShardType = leaf_type::<Open>();
+  pub static SEND: ShardType = leaf_type::<Send>();
+
+  pub fn catalog() -> otter_core::Catalog {
+    otter_core::Catalog::new(&[otter_core::shards::CATALOG, &[&OPEN, &SEND]])
+      .and_then(|c| c.with_objects(&[&[&SESSION]]))
+      .unwrap()
+  }
+
+  /// A session over `text` with a fresh `Sessions` service, ticked until
+  /// it finishes (at most `ticks`); the service and what finished.
+  pub fn run(
+    text: &str,
+    ticks: usize,
+  ) -> (
+    Arc<Sessions>,
+    Vec<otter_lang::Finished>,
+    otter_lang::Session,
+  ) {
+    let sessions = Arc::new(Sessions::default());
+    let mut services = otter_core::service::Services::default();
+    services.insert_arc(sessions.clone());
+    let mut session = otter_lang::Session::new();
+    session.set_services(services);
+    session
+      .reload(
+        otter_lang::Source::new("t.shs", text),
+        &catalog(),
+        &super::no_defines(),
+      )
+      .unwrap_or_else(|(_, d)| panic!("load failed: {d:?}"));
+    let mut finished = Vec::new();
+    for _ in 0..ticks {
+      finished.extend(session.tick());
+      if session.running() == 0 {
+        break;
+      }
+    }
+    (sessions, finished, session)
+  }
+
+  pub fn counts(s: &Sessions) -> (usize, usize) {
+    (
+      s.opened.load(Ordering::SeqCst),
+      s.released.load(Ordering::SeqCst),
+    )
+  }
+
+  #[allow(dead_code)]
+  pub fn object_type() -> Type {
+    SESSION.to_type()
+  }
+}
+
+#[test]
+fn a_host_object_is_opened_used_and_released_by_a_script() {
+  let text = r#"@fn(Talk input: Test.Session output: Test.Session params: {} { Test.Send("hi") | Test.Send("bye") })
+Test.Open | Var(s)
+s | Talk
+Test.Open | Talk
+none"#;
+  let (sessions, finished, _session) = host_session::run(text, 10);
+  assert!(
+    matches!(&finished[..], [f] if matches!(f.outcome, Outcome::Completed(_))),
+    "{finished:?}"
+  );
+  assert_eq!(
+    host_session::counts(&sessions),
+    (2, 2),
+    "opened and released"
+  );
+  assert_eq!(
+    *sessions.sent.lock().unwrap(),
+    ["1: hi", "1: bye", "2: hi", "2: bye"]
+  );
+}
+
+#[test]
+fn a_host_object_is_released_on_every_exit() {
+  let cases = [
+    // A failure after opening.
+    ("error", "Test.Open | Var(s)\n\"x\" | ParseInt"),
+    // Stop.
+    ("stop", "Test.Open | Var(s)\nStop"),
+    // Return out of a function holding one in a local.
+    (
+      "return",
+      "@fn(F input: None output: Int params: {} { Test.Open | Var(s) 1 | Return })\nF",
+    ),
+    // A looped wire: each iteration's local goes at the next iteration.
+    (
+      "loop",
+      "@wire(main { Test.Open | Var(s) Pause s | Test.Send(\"x\") } looped: true)\n@mesh(m) @schedule(m main) @run(m)",
+    ),
+  ];
+  for (exit, text) in cases {
+    // Odd: the loop is paused inside its third iteration, holding a session.
+    let (sessions, _, mut session) = host_session::run(text, 5);
+    let (opened, released) = host_session::counts(&sessions);
+    assert!(opened >= 1, "{exit}");
+    if exit == "loop" {
+      // Every iteration but the one in flight has released its session.
+      assert_eq!((opened, released), (3, 2), "{exit}");
+      // Cancelling the running wire releases the last one.
+      session.stop();
+      assert_eq!(
+        host_session::counts(&sessions),
+        (opened, opened),
+        "{exit}: cancelled"
+      );
+    } else {
+      assert_eq!((opened, released), (1, 1), "{exit}");
+    }
+  }
+}
+
+#[test]
+fn a_service_is_looked_up_at_activation() {
+  // Without the service, the shard fails at run time with its own message;
+  // compose does not need it.
+  let program = Program::load(
+    Source::new("t.shs", "Test.Open | Var(s)\n1"),
+    &host_session::catalog(),
+    &no_defines(),
+  )
+  .unwrap_or_else(|(_, d)| panic!("{d:?}"));
+  let report = program.run().unwrap();
+  match report.outcomes.iter().find(|(w, _)| w == "root") {
+    Some((_, Some(Outcome::Failed(e)))) => {
+      assert!(e.to_string().contains("no Sessions service"), "{e}")
+    }
+    other => panic!("{other:?}"),
+  }
+}
+
+#[test]
+fn object_types_compose_by_name() {
+  let catalog = host_session::catalog();
+  let errors = |text: &str| {
+    otter_lang::check_with(
+      Source::new("t.shs", text),
+      &catalog,
+      &no_defines(),
+      &otter_lang::MemoryFiles::default(),
+    )
+    .diagnostics
+  };
+  // A session where an Int is expected, and an Int where a session is.
+  let d = errors("@fn(F input: Int output: Int params: {} { input })\nTest.Open | F");
+  assert_eq!(d.len(), 1, "{d:?}");
+  assert!(d[0].message.contains("Test.Session"), "{}", d[0].message);
+  let d = errors("1 | Test.Send(\"x\")");
+  assert_eq!(d.len(), 1, "{d:?}");
+  assert_eq!(d[0].code, "input-type-mismatch");
+  // An unknown type name suggests the object type.
+  let d = errors("@fn(F input: Test.Sesion output: None params: {} { none })\nnone");
+  assert_eq!(d[0].code, "unknown-type", "{d:?}");
+  assert!(
+    d[0].did_you_mean.iter().any(|s| s == "Test.Session"),
+    "{d:?}"
+  );
+  // Without the type in the catalog, the name is unknown.
+  let d = load_errors("@fn(F input: Test.Session output: None params: {} { none })\nnone");
+  assert_eq!(d[0].code, "unknown-type");
+}
+
+#[test]
+fn a_catalog_refuses_duplicate_and_unqualified_object_types() {
+  static PLAIN: otter_core::object::ObjectType = otter_core::object::ObjectType::new("Session");
+  static LOWER: otter_core::object::ObjectType =
+    otter_core::object::ObjectType::new("Test.session");
+  let base = || Catalog::new(&[otter_core::shards::CATALOG]).unwrap();
+  assert!(
+    base()
+      .with_objects(&[&[&host_session::SESSION], &[&host_session::SESSION]])
+      .is_err()
+  );
+  assert!(base().with_objects(&[&[&PLAIN]]).is_err());
+  assert!(base().with_objects(&[&[&LOWER]]).is_err());
+}
+
+/// Guards in a control shard's `State` (docs/host-requirements.md H4): the
+/// engine resets the state on every exit, so a guard's `Drop` runs on
+/// success, error, `Stop`, `Return` passing through, and cancellation.
+mod host_guard {
+  use std::sync::Arc;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  use otter_core::describe::{
+    Forms, InputDesc, OutputDesc, ParamDecl, Params, Requirement, ShardDesc, Targets,
+  };
+  use otter_core::flow::CompiledFlow;
+  use otter_core::instance::LeafCtx;
+  use otter_core::{ActivationCtx, Args, ComposeCtx, Composed, ControlShard, ControlStep};
+  use otter_core::{Result, ShardType, Var};
+
+  /// Taken and released guards, through the mesh's services.
+  #[derive(Default)]
+  pub struct Ledger {
+    pub taken: AtomicUsize,
+    pub released: AtomicUsize,
+  }
+
+  /// Releases on drop, as a transaction rolls back or a dialog dismisses.
+  pub struct Guard(Arc<Ledger>);
+
+  impl Drop for Guard {
+    fn drop(&mut self) {
+      self.0.released.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  static PARAMS: &[ParamDecl] = &[ParamDecl::new(
+    "action",
+    "",
+    Forms::FLOW,
+    &[],
+    Requirement::Required,
+  )];
+
+  pub static GUARDED: ShardType = ShardType::new(ShardDesc {
+    params: Params::Declared(PARAMS),
+    input: InputDesc::Any,
+    output: OutputDesc::Passthrough,
+    targets: Targets::All,
+    effects: otter_core::signature::Effects::NONE,
+    lifetime: otter_core::signature::Lifetime::Stateless,
+    ..ShardDesc::undocumented("Test.Guarded", 1)
+  })
+  .controlled_by::<Guarded>();
+
+  pub struct Guarded;
+
+  impl ControlShard for Guarded {
+    type Compiled = Vec<CompiledFlow>;
+    type State = Option<Guard>;
+    const NAME: &'static str = "Test.Guarded";
+
+    fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Vec<CompiledFlow>>> {
+      let input = ctx.input();
+      let action = ctx.compose_flow(args.flow("action").expect("decoded"), input)?;
+      Ok(Composed {
+        compiled: vec![action],
+        output: input,
+      })
+    }
+
+    fn flows(compiled: &Vec<CompiledFlow>) -> &[CompiledFlow] {
+      compiled
+    }
+
+    fn resume(
+      _: &Vec<CompiledFlow>,
+      guard: &mut Option<Guard>,
+      ctx: &mut ActivationCtx<'_>,
+      input: &Var,
+      completion: Option<Result<Var>>,
+    ) -> Result<ControlStep> {
+      match completion {
+        None => {
+          let ledger = ctx.services().get_arc::<Ledger>().expect("a ledger");
+          ledger.taken.fetch_add(1, Ordering::SeqCst);
+          *guard = Some(Guard(ledger));
+          Ok(ControlStep::Enter(0, input.clone()))
+        }
+        Some(Ok(_)) => Ok(ControlStep::Complete(input.clone())),
+        Some(Err(err)) => Err(err),
+      }
+    }
+  }
+
+  pub fn run(text: &str, ticks: usize) -> (Arc<Ledger>, otter_lang::Session) {
+    let ledger = Arc::new(Ledger::default());
+    let mut services = otter_core::service::Services::default();
+    services.insert_arc(ledger.clone());
+    let catalog = otter_core::Catalog::new(&[otter_core::shards::CATALOG, &[&GUARDED]]).unwrap();
+    let mut session = otter_lang::Session::new();
+    session.set_services(services);
+    session
+      .reload(
+        otter_lang::Source::new("t.shs", text),
+        &catalog,
+        &super::no_defines(),
+      )
+      .unwrap_or_else(|(_, d)| panic!("load failed: {d:?}"));
+    for _ in 0..ticks {
+      session.tick();
+      if session.running() == 0 {
+        break;
+      }
+    }
+    (ledger, session)
+  }
+
+  pub fn counts(l: &Ledger) -> (usize, usize) {
+    (
+      l.taken.load(Ordering::SeqCst),
+      l.released.load(Ordering::SeqCst),
+    )
+  }
+}
+
+#[test]
+fn a_guard_in_control_state_is_released_on_every_exit() {
+  let looped = |body: &str| {
+    format!("@wire(main {{ {body} }} looped: true)\n@mesh(m) @schedule(m main) @run(m)")
+  };
+  let cases = [
+    (
+      "success",
+      "1 | Test.Guarded({ Math.Add(1) })".to_string(),
+      3,
+      (1, 1),
+    ),
+    (
+      "error",
+      "1 | Test.Guarded({ \"x\" | ParseInt })".to_string(),
+      3,
+      (1, 1),
+    ),
+    ("stop", "1 | Test.Guarded({ Stop })".to_string(), 3, (1, 1)),
+    (
+      "return",
+      "@fn(F input: Int output: Int params: {} { Test.Guarded({ Return }) Math.Add(1) })\n1 | F"
+        .to_string(),
+      3,
+      (1, 1),
+    ),
+  ];
+  for (exit, text, ticks, expected) in cases {
+    let (ledger, _session) = host_guard::run(&text, ticks);
+    assert_eq!(host_guard::counts(&ledger), expected, "{exit}");
+  }
+  // Suspended inside the flow, the guard is held; cancelling releases it.
+  let (ledger, mut session) = host_guard::run(&looped("1 | Test.Guarded({ Pause })"), 1);
+  assert_eq!(host_guard::counts(&ledger), (1, 0), "held while suspended");
+  session.stop();
+  assert_eq!(
+    host_guard::counts(&ledger),
+    (1, 1),
+    "released on cancellation"
+  );
+}

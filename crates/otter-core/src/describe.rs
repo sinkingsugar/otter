@@ -49,6 +49,8 @@ pub enum TypeName {
   Seq,
   /// Any table.
   Table,
+  /// Host objects of this type.
+  Object(&'static crate::object::ObjectType),
 }
 
 impl TypeName {
@@ -66,6 +68,7 @@ impl TypeName {
       TypeName::Bytes => "Bytes",
       TypeName::Seq => "Seq",
       TypeName::Table => "Table",
+      TypeName::Object(t) => t.name,
     }
   }
 
@@ -85,6 +88,7 @@ impl TypeName {
       TypeName::String => 52,
       TypeName::Seq => 56,
       TypeName::Table => 57,
+      TypeName::Object(_) => 60,
     }
   }
 
@@ -102,6 +106,7 @@ impl TypeName {
       TypeName::Bytes => Type::bytes(),
       TypeName::Seq => Type::seq(Type::any()),
       TypeName::Table => Type::any_table(),
+      TypeName::Object(t) => t.to_type(),
     }
   }
 
@@ -127,7 +132,10 @@ impl TypeName {
       TypeDesc::Bytes => TypeName::Bytes,
       _ if ty == Type::seq(Type::any()) => TypeName::Seq,
       _ if ty == Type::any_table() => TypeName::Table,
-      TypeDesc::Seq(_) | TypeDesc::Table(_) | TypeDesc::Union(_) => return None,
+      // An object type's name is its description; no static here to return.
+      TypeDesc::Seq(_) | TypeDesc::Table(_) | TypeDesc::Union(_) | TypeDesc::Object(_) => {
+        return None;
+      }
     })
   }
 }

@@ -79,6 +79,9 @@ def workloads(scratch):
     for case in TABLE_CASES:
         found.append(Workload(f"table/{case}", 1000, lambda n, c=case: ["table", c, str(n)]))
     found.append(Workload("reload", 10, lambda n: ["reload", str(n)]))
+    for case in ("assign", "seq", "table", "lookup"):
+        name = f"service/{case}" if case == "lookup" else f"object/{case}"
+        found.append(Workload(name, 1000, lambda n, c=case: ["object", c, str(n)]))
     return found
 
 

@@ -40,8 +40,9 @@ struct Execution {
 /// `reload` validates all wires and explicitly restarts the whole mesh.
 /// `reload_preserving` retains compatible callers, locals and mesh values,
 /// and call sites select edited function bodies at their next entry.
-/// Rejected edits leave execution untouched. Host services live outside this
-/// object and survive either mode. Each revision owns its compose cache.
+/// Rejected edits leave execution untouched. Host services
+/// ([`Session::set_services`]) survive either mode: every revision's mesh
+/// gets them. Each revision owns its compose cache.
 ///
 /// Calls are synchronous and require exclusive access: reload between ticks.
 /// Compilation can delay the host loop. Cancellation drops pending futures;
@@ -56,6 +57,8 @@ pub struct Session {
   /// Every name the last reload looked at, found or not, with what it
   /// found there (`Session::dependencies`).
   dependencies: Vec<(String, Fingerprint)>,
+  /// The host's services, given to every revision's mesh.
+  services: otter_core::service::Services,
 }
 
 /// What a file held when it was read: its length and a hash of its exact
@@ -86,7 +89,21 @@ impl Session {
       files: Box::new(FsFiles::default()),
       read: Vec::new(),
       dependencies: Vec::new(),
+      services: Default::default(),
     }
+  }
+
+  /// The services shards look up at activation (docs/host-requirements.md
+  /// H3), for the running mesh and every later revision.
+  pub fn set_services(&mut self, services: otter_core::service::Services) {
+    if let Some(active) = &mut self.active {
+      *active.mesh.services_mut() = services.clone();
+    }
+    self.services = services;
+  }
+
+  pub fn services(&self) -> &otter_core::service::Services {
+    &self.services
   }
 
   /// Where `@include` and `@read` find files: a filesystem with include
@@ -162,6 +179,7 @@ impl Session {
   pub fn with_mesh(mesh: Mesh) -> Self {
     assert_eq!(mesh.running(), 0, "Session requires an idle mesh");
     Self {
+      services: mesh.services().clone(),
       reset_policy: mesh.reset_policy(),
       active: Some(Execution {
         mesh,
@@ -194,6 +212,7 @@ impl Session {
     let program = self.load(source, catalog, defines)?;
     let mut mesh = program.mesh();
     mesh.set_reset_policy(self.reset_policy);
+    *mesh.services_mut() = self.services.clone();
     let entries = match compose_entries(&program, &mut mesh) {
       Ok(entries) => entries,
       Err(diagnostics) => return Err((program.source, diagnostics)),
