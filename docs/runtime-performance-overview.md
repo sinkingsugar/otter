@@ -301,10 +301,20 @@ experiment and full VM rerun:
      depth equal); a heap copy into a variable +4 instructions (`assign`
      of strings, sequences and tables +4 to +5 percent, `update` +0.1 to
      +1.7), `push` +1 to +2 (register allocation, the same code),
-     `var-key-take-16` +0.4. `run` is 1,172 instructions, from 1,371.
+     `make-seq`, `make-table` and `table/rebuild-16` +2 per iteration
+     (+0.0 to +0.1 percent, not per operation), `var-key-take-16` +0.4.
+     `run` is 1,172 instructions, from 1,371, with 2 indirect branches
+     (6) and 89 stack stores (111).
    The rule is written on `run` itself: a new kind of value goes out of
    line, so it cannot change `run`; the instruction gate and hot-asm show
-   any slip.
+   any slip. It narrows what can move `run`, not everything: compiler
+   optimization and `Var`'s layout still need the gates. An out-of-line
+   helper that reads the accumulator and writes the scratch takes both as
+   raw pointers and ends the read before the write: as references they
+   alias whenever the accumulator is the scratch, which Miri reports as
+   undefined behavior (review `2026-10-11-dcee86c-claude-0b393d#F1`).
+   Returning the value instead is sound but moved the plain paths again
+   (`add-int` gave back its gain, entity and depth +0.1 percent).
 
 Keep the VM foundation and pursue collection ownership/access and short mixed
 flows next. The latest results and remaining misses belong in the

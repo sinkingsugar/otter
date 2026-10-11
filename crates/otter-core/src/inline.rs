@@ -713,8 +713,9 @@ impl Frames {
 /// values (`Var::is_plain`), and fixed reads or writes of one storage kind
 /// (an element by index, a struct table's slot, a push), whose code does
 /// not depend on what other kinds exist. Everything else (a copy or drop of
-/// a value owning storage, a lookup by key, generic cases, errors) is one
-/// call out of line. The compiler allocates registers and lays out blocks
+/// a value owning storage, a lookup by key, generic cases) is one call out
+/// of line; the fixed operations build their own errors (`Inc`, `Push`,
+/// `LoopTest`). The compiler allocates registers and lays out blocks
 /// for the whole loop at once, so code here moves every operation: kept to
 /// this, a new kind of value (an object, an image) cannot change it. Its
 /// price was one call on each copy of a string, sequence or table into a
@@ -833,7 +834,7 @@ pub(crate) fn run<C: VmCalls>(
           {
             let new = copy(&items[*i as usize]);
             assign(&mut scratch, new);
-          } else if let Err(e) = take_op(&*value, key, &mut scratch) {
+          } else if let Err(e) = take_op(value, key, &raw mut scratch) {
             return Err(*e);
           }
           value = &scratch;
@@ -846,7 +847,7 @@ pub(crate) fn run<C: VmCalls>(
           } {
             let new = copy(v);
             assign(&mut scratch, new);
-          } else if let Err(e) = take_slot_op(&*value, *index, &mut scratch) {
+          } else if let Err(e) = take_slot_op(value, *index, &raw mut scratch) {
             return Err(*e);
           }
           value = &scratch;
@@ -1076,28 +1077,45 @@ fn arith_name(op: BinOp) -> &'static str {
 /// `Take` past `run`'s inline read (an element of a sequence by index): an
 /// entry by key, then the generic lookup with its errors. Out of line, as
 /// everything in `run` that is not a fixed operation on one kind (see
-/// `run`). The result goes straight into `scratch` and a failure is boxed,
-/// so the call returns one register.
+/// `run`). The result goes straight into `run`'s scratch and a failure is
+/// boxed, so the call returns one register.
+///
+/// The accumulator `value` may be that scratch, so both come as raw
+/// pointers, and the read through `value` ends before the write through
+/// `scratch`, as in `run` itself. A shared and a mutable reference to the
+/// same value in one call is undefined behavior even when the accesses do
+/// not overlap (review 2026-10-11-dcee86c-claude-0b393d#F1).
+///
+/// SAFETY: `value` is `run`'s live accumulator; `scratch` is `run`'s
+/// scratch; `key` is a constant or a frame slot, never the scratch.
 #[inline(never)]
-fn take_op(value: &Var, key: &Var, scratch: &mut Var) -> std::result::Result<(), Box<Error>> {
-  let new = match (value, key) {
+unsafe fn take_op(
+  value: *const Var,
+  key: &Var,
+  scratch: *mut Var,
+) -> std::result::Result<(), Box<Error>> {
+  // SAFETY: see above; the reference ends with this statement.
+  let new = match (unsafe { &*value }, key) {
     (Var::Table(entries), Var::String(k)) => entries.get(k).map(copy).unwrap_or(Var::None),
-    _ => data::take_value(value, key).map_err(Box::new)?,
+    (value, key) => data::take_value(value, key).map_err(Box::new)?,
   };
-  assign(scratch, new);
+  // SAFETY: no reference into the scratch is live.
+  assign(unsafe { &mut *scratch }, new);
   Ok(())
 }
 
 /// `TakeSlot` past `run`'s inline slot read: a value that is not a struct
-/// table, with its error, out of line as `take_op`.
+/// table, with its error, out of line as `take_op` and under its contract.
 #[inline(never)]
-fn take_slot_op(
-  value: &Var,
+unsafe fn take_slot_op(
+  value: *const Var,
   index: usize,
-  scratch: &mut Var,
+  scratch: *mut Var,
 ) -> std::result::Result<(), Box<Error>> {
-  let new = data::take_slot(value, index).map_err(Box::new)?;
-  assign(scratch, new);
+  // SAFETY: as in `take_op`; the reference ends with this statement.
+  let new = data::take_slot(unsafe { &*value }, index).map_err(Box::new)?;
+  // SAFETY: no reference into the scratch is live.
+  assign(unsafe { &mut *scratch }, new);
   Ok(())
 }
 
@@ -1319,6 +1337,43 @@ pub(crate) fn construct(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// An out-of-line `Take` or `TakeSlot` whose accumulator is the run's
+  /// scratch (the input, or a previous result): the read must end before
+  /// scratch is written. Native runs passed with the aliasing; these fail
+  /// under Miri there (reviews 2026-10-11-dcee86c-claude-0b393d#F1 and
+  /// 2026-10-11-dcee86c-codex-5d92a7).
+  #[test]
+  fn out_of_line_takes_read_the_scratch_before_writing_it() {
+    let table = |entries: Vec<(&str, Var)>| Var::from_table(entries.into_iter().collect::<Table>());
+    // A key lookup on the input, then on its result.
+    let code = instructions([
+      Op::Take(Operand::Const(Var::string("a"))),
+      Op::Take(Operand::Const(Var::string("b"))),
+    ]);
+    let input = table(vec![("a", table(vec![("b", Var::Int(5))]))]);
+    let (_, out) = run(&code, 0, input, &mut [], &mut [], &NoCalls).unwrap();
+    assert_eq!(out, Var::Int(5));
+    // A valid read of a plain vector, and the same metered.
+    let code = instructions([Op::Take(Operand::Const(Var::Int(0)))]);
+    let float4 = || Var::Float4(Float4([1.0; 4]));
+    let (_, out) = run(&code, 0, float4(), &mut [], &mut [], &NoCalls).unwrap();
+    assert_eq!(out, Var::Float(1.0));
+    let meter = Meter::new(Default::default());
+    let metered = Metered {
+      inner: NoCalls,
+      meter: &meter,
+    };
+    let (_, out) = run(&code, 0, float4(), &mut [], &mut [], &metered).unwrap();
+    assert_eq!(out, Var::Float(1.0));
+    // Errors: an index out of range, a slot on a value that is no table.
+    let code = instructions([Op::Take(Operand::Const(Var::Int(-1)))]);
+    let seq = Var::from_seq(std::sync::Arc::new(vec![Var::Int(1)]));
+    assert!(run(&code, 0, seq, &mut [], &mut [], &NoCalls).is_err());
+    let code = instructions([Op::TakeSlot(0)]);
+    assert!(run(&code, 0, Var::Int(1), &mut [], &mut [], &NoCalls).is_err());
+    assert!(run(&code, 0, Var::None, &mut [], &mut [], &NoCalls).is_err());
+  }
 
   fn instructions(ops: impl IntoIterator<Item = Op>) -> Vec<Instruction> {
     let mut code: Vec<_> = ops
