@@ -22,6 +22,7 @@ This repository should be usable without previous chat history or private agent 
 - `docs/golden-path.md`: the approved plan for the current work (functions, scope, the stackless engine, values). It is the contract for milestones M0 to M7 and overrides older statements in the documents below where they conflict.
 - `docs/metaprogramming.md`: the contract for M8 to M10 (compose-time evaluation, flow parameters, code as data and hygienic macros).
 - `docs/host-requirements.md`: what a production host needs that 2.0 lacks (objects, services, cleanup on exit, concurrency, host exchange, runtime compilation, the C API, catalog and modules), with proposed decisions awaiting the maintainer.
+- `docs/performance-gates.md`: the plan for strict runtime gates (Valgrind instruction and allocation counts per iteration, a wall-clock A/B tool), which land before Track A1.
 - `docs/shards-2-compose-split.md`: the design and the source of truth for the core model. Read it before changing core code.
 - `docs/prototype-shard-contract.md`: the shard contract (the decisions that replace 1.x's `shards.h`).
 - `docs/stackless-experiment.md`: the scheduler experiment and decision (historical: stackful is gone), the shared shard APIs, and the matched benchmarks against 1.x.

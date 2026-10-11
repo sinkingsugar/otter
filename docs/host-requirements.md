@@ -1,6 +1,6 @@
 # What a Production Host Needs: Gaps and Decisions
 
-Status: proposal, 2026-10-10. Every **Proposal** below is a recommendation awaiting Giovanni's decision; nothing here is implemented. When a decision is taken, record it in its section (and in the document that owns the design, for example `values-and-types.md` for a new value), and move the work into a plan with milestones and gates as the golden path and the metaprogramming plan do.
+Status: proposal, 2026-10-10. Every **Proposal** below is a recommendation awaiting Giovanni's decision, except where a section records a **Decision**; nothing here is implemented. H1, H3, H4 and H6 were accepted on 2026-10-11; their implementation (Track A1) waits for the performance gates in [performance-gates.md](performance-gates.md). When a decision is taken, record it in its section (and in the document that owns the design, for example `values-and-types.md` for a new value), and move the work into a plan with milestones and gates as the golden path and the metaprogramming plan do.
 
 The golden path and M8–M10 made the language and engine sound. This document lists what is still missing for a real application to run on 2.0, and the design questions that must be settled before the missing pieces are built. Several of them shape every module, so they come before any module port; otherwise each module invents its own handle, lifetime and threading rules.
 
@@ -33,6 +33,8 @@ The surveys' working files are not part of this repository; the numbers above ar
 
 **Open.** Thread affinity: `Var` is `Send + Sync` today, and async operations move owned values to the runtime's threads. A UI object that must only be touched on the main thread either stays `Send + Sync` by contract (the host asserts the thread on use, as the 1.x host already does) or 2.0 adds a non-`Send` object class, which would make `Var` non-`Send` and is not worth it. Proposal: the former.
 
+**Decision (2026-10-11):** accepted as proposed. Objects stay `Send + Sync`; a host object with thread affinity asserts its thread on use.
+
 ### H2. Images, audio and the other deferred values
 
 **Need.** Images appear in the imaging module, in LLM vision input and in host shards (decode, crop, resize, write, screenshots). Audio buffers in the audio module and speech recognition. Integer-keyed tables in one real script (numeric row order). Integer vectors and colors as `@i2`/`@f3`/`@color` constructors (93 sites).
@@ -49,6 +51,8 @@ The surveys' working files are not part of this repository; the numbers above ar
 
 **Proposal.** A typed service map on the mesh: the host inserts services before running (`mesh.services_mut().insert(db)`), and shards fetch them at activation through `LeafCtx` (`ctx.service::<Db>()`), never in compose. A module provides a default service when the host inserts none. Objects (H1) are what scripts hold; services are what owns and pools the underlying resources (a `Db.Connection` object refers to its database in the `Db` service).
 
+**Decision (2026-10-11):** accepted as proposed.
+
 ### H4. Cleanup on every exit
 
 **Need.** A transaction must commit or roll back, and a UI container must dismiss, on every exit of its body: success, error, `Stop`, `Restart`, `Return` passing through, and cancellation. `ControlShard::State` is reset to `Default` on those exits and documented as holding no resource, and `resume` is not called when `Stop`, `Restart` or `Return` passes through.
@@ -56,6 +60,8 @@ The surveys' working files are not part of this repository; the numbers above ar
 **Options.** (a) An `exit(compiled, state, ctx, reason)` callback called on every exit that skips `resume`. (b) Allow guard values in `State`: the reset drops them, and their `Drop` does the cleanup (queueing a rollback to the database service, closing a dialog through the host).
 
 **Proposal.** (b), because the reset already happens on every exit. Specify and test that it does, cancellation included, then relax the rule: `State` may hold guards whose `Drop` releases or schedules release and never blocks. (a) remains available if a cleanup ever needs `ctx`.
+
+**Decision (2026-10-11):** accepted as proposed.
 
 ### H5. Concurrency: work off the scheduler, joining, detaching
 
@@ -73,6 +79,8 @@ The surveys' working files are not part of this repository; the numbers above ar
 **Need.** Cancelling an instance drops its pending future and fires its token; a worker running blocking code finishes later. A model context, connection or host object must not be freed or reused while a worker still uses it.
 
 **Proposal.** Rule for module authors: an operation owns `Arc`s of every resource it touches, so releasing the instance cannot free a resource in use; resources with exclusive use (a chat context) are leased from their service and returned when the worker finishes, not when the instance is cancelled. Long native calls get a cancellation bridge where the library has one (llama.cpp's abort callback, `sqlite3_interrupt`). Document it in `embedding.md` and test it per module.
+
+**Decision (2026-10-11):** accepted as proposed.
 
 ### H7. Exchanging values with the host per instance
 
@@ -219,7 +227,7 @@ The surveyed host is not being ported as it is. It is being replaced by **an age
 
 **P0. Rename (done 2026-10-11).** The project is Otter: crates `otter-core`, `otter-lang`, `otter-io`, `otter-cli`, the `otter` command, the repository. The language keeps the name Shards and the `.shs` extension.
 
-**Track A: the core decisions, in order** (the host's native loop needs A1 to A3):
+**Track A: the core decisions, in order** (the host's native loop needs A1 to A3). The strict performance gates ([performance-gates.md](performance-gates.md)) land first, so A1 is measured against them:
 1. **Objects and services** (H1, H3), specified together with guard cleanup (H4) and the cancellation rules (H6). Gate: a host object (a fake session) created, used and released by scripts; a service looked up at activation; release on success, error, `Stop`, `Return` and cancellation; hot-asm unchanged, or the difference explained; the ESP32 suites still fit.
 2. **Concurrency** (H5): `Spawn` outputs a handle; `Wire.Wait` and `Wire.Stop`; spawned instances owned by their spawner unless detached; channels as a service. Gate: an orchestration script that fans out, waits on and cancels workers, with cancellation reaching every child.
 3. **Runtime compilation** (H8), host side first: compile into a running mesh with a catalog subset, and check with diagnostics; scoped type registries and a bounded compose cache (both already open items); then a script-side `Code.Compile`. Gate: a soak compiling and dropping generated tools with memory flat.
