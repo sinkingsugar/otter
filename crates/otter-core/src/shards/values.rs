@@ -179,13 +179,16 @@ impl LeafShard for Log {
   fn activate(
     prefix: &Self::Compiled,
     _: &mut (),
-    _: &mut impl LeafCtx,
+    ctx: &mut impl LeafCtx,
     input: &Var,
   ) -> Result<Flow> {
     let value = input.text();
-    crate::log::emit(match prefix {
-      Some(p) => format!("{p}: {value}"),
-      None => value,
+    crate::log::emit_line(crate::log::Line {
+      text: match prefix {
+        Some(p) => format!("{p}: {value}"),
+        None => value,
+      },
+      instance: Some(ctx.instance()),
     });
     Ok(Flow::Next(input.clone()))
   }
@@ -899,8 +902,8 @@ impl LeafShard for Msg {
   fn activate(c: &MsgCompiled, _: &mut (), ctx: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
     let message = c.message.get(ctx);
     match message.as_str() {
-      Some(text) => crate::log::emit_at(c.level, text),
-      None => crate::log::emit_at(c.level, &message.text()),
+      Some(text) => crate::log::emit_at(c.level, text, Some(ctx.instance())),
+      None => crate::log::emit_at(c.level, &message.text(), Some(ctx.instance())),
     }
     Ok(Flow::Next(input.clone()))
   }

@@ -5280,3 +5280,81 @@ fn many_flow_arguments_are_located_like_few() {
     .collect();
   assert_eq!(columns, expected);
 }
+
+/// A host sees a running program's log lines as they are written, each
+/// with the instance that wrote it, not after the run.
+#[test]
+fn a_session_streams_log_lines_to_the_host() {
+  use std::sync::{Arc, Mutex};
+  let seen: Arc<Mutex<Vec<otter_core::log::Line>>> = Arc::default();
+  let into = seen.clone();
+  let mut session = otter_lang::Session::new();
+  session.set_log_sink(Some(otter_core::log::Sink::stream(move |line| {
+    into.lock().unwrap().push(line)
+  })));
+  session
+    .reload(
+      Source::new(
+        "t.shs",
+        "@wire(main { Keep(n 0) Inc(n) n | Log(\"step\") } looped: true)\n@mesh(m) @schedule(m main) @run(m)",
+      ),
+      &catalog(),
+      &no_defines(),
+    )
+    .unwrap_or_else(|(_, d)| panic!("{d:?}"));
+  for tick in 1..=3 {
+    session.tick();
+    let lines = seen.lock().unwrap();
+    // This tick's line is already there, before the next tick runs.
+    assert_eq!(lines.len(), tick, "{lines:?}");
+    assert_eq!(lines[tick - 1].text, format!("step: {tick}"));
+    assert!(lines[tick - 1].instance.is_some());
+  }
+  // Without a sink, the session leaves the thread's own (here a capture).
+  session.set_log_sink(None);
+  let (_, captured) = otter_core::log::capture(|| session.tick());
+  assert_eq!(captured, ["step: 4"]);
+}
+
+/// `@const(... ignore-redefined: true)` is a default a script argument
+/// (`-D name=value`) replaces; a plain `@const` still refuses the clash.
+#[test]
+fn a_constant_can_be_a_default_for_a_script_argument() {
+  let text = "@const(steps 10 ignore-redefined: true)\n@steps | Math.Add(1)";
+  assert_eq!(completed(&run(text, &no_defines()), "root"), Var::Int(11));
+  let given: HashMap<String, String> = [("steps".to_string(), "50".to_string())].into();
+  assert_eq!(completed(&run(text, &given), "root"), Var::Int(51));
+  // Without the option, the clash is an error, as before.
+  let d = match Program::load(
+    Source::new("t.shs", "@const(steps 10)\n@steps"),
+    &catalog(),
+    &given,
+  ) {
+    Ok(_) => panic!("expected an error"),
+    Err((_, d)) => d,
+  };
+  assert_eq!(d[0].code, "duplicate-binding");
+  let d = load_errors("@const(steps 10 ignore-redefined: \"yes\")\n@steps");
+  assert_eq!(d[0].code, "declaration");
+  // The argument takes the default's type; one that does not parse is an
+  // error at the declaration. Strings stay strings.
+  let bad: HashMap<String, String> = [("steps".to_string(), "many".to_string())].into();
+  let d = match Program::load(Source::new("t.shs", text), &catalog(), &bad) {
+    Ok(_) => panic!("expected an error"),
+    Err((_, d)) => d,
+  };
+  assert_eq!(d[0].code, "script-argument-type");
+  let named = "@const(who \"world\" ignore-redefined: true)\nf\"hello {@who}\"";
+  assert_eq!(
+    completed(&run(named, &no_defines()), "root"),
+    Var::string("hello world")
+  );
+  let who: HashMap<String, String> = [("who".to_string(), "otter".to_string())].into();
+  assert_eq!(
+    completed(&run(named, &who), "root"),
+    Var::string("hello otter")
+  );
+  let flag: HashMap<String, String> = [("fast".to_string(), "true".to_string())].into();
+  let text = "@const(fast false ignore-redefined: true)\n@fast";
+  assert_eq!(completed(&run(text, &flag), "root"), Var::Bool(true));
+}

@@ -59,6 +59,8 @@ pub struct Session {
   dependencies: Vec<(String, Fingerprint)>,
   /// The host's services, given to every revision's mesh.
   services: otter_core::service::Services,
+  /// Where the program's log lines go while it runs (`set_log_sink`).
+  log: Option<otter_core::log::Sink>,
 }
 
 /// What a file held when it was read: its length and a hash of its exact
@@ -90,7 +92,17 @@ impl Session {
       read: Vec::new(),
       dependencies: Vec::new(),
       services: Default::default(),
+      log: None,
     }
+  }
+
+  /// Sends the program's log lines to `sink` while the session ticks or
+  /// stops it, each as it is written (`otter_core::log::Sink::stream`), so
+  /// the host sees progress as it happens; work the program starts on other
+  /// threads (`otter_io` tasks) logs there too. `None`: the lines go where
+  /// the host's thread sends them (standard output by default).
+  pub fn set_log_sink(&mut self, sink: Option<otter_core::log::Sink>) {
+    self.log = sink;
   }
 
   /// The services shards look up at activation (docs/host-requirements.md
@@ -179,6 +191,7 @@ impl Session {
   pub fn with_mesh(mesh: Mesh) -> Self {
     assert_eq!(mesh.running(), 0, "Session requires an idle mesh");
     Self {
+      log: None,
       services: mesh.services().clone(),
       reset_policy: mesh.reset_policy(),
       active: Some(Execution {
@@ -247,6 +260,13 @@ impl Session {
   /// records. At `@run`'s iteration limit, cancels remaining instances and
   /// reports their outcomes in this same call. Idle calls are no-ops.
   pub fn tick(&mut self) -> Vec<Finished> {
+    match self.log.clone() {
+      Some(sink) => otter_core::log::with_sink(Some(sink), || self.tick_inner()),
+      None => self.tick_inner(),
+    }
+  }
+
+  fn tick_inner(&mut self) -> Vec<Finished> {
     let Some(active) = &mut self.active else {
       return Vec::new();
     };
@@ -276,6 +296,13 @@ impl Session {
   /// the revision's mesh and compose cache. Safe to call repeatedly.
   /// Dropping the session also cancels work, but discards the outcomes.
   pub fn stop(&mut self) -> Vec<Finished> {
+    match self.log.clone() {
+      Some(sink) => otter_core::log::with_sink(Some(sink), || self.stop_inner()),
+      None => self.stop_inner(),
+    }
+  }
+
+  fn stop_inner(&mut self) -> Vec<Finished> {
     let Some(mut active) = self.active.take() else {
       return Vec::new();
     };
