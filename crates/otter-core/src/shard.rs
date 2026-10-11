@@ -123,9 +123,11 @@ pub struct ActivationCtx<'a> {
   /// resolve through, pinned per outermost invocation.
   pub(crate) table: &'a Arc<crate::reload::FunctionRegistry>,
   pub(crate) mesh_frame: &'a mut Vec<Var>,
-  pub(crate) spawn_queue: &'a mut Vec<(Arc<CompiledWire>, Var)>,
+  pub(crate) spawn_queue: &'a mut Vec<crate::wire_instance::Queued>,
   pub(crate) waiting: &'a mut crate::instance::Waiting,
-  pub(crate) waker: &'a Waker,
+  /// The running instance's completion (its waker, and the children it
+  /// owns).
+  pub(crate) completion: &'a Arc<crate::wire_instance::Completion>,
   /// The loop iteration ([`LeafCtx::iteration`]).
   pub(crate) iteration: u64,
   pub(crate) max_call_depth: usize,
@@ -169,9 +171,30 @@ impl ActivationCtx<'_> {
     }
   }
 
-  /// Schedules a new instance of `wire`. It starts on the next tick.
-  pub fn spawn(&mut self, wire: Arc<CompiledWire>, input: Var) {
-    self.spawn_queue.push((wire, input));
+  /// Schedules a new instance of `wire`, starting at the end of the tick,
+  /// and returns its completion. The running instance owns it (it is
+  /// cancelled when the running instance ends) unless `detach`, which
+  /// leaves it to the mesh.
+  pub fn spawn(
+    &mut self,
+    wire: Arc<CompiledWire>,
+    input: Var,
+    detach: bool,
+  ) -> Arc<crate::wire_instance::Completion> {
+    let completion = crate::wire_instance::Completion::new(
+      wire.name.as_str().into(),
+      self.completion.requests().clone(),
+      self.completion.wake.signal().clone(),
+    );
+    if !detach {
+      self.completion.adopt(completion.clone());
+    }
+    self.spawn_queue.push(crate::wire_instance::Queued {
+      wire,
+      input,
+      completion: completion.clone(),
+    });
+    completion
   }
 
   /// Marks the instance as waiting on its waker. A shard calls this right
@@ -194,7 +217,7 @@ impl ActivationCtx<'_> {
 
   /// The instance's waker. Waking it after the instance finished is harmless.
   pub fn waker(&self) -> &Waker {
-    self.waker
+    &self.completion.waker
   }
 }
 

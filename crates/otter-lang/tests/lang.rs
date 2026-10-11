@@ -331,7 +331,7 @@ fn editing_a_framed_callee_leaves_the_spawner_alone() {
     format!(
       r#"@fn(F input: None output: Int params: {{}} {{ Pause() {value} }})
 @wire(child {{ F | Log("child") }})
-@wire(main {{ Spawn(child) Log("a") Pause() Log("b") }})
+@wire(main {{ Spawn(child detach: true) none | Log("a") Pause() Log("b") }})
 @mesh(m) @schedule(m main) @run(m)"#
     )
   };
@@ -719,7 +719,7 @@ fn preserving_reload_updates_retained_spawned_children() {
     format!(
       r#"@fn(Inner input: Int output: Int params: {{}} {{Add({amount})}})
 @wire(child {{Inner Log Pause()}} looped: true)
-@wire(main {{{input} Spawn(child)}})
+@wire(main {{{input} Spawn(child detach: true)}})
 @mesh(m) @schedule(m main) @run(m)"#
     )
   };
@@ -938,7 +938,10 @@ fn reload_recompiles_changed_callees_and_resets_once_and_locals() {
 #[test]
 fn session_reports_spawned_failures_once() {
   let mut session = otter_lang::Session::new();
-  reload(&mut session, r#"@wire(child { 1 | Div(0) }) Spawn(child)"#);
+  reload(
+    &mut session,
+    r#"@wire(child { 1 | Div(0) }) Spawn(child detach: true)"#,
+  );
   let entries = session.tick();
   assert_eq!(entries.len(), 1);
   let children = session.tick();
@@ -1407,7 +1410,10 @@ If(Any(b {a}) {4} {5}) = z
 
 #[test]
 fn spawned_failures_fail_the_run() {
-  let report = run("@wire(child {1 | Div(0)})\nSpawn(child)", &no_defines());
+  let report = run(
+    "@wire(child {1 | Div(0)})\nSpawn(child detach: true)",
+    &no_defines(),
+  );
   assert!(!report.succeeded());
   assert_eq!(report.spawned_failures.len(), 1);
   assert_eq!(report.spawned_failures[0].0, "child");
@@ -5490,4 +5496,76 @@ fn script_argument_defaults_are_typed_everywhere_and_declared_once() {
     };
     assert_eq!(d[0].code, "declaration", "{d:?}");
   }
+}
+
+/// Spawn outputs the instance; Wait, Peek, IsRunning and Stop take it from
+/// a variable (docs/host-requirements.md H5).
+#[test]
+fn scripts_wait_for_what_they_spawn() {
+  let report = run(
+    "@wire(child { Pause() Math.Multiply(10) })
+3 | Spawn(child) = w
+IsRunning(w) = before
+Peek(w) = early
+Wait(w) = value
+IsRunning(w) = after
+[before early value after]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    Var::from_seq(std::sync::Arc::new(vec![
+      Var::Bool(true),
+      Var::None,
+      Var::Int(30),
+      Var::Bool(false)
+    ]))
+  );
+  // A child that already ended answers at once.
+  let report = run(
+    "@wire(child { Math.Multiply(10) })\n3 | Spawn(child) = w\nPause() Pause()\nWait(w)",
+    &no_defines(),
+  );
+  assert_eq!(completed(&report, "root"), Var::Int(30));
+}
+
+#[test]
+fn a_stopped_or_failed_instance_fails_wait() {
+  let failed_code = |text: &str| match run(text, &no_defines())
+    .outcomes
+    .into_iter()
+    .find(|(w, _)| w == "root")
+  {
+    Some((_, Some(Outcome::Failed(otter_core::Error::Diagnostic(d))))) => d.code.to_string(),
+    other => panic!("{other:?}"),
+  };
+  assert_eq!(
+    failed_code("@wire(child { Pause(100.0) })\nSpawn(child) = w\nStop(w)\nWait(w)"),
+    "wire-stopped"
+  );
+  assert_eq!(
+    failed_code("@wire(child { Pause(100.0) })\nSpawn(child) = w\nWait(w timeout: 0.0)"),
+    "wait-timeout"
+  );
+  // The child's own error passes through.
+  let report = run(
+    "@wire(child { 1 | Math.Divide(0) })\nSpawn(child) = w\nWait(w)",
+    &no_defines(),
+  );
+  assert!(!report.succeeded());
+  // Stop with a handle passes its input through; without one it stops.
+  let report = run(
+    "@wire(child { Pause(100.0) })\nSpawn(child) = w\n5 | Stop(w) | Math.Add(1)",
+    &no_defines(),
+  );
+  assert_eq!(completed(&report, "root"), Var::Int(6));
+}
+
+#[test]
+fn instance_shards_need_a_handle_variable() {
+  let d = check("1 = n\nWait(n)").diagnostics;
+  assert_eq!(d[0].code, "wrong-variable-type", "{d:?}");
+  // A wire is not an instance: spawn it first.
+  let d = check("@wire(child { none })\nWait(child)").diagnostics;
+  assert!(!d.is_empty());
 }

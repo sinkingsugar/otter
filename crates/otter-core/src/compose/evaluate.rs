@@ -292,6 +292,7 @@ fn run(wire: Arc<CompiledWire>, meter: &Meter) -> Result<Var> {
   let revisions = crate::reload::Revisions::default();
   let (mut mesh_frame, mut spawn_queue, mut waiting) =
     (Vec::new(), Vec::new(), crate::instance::Waiting::default());
+  let completion = crate::wire_instance::Completion::detached("compose-time".into());
   let result = catch_unwind(AssertUnwindSafe(|| {
     let mut ctx = ActivationCtx {
       instance,
@@ -301,7 +302,7 @@ fn run(wire: Arc<CompiledWire>, meter: &Meter) -> Result<Var> {
       mesh_frame: &mut mesh_frame,
       spawn_queue: &mut spawn_queue,
       waiting: &mut waiting,
-      waker: std::task::Waker::noop(),
+      completion: &completion,
       iteration: 0,
       max_call_depth: meter.limits().depth,
       meter: Some(meter),

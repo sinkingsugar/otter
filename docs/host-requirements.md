@@ -80,6 +80,7 @@ The surveys' working files are not part of this repository; the numbers above ar
 - A spawned instance belongs to its spawner instance (not its iteration); `detach: true` gives it to the mesh. When the spawner ends, for any reason, its whole tree is cancelled in the same pass, children queued in the same activation included; finished children are pruned, so a looped spawner does not accumulate them.
 - Handles are shareable values: several waiters, waiters that drop, a handle valid after the mesh retires the record, and across a reload it keeps naming the original instance (never retargets).
 - Implementation: a shared completion cell per spawned instance (outcome, cancel request, waiters); `Wait` as an async shard; the mesh honors cancel requests before its wake filtering.
+- **Implemented** (branch `concurrency`): `otter_core::wire_instance` (`Completion`, the `Wire.Instance` object, which every `Catalog` lists). `Wait` is a core suspending shard like `Pause` (its registration is its resume point, removed when the wait ends or its state is dropped), not an async shard: it needs the running instance's completion to refuse waiting on itself. A request (`Stop(w)`, an owner's end, the host through a handle) marks the cell, counts it on the mesh and fires the target's waker; the tick acts on it when it reaches a woken instance, and drains the rest after stepping and before the next tick, so an activation that was not woken checks nothing new. `Stop(w)` ends the target `Stopped`; an owner's end, the host and reloads end it `Cancelled`. A timed `Wait` is resumed every tick. Hosts get a handle with `Mesh::handle(id)`.
 - Deviations from 1.x: structured ownership by default (1.x `Joint: false` lets children outlive spawners); handles never dangle or retarget (1.x `Spawn` returns a weak pointer into a recycled pool); stopped and cancelled children are distinguishable (1.x keeps the last output across a stop); spawned wires see the mesh's variables and their input, no deep-copied captured variables. Not ported: `Detach` (`detach:`), `Step`, `SwitchTo`, `Suspend`/`Resume`, `Branch`, `WhenDone`, `DoMany`/`TryMany`/`Expand`.
 - Gate: fan out, collect and cancel a three-generation tree under both wake modes; spawn-then-exit before the child starts; detached survival; a parked async child cancelled; several and dropped waiters; every ending (`Stopped`, `Cancelled`, failure, a cleanup panic); bounded bookkeeping for looped parents; retained and restarted reloads with handles held in mesh variables; mesh destruction.
 
@@ -227,7 +228,7 @@ These are deliberate and stay, but each needs a line in the migration notes and 
 - `Match` must be exhaustive or have `default:`;
 - cancellation cannot be caught by `Maybe`;
 - `Maybe` without `else` passes its input through, as in 1.x;
-- `Spawn` passes its input through (changes with H5);
+- `Spawn` outputs the instance, and owns it unless `detach: true` (1.x passes the input through, and children outlive their spawner);
 - parameter labels are lowercase;
 - `looped` is the only wire option, and wire `Pure:` has no equivalent.
 
@@ -250,7 +251,7 @@ The surveyed host is not being ported as it is. It is being replaced by **an age
 
 **Track A: the core decisions, in order** (the host's native loop needs A1 to A3). The strict performance gates ([performance-gates.md](performance-gates.md)) land first, so A1 is measured against them:
 1. **Objects and services** (H1, H3), specified together with guard cleanup (H4) and the cancellation rules (H6). Gate: a host object (a fake session) created, used and released by scripts; a service looked up at activation; release on success, error, `Stop`, `Return` and cancellation; hot-asm unchanged, or the difference explained; the ESP32 suites still fit.
-2. **Concurrency** (H5): `Spawn` outputs a handle; `Wire.Wait` and `Wire.Stop`; spawned instances owned by their spawner unless detached; channels as a service. Gate: an orchestration script that fans out, waits on and cancels workers, with cancellation reaching every child.
+2. **Concurrency** (H5): `Spawn` outputs a handle; `Wait`, `Peek`, `IsRunning` and `Stop(w)`; spawned instances owned by their spawner unless detached; channels as a service. Gate: an orchestration script that fans out, waits on and cancels workers, with cancellation reaching every child.
 3. **Runtime compilation** (H8), host side first: compile into a running mesh with a catalog subset, and check with diagnostics; scoped type registries and a bounded compose cache (both already open items); then a script-side `Code.Compile`. Gate: a soak compiling and dropping generated tools with memory flat.
 4. **Iteration** (H12): `ForEach`, `Map`, `Filter`, `Reduce` with a named element, flattened into the VM.
 
