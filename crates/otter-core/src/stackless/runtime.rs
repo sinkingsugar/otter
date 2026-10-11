@@ -496,6 +496,9 @@ impl Mesh {
       }
       self.report.swapped.push(name);
     }
+    // The children of instances the reload ended (or failed to move onto
+    // their new body) end with them, before the host runs anything.
+    drain(&mut self.instances, &self.requests);
   }
 
   /// How many times call sites consulted the reload registry. A call site
@@ -587,6 +590,11 @@ impl Mesh {
   /// then starts instances spawned during the tick. Returns the number of
   /// instances still running.
   pub fn tick(&mut self) -> usize {
+    // Requests made since the last tick (a host stopping an instance
+    // through its handle) end their targets before anything runs.
+    if self.requests.pending() {
+      drain(&mut self.instances, &self.requests);
+    }
     let notify_only = self.wake_mode == WakeMode::OnNotify;
     let Mesh {
       instances,
@@ -618,11 +626,12 @@ impl Mesh {
     for queued in std::mem::take(&mut self.spawn_queue) {
       self.start(queued.wire, queued.input, queued.completion);
     }
-    // Requests take effect at the end of a tick, after every running
-    // instance had its activation (nothing is checked per activation):
-    // stops, the children of owners that ended (queued ones end without
-    // being instantiated) and so on down each tree, and requests a host
-    // made through a handle since the last tick.
+    // Requests made during the tick take effect at its end, after every
+    // running instance had its activation (nothing is checked per
+    // activation; a target that finished meanwhile ended as the request
+    // says, see `finish`): stops, the children of owners that ended
+    // (queued ones end without being instantiated), and so on down each
+    // tree.
     if self.requests.pending() {
       drain(&mut self.instances, &self.requests);
     }
@@ -1010,6 +1019,14 @@ fn carry_keeps(instance: &Instance, wire: &CompiledWire) -> Vec<Var> {
 /// Ends an instance: cleans up its state exactly once (if it was
 /// instantiated) and records the outcome.
 fn finish(instance: &mut Instance, mut outcome: Outcome) {
+  // A request made before the instance ended decides how it ended, unless
+  // it failed: a target that ran to completion in the tick it was stopped
+  // (or its owner ended) is Stopped (Cancelled), not Completed.
+  if matches!(outcome, Outcome::Completed(_) | Outcome::Stopped)
+    && let Some(request) = instance.completion.requested()
+  {
+    outcome = request.outcome();
+  }
   if let Some(mut state) = instance.state.take() {
     let mut ctx = InstanceCtx {
       instance: instance.id,
@@ -1034,7 +1051,11 @@ fn finish(instance: &mut Instance, mut outcome: Outcome) {
 }
 
 /// Ends every instance with a request, until none are left (ending one
-/// requests its children's end).
+/// requests its children's end). Out of line: inlined, it grew `tick`'s
+/// frame past the reach of aarch64's paired stores, which cost the
+/// activation context an instruction per activation.
+#[cold]
+#[inline(never)]
 fn drain(instances: &mut [Instance], requests: &CancelRequests) {
   while requests.take() != 0 {
     for instance in instances.iter_mut() {

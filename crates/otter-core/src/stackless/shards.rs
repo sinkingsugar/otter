@@ -88,6 +88,8 @@ impl Shard for Wait {
       None => {
         let value = ctx.get(wait.handle);
         let completion = crate::wire_instance::completion_of(&value)?.clone();
+        // A deadline past what the clock represents is no deadline.
+        let deadline = wait.timeout.and_then(|t| Instant::now().checked_add(t));
         if Arc::ptr_eq(&completion, ctx.completion) {
           return Err(crate::Error::Activation(format!(
             "Wait: an instance of {} cannot wait for itself",
@@ -100,9 +102,9 @@ impl Shard for Wait {
             *waiting = Some(Registration {
               completion,
               key,
-              deadline: wait.timeout.map(|t| Instant::now() + t),
+              deadline,
             });
-            if wait.timeout.is_none() {
+            if deadline.is_none() {
               ctx.set_waiting();
             }
             return Ok(Step::Suspend);
