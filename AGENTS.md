@@ -69,6 +69,7 @@ The prototype milestone is complete. Next is porting the language front end and 
 - `cargo test --workspace`
 - `cargo fmt --all` and `cargo fmt --manifest-path examples/esp32/Cargo.toml --all` before committing (2-space indent, see `rustfmt.toml`)
 - `cargo clippy --workspace --all-targets -- -D warnings`
+- performance: a fast path does not get slower. The instruction gate (`bench/instructions`) and hot-asm fail on any change; a baseline refresh that accepts a regression anywhere needs the maintainer's explicit approval, asked before committing it, with the measured numbers (refreshes for new workloads and improvements need none). Complex value kinds never touch the plain-value paths: `inline::run` holds only plain operations and fixed reads of one kind (lesson 9 in `docs/runtime-performance-overview.md`); anything else is out of line
 - docs off: `cargo test -p otter-core -p otter-io --no-default-features --test metadata --test catalog` and `cargo test -p otter-lang --no-default-features`
 - release nesting: `cargo test --release -p otter-lang --test lang nesting_up_to_the_limit`
 - TLS: `cargo clippy -p otter-io --all-targets --features rustls-ring -- -D warnings`

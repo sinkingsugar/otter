@@ -1380,19 +1380,25 @@ fn copy_slow(value: &Var) -> Var {
 }
 
 /// `*slot = value.clone()` for the VM's `Set`: plain values bit for bit,
-/// anything else with the references counted in place. Copying a string,
-/// sequence or table into a variable is the operation itself here, and a
-/// call per copy cost the heap assign cases about 2 ns each (2026-10-10).
-/// Explicit, so its size does not grow with `Var`'s glue.
+/// inline; anything else through `assign_copy_slow`.
 #[inline(always)]
 pub(crate) fn assign_copy(slot: &mut Var, value: &Var) {
   if slot.is_plain() && value.is_plain() {
     // SAFETY: neither owns anything; the bits are a whole value.
     unsafe { std::ptr::write(slot, std::ptr::read(value)) }
   } else {
-    let copied = clone_value(value);
-    drop_value(std::mem::replace(slot, copied));
+    assign_copy_slow(slot, value);
   }
+}
+
+/// The copy of a value owning storage, out of line so `inline::run`'s code
+/// does not depend on which kinds own storage (see `run`). Inline, as from
+/// 2026-10-10, it saved about 4 instructions per heap copy, and each new
+/// storage kind added arms to the VM's code (an object, 76 instructions).
+#[inline(never)]
+fn assign_copy_slow(slot: &mut Var, value: &Var) {
+  let copied = clone_value(value);
+  drop_value(std::mem::replace(slot, copied));
 }
 
 /// A sequence's items to change in place, copied first when they are
