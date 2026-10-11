@@ -87,20 +87,29 @@ jobs:
 
   instructions:
     # Instructions, allocations and bytes per iteration under Cachegrind,
-    # exact, against bench/instructions/baseline.txt (docs/performance-gates.md).
-    # The image is pinned: instruction counts depend on its Valgrind and C
-    # library, which the baseline records. The measured baseline is uploaded
-    # either way; after an intended change, commit it with the reason
-    # (`gh run download RUN -n instruction-baseline`, bench/instructions/README.md).
-    runs-on: ubuntu-24.04
+    # exact, against bench/instructions/TARGET.txt (docs/performance-gates.md),
+    # on x86-64 and on aarch64, where the code differs (instruction
+    # selection, registers, spills). The images are pinned: instruction counts
+    # depend on their Valgrind and C library, which each baseline records. The
+    # measured baseline is uploaded either way; after an intended change,
+    # commit it with the reason (bench/instructions/README.md).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y valgrind
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: python3 bench/instructions/run.py --check bench/instructions/baseline.txt --fresh fresh/baseline.txt
+      - run: python3 bench/instructions/run.py --check --fresh fresh/${{ matrix.target }}.txt
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: instruction-baseline
-          path: fresh/baseline.txt
+          name: instructions-${{ matrix.target }}
+          path: fresh/${{ matrix.target }}.txt

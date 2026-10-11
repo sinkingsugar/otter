@@ -1,12 +1,12 @@
 # Instruction gate
 
-Instructions, allocations and bytes per iteration of the runtime's hot workloads, exact, against `baseline.txt` ([docs/performance-gates.md](../../docs/performance-gates.md)). CI's `instructions` job runs the check on every push.
+Instructions, allocations and bytes per iteration of the runtime's hot workloads, exact, against a baseline per target: `x86_64-unknown-linux-gnu.txt` and `aarch64-unknown-linux-gnu.txt` ([docs/performance-gates.md](../../docs/performance-gates.md)). CI's `instructions` jobs (`ubuntu-24.04` and `ubuntu-24.04-arm`) run the check on every push and pull request; nothing needs to run locally.
 
 ```sh
-python3 bench/instructions/run.py --check bench/instructions/baseline.txt   # Linux, with Valgrind
-python3 bench/instructions/run.py --check bench/instructions/baseline.txt --allocations-only   # any OS, natively
-python3 bench/instructions/run.py --write /tmp/before.txt                   # a local baseline
-python3 bench/instructions/run.py --jitter 5                                # are the counts exact here?
+python3 bench/instructions/run.py --check                       # Linux with Valgrind: this target's baseline
+python3 bench/instructions/run.py --check --allocations-only    # any OS, natively
+python3 bench/instructions/run.py --write /tmp/before.txt       # a local baseline
+python3 bench/instructions/run.py --jitter 5                    # are the counts exact here?
 ```
 
 ## How it counts
@@ -36,16 +36,16 @@ If a count starts to vary, `--jitter` shows which; find the source rather than a
 
 Instruction counts depend on the exact Valgrind and C library build as well as the source: Valgrind substitutes its own `memcpy` and `malloc`, and libc code is counted. The baseline's header records the toolchain, target, C library and Valgrind, and `--check` refuses a baseline from another environment (`--ignore-environment` overrides; `--allocations-only` compares only allocations, which do not depend on it).
 
-The committed `baseline.txt` is CI's (`ubuntu-24.04`, its packaged Valgrind). After an intended change:
+The committed baselines are CI's (`ubuntu-24.04` and `ubuntu-24.04-arm`, their packaged Valgrind): one per target, because instruction selection and register allocation differ. After an intended change, take the baselines the jobs measured:
 
 ```sh
-gh run download RUN -n instruction-baseline   # the job uploads the baseline it measured
-mv baseline.txt bench/instructions/baseline.txt
+gh run download RUN -p 'instructions-*' -D /tmp/fresh   # each job uploads the baseline it measured
+cp /tmp/fresh/*/*.txt bench/instructions/
 ```
 
 and say in the commit why the counts changed, as for hot-asm and the compose baseline.
 
-Locally, compare a change against its base on the same machine:
+On a Linux machine, a change can also be compared locally against its base:
 
 ```sh
 git switch --detach BASE && python3 bench/instructions/run.py --write /tmp/before.txt

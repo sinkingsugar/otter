@@ -8,16 +8,18 @@ uses (count(2N) - count(N)) / N: process start, parsing, compose and teardown
 cancel, leaving the steady-state cost of one iteration. The driver counts
 allocations itself, so the same run gives both.
 
-  run.py --check bench/instructions/baseline.txt   fail on any regression
-  run.py --write bench/instructions/baseline.txt   regenerate (say why in the commit)
+  run.py --check            fail on any regression against this target's baseline
+  run.py --write            regenerate it (say why in the commit)
+  run.py --check FILE       against another baseline (e.g. one written at the base)
   run.py --jitter 5                                spread across repeated runs
   run.py --allocations-only --check ...            natively, without Valgrind
 
 Instruction counts depend on the exact Valgrind and C library build, so a
 baseline is only comparable in the environment it was written in (its header
-records it, and --check refuses a mismatch). The committed baseline is CI's
-(ubuntu-24.04); locally, write one at the base revision and check against it
-after the change. Python 3 standard library only.
+records it, and --check refuses a mismatch). The committed baselines are CI's,
+one per target (bench/instructions/TARGET.txt, from ubuntu-24.04 and
+ubuntu-24.04-arm); locally, write one at the base revision and check
+against it after the change. Python 3 standard library only.
 """
 
 import argparse
@@ -49,6 +51,8 @@ CACHES = ["--I1=32768,8,64", "--D1=32768,8,64", "--LL=8388608,16,64"]
 # simulators), so they are recorded and reported, not gated.
 COLUMNS = ("ir", "allocs", "bytes", "d1_misses", "ll_misses", "mispredicts")
 GATED = ("ir", "allocs", "bytes")
+# `--check`/`--write` without a file: this host's target's baseline.
+HOST = Path("<host target>")
 
 
 class Workload:
@@ -191,8 +195,10 @@ def check(results, baseline, gated):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--check", type=Path, metavar="BASELINE")
-    mode.add_argument("--write", type=Path, metavar="BASELINE")
+    mode.add_argument("--check", type=Path, nargs="?", const=HOST, metavar="BASELINE",
+                      help="default: bench/instructions/TARGET.txt for this host")
+    mode.add_argument("--write", type=Path, nargs="?", const=HOST, metavar="BASELINE",
+                      help="default: bench/instructions/TARGET.txt for this host")
     mode.add_argument("--jitter", type=int, metavar="RUNS", help="run every workload RUNS times and report the spread")
     p.add_argument("--allocations-only", action="store_true", help="run natively, without Valgrind: allocations and bytes only")
     p.add_argument("--ignore-environment", action="store_true", help="check against a baseline from another environment")
@@ -208,6 +214,9 @@ def main():
         subprocess.run(["cargo", "build", "--release", "-p", "otter-lang", "--example", "bench_gate"],
                        cwd=ROOT, check=True)
     env = environment(valgrind)
+    for mode in ("check", "write"):
+        if getattr(args, mode) is HOST:
+            setattr(args, mode, Path(__file__).with_name(f"{env['target']}.txt"))
     with tempfile.TemporaryDirectory() as tmp:
         scratch = Path(tmp)
         selected = [w for w in workloads(scratch) if re.search(args.filter, w.name)]

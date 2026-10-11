@@ -1,0 +1,41 @@
+name: perf-ab
+
+# Wall-clock A/B on Apple Silicon (docs/performance-gates.md §3): what the
+# instruction gate cannot see, code layout and branch prediction on a real
+# core. On a pull request it compares the merge result with the base; run by
+# hand, any two revisions (the same one twice measures the runner's noise).
+# The table goes to the job summary. It reports and does not fail until A/A
+# runs have measured the noise floor, which sets --fail-above.
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: base revision
+        required: true
+      head:
+        description: head revision (the same as base for an A/A run)
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf-ab:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/perf-ab.py "$BASE"
+      - if: github.event_name == 'workflow_dispatch'
+        env:
+          BASE: ${{ inputs.base }}
+          HEAD_REV: ${{ inputs.head }}
+        run: python3 scripts/perf-ab.py "$BASE" --head "$HEAD_REV"
