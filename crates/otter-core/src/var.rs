@@ -1346,22 +1346,6 @@ fn clone_value(value: &Var) -> Var {
   }
 }
 
-/// Drops a value for hot code, as `assign` overwrites one: nothing to do
-/// for a plain value, anything else out of line.
-#[inline(always)]
-pub(crate) fn release(value: Var) {
-  if value.is_plain() {
-    std::mem::forget(value);
-  } else {
-    drop_slow(value);
-  }
-}
-
-#[inline(never)]
-fn drop_slow(value: Var) {
-  drop_value(value);
-}
-
 /// A copy of a value (`Clone for Var`), as `assign` is for overwriting: a
 /// plain value bit for bit in place, anything else cloned out of line.
 #[inline(always)]
@@ -1379,26 +1363,18 @@ fn copy_slow(value: &Var) -> Var {
   clone_value(value)
 }
 
-/// `*slot = value.clone()` for the VM's `Set`: plain values bit for bit,
-/// inline; anything else through `assign_copy_slow`.
+/// `*slot = value.clone()`, with the references counted in place: the
+/// slow tier's `Set` (`inline::slow_op`; plain values are copied by `run`
+/// itself).
 #[inline(always)]
 pub(crate) fn assign_copy(slot: &mut Var, value: &Var) {
   if slot.is_plain() && value.is_plain() {
     // SAFETY: neither owns anything; the bits are a whole value.
     unsafe { std::ptr::write(slot, std::ptr::read(value)) }
   } else {
-    assign_copy_slow(slot, value);
+    let copied = clone_value(value);
+    drop_value(std::mem::replace(slot, copied));
   }
-}
-
-/// The copy of a value owning storage, out of line so `inline::run`'s code
-/// does not depend on which kinds own storage (see `run`). Inline, as from
-/// 2026-10-10, it saved about 4 instructions per heap copy, and each new
-/// storage kind added arms to the VM's code (an object, 76 instructions).
-#[inline(never)]
-fn assign_copy_slow(slot: &mut Var, value: &Var) {
-  let copied = clone_value(value);
-  drop_value(std::mem::replace(slot, copied));
 }
 
 /// A sequence's items to change in place, copied first when they are

@@ -18,13 +18,21 @@ use crate::shards::leaf::{self, LeafShard};
 use crate::shards::math::{self, BinOp};
 use crate::shards::values;
 use crate::types::{Shape, Type};
-use crate::var::{Float4, Table, Var, assign, assign_copy, copy, release, seq_mut};
+use crate::var::{Float4, Table, Var, assign, assign_copy, copy, seq_mut};
 
 /// Opaque internal optimization hook. Ordinary shards use the default `None`.
 #[doc(hidden)]
 pub struct InlineOp(pub(crate) Op);
 
 // Explicit tags keep dispatch a direct byte load rather than decoding niches.
+//
+// Two tiers (docs/runtime-performance-overview.md, lesson 9): the
+// variants up to `LoopTest` are the hot tier, which `run` dispatches through
+// a jump table and runs in place when their operands are plain; every
+// variant after it is the slow tier, which `run` hands to `slow_op` through
+// one call. Keep this order: a new operation goes after `LoopTest`, so the
+// hot tier's tags, its jump table and its range check never change
+// (`size::hot_tags_are_fixed`).
 #[derive(Clone)]
 #[repr(u8)]
 pub(crate) enum Op {
@@ -42,34 +50,14 @@ pub(crate) enum Op {
   Take(Operand),
   /// A literal key resolved on a fixed table (golden path §7.3).
   TakeSlot(usize),
-  Push(Binding),
-  SeqMake(Vec<Operand>),
-  /// A struct table: its shape and one operand per slot, in key order.
-  TableMake(Shape, Vec<Operand>),
   AddIntConst(i64),
   AddIntBound(Binding),
   AddFloatConst(f64),
   AddFloatBound(Binding),
   AddFloat4Const(Float4),
   AddFloat4Bound(Binding),
-  /// Any other arithmetic (vectors, mixed numbers, subtract/multiply/
-  /// divide): the shared numeric rule without a node activation.
-  Arith(BinOp, Operand),
-  /// An ordered comparison of numbers.
-  Compare(Cmp, Operand),
-  /// The language's equality (`Is`, or `IsNot` when negated).
-  Equal(bool, Operand),
-  /// `Count`, through one out-of-line call. A function looping over its
-  /// input counts it, and without this its call could not be inlined.
-  Count,
   /// Passes the value through (`Keep`: its slot was set at frame creation).
   Pass,
-  /// A call to a straight-line body from a stateless, non-recursive site:
-  /// runs the callee's code on its kept locals right here (`VmCalls`
-  /// supplies them), without an engine step. When the site is not ready
-  /// (first call, a reload) the run stops before it and the engine enters
-  /// the frame.
-  VmCall,
   /// Control flow of a composite lowered to flat code at compose (`Repeat`,
   /// `While`, `When`, `If`): an unconditional jump to an instruction index.
   Jump(u32),
@@ -80,6 +68,27 @@ pub(crate) enum Op {
   /// A loop counter in a hidden slot: at zero jumps to the given end,
   /// otherwise counts down and falls through into the body.
   LoopTest(Binding, u32),
+  // The slow tier: `slow_op`, out of line.
+  Push(Binding),
+  SeqMake(Vec<Operand>),
+  /// A struct table: its shape and one operand per slot, in key order.
+  TableMake(Shape, Vec<Operand>),
+  /// Any other arithmetic (vectors, mixed numbers, subtract/multiply/
+  /// divide): the shared numeric rule without a node activation.
+  Arith(BinOp, Operand),
+  /// An ordered comparison of numbers.
+  Compare(Cmp, Operand),
+  /// The language's equality (`Is`, or `IsNot` when negated).
+  Equal(bool, Operand),
+  /// `Count`. A function looping over its input counts it, and without
+  /// this its call could not be inlined.
+  Count,
+  /// A call to a straight-line body from a stateless, non-recursive site:
+  /// runs the callee's code on its kept locals right here (`VmCalls`
+  /// supplies them), without an engine step. When the site is not ready
+  /// (first call, a reload) the run stops before it and the engine enters
+  /// the frame.
+  VmCall,
   /// Ends the value lifetime of a slot an inlined call wrote (its input,
   /// an argument, a local of the callee): the slot is unset, so the
   /// caller's next mutation of a collection it shared is not a copy. A
@@ -87,13 +96,69 @@ pub(crate) enum Op {
   Clear(Binding),
 }
 
+/// The tag of the last hot-tier operation: `run` sends every tag past it to
+/// `slow_op` (its match's catch-all arm).
+#[cfg(test)]
+const LAST_HOT: u8 = 23;
+
+#[cfg(test)]
+impl Op {
+  fn tag(&self) -> u8 {
+    // SAFETY: `#[repr(u8)]` puts the tag in the first byte.
+    unsafe { *(self as *const Op as *const u8) }
+  }
+}
+
 #[cfg(test)]
 mod size {
+  use super::*;
+
   #[test]
   fn an_instruction_is_48_bytes_in_release_layout() {
     // `Instruction` adds the output check in debug builds; the op itself is
-    // one value plus a tag.
+    // one value plus a tag. A slow-tier operation must fit too: a larger
+    // one goes behind a box, not into every instruction.
     assert_eq!(std::mem::size_of::<super::Op>(), 48);
+  }
+
+  /// The hot tier's tags are what `run`'s jump table indexes: a new
+  /// operation goes after `LoopTest` and leaves them as they are.
+  #[test]
+  fn hot_tags_are_fixed() {
+    let b = Binding::Local(0);
+    let o = SlotOffset::new(0);
+    let hot = [
+      Op::Fallback,
+      Op::Const(Var::None),
+      Op::GetLocal(o),
+      Op::GetMesh(o),
+      Op::Set(b),
+      Op::Inc(b),
+      Op::ConstDrop(Var::None),
+      Op::GetLocalDrop(o),
+      Op::GetMeshDrop(o),
+      Op::SetDrop(b),
+      Op::IncDrop(b),
+      Op::Take(Operand::Const(Var::None)),
+      Op::TakeSlot(0),
+      Op::AddIntConst(0),
+      Op::AddIntBound(b),
+      Op::AddFloatConst(0.0),
+      Op::AddFloatBound(b),
+      Op::AddFloat4Const(Float4([0.0; 4])),
+      Op::AddFloat4Bound(b),
+      Op::Pass,
+      Op::Jump(0),
+      Op::JumpIfNot(0),
+      Op::JumpIf(0),
+      Op::LoopTest(b, 0),
+    ];
+    for (tag, op) in hot.iter().enumerate() {
+      assert_eq!(op.tag() as usize, tag, "{}", op.name());
+    }
+    assert_eq!(LAST_HOT as usize, hot.len() - 1);
+    assert!(Op::Push(b).tag() > LAST_HOT);
+    assert!(Op::Clear(b).tag() > LAST_HOT);
   }
 }
 
@@ -709,18 +774,15 @@ impl Frames {
 /// Code must be lowered and entry must be at a segment boundary (flow start or
 /// immediately after a fallback/constructor), as enforced by both flow loops.
 ///
-/// What this function's code may hold (2026-10-11): operations on plain
-/// values (`Var::is_plain`), and fixed reads or writes of one storage kind
-/// (an element by index, a struct table's slot, a push), whose code does
-/// not depend on what other kinds exist. Everything else (a copy or drop of
-/// a value owning storage, a lookup by key, generic cases) is one call out
-/// of line; the fixed operations build their own errors (`Inc`, `Push`,
-/// `LoopTest`). The compiler allocates registers and lays out blocks
-/// for the whole loop at once, so code here moves every operation: kept to
-/// this, a new kind of value (an object, an image) cannot change it. Its
-/// price was one call on each copy of a string, sequence or table into a
-/// variable (`assign_copy`); plain operations got cheaper with it
-/// (docs/runtime-performance-overview.md, lesson 9).
+/// Two tiers (2026-10-11; docs/runtime-performance-overview.md, lesson 9).
+/// This loop runs the hot tier's operations (the `Op` variants up to
+/// `LoopTest`) in place, and only their fast case: plain operands and a
+/// plain scratch, no error. Everything else (the slow tier's operations,
+/// a value owning storage, any failure) goes through the one call to
+/// `slow_op`, which implements every operation in full. So nothing in this
+/// loop depends on which kinds of value own storage or on how many
+/// operations exist: the compiler allocates registers and lays out blocks
+/// for the whole loop at once, and only the hot tier is in it.
 pub(crate) fn run<C: VmCalls>(
   code: &[Instruction],
   mut index: usize,
@@ -729,28 +791,29 @@ pub(crate) fn run<C: VmCalls>(
   mesh: &mut [Var],
   calls: &C,
 ) -> Result<(usize, Var)> {
-  let frames = Frames {
-    locals: locals.as_mut_ptr(),
-    locals_len: locals.len(),
-    locals_bytes: std::mem::size_of_val(locals),
-    mesh: mesh.as_mut_ptr(),
-    mesh_len: mesh.len(),
-    mesh_bytes: std::mem::size_of_val(mesh),
+  let mut tier = Tier {
+    frames: Frames {
+      locals: locals.as_mut_ptr(),
+      locals_len: locals.len(),
+      locals_bytes: std::mem::size_of_val(locals),
+      mesh: mesh.as_mut_ptr(),
+      mesh_len: mesh.len(),
+      mesh_bytes: std::mem::size_of_val(mesh),
+    },
+    // Own the incoming output so replacing it releases captured values
+    // before later frame mutations (see `Tier::scratch`).
+    scratch: input,
+    numeric: std::mem::MaybeUninit::uninit(),
+    error: None,
   };
-  // Own the incoming output so replacing it releases captured values before
-  // later frame mutations. Compose-selected Drop variants release it when
-  // reanchoring to external storage; Take/Push/generic arithmetic replace it with their output.
-  // Typed numeric arithmetic can leave only a resource-free numeric value in
-  // scratch: its input must be numeric, and no obsolete owning value survives
-  // the other reanchoring operations. This avoids a cleanup branch per Add.
-  let mut scratch = input;
-  // Numeric results own no heap storage. Overwrite this slot without running
-  // Var's general drop dispatch on every arithmetic operation. Only explicit
-  // Int/Float/Float4 constructors may be written here; generic results use
-  // `scratch`. It is never read until initialized and no pointer escapes run.
-  let mut numeric = std::mem::MaybeUninit::<Var>::uninit();
-  let mut value: *const Var = &scratch;
-  while let Some(instruction) = code.get(index) {
+  // Every access to the tier's storage, here and in `slow_op`, goes through
+  // this pointer, so the accumulator's pointers into it stay valid.
+  let t: *mut Tier = &raw mut tier;
+  // SAFETY: `t` is valid for the whole run (see `Tier`).
+  let scratch: *mut Var = unsafe { &raw mut (*t).scratch };
+  let numeric: *mut Var = unsafe { (&raw mut (*t).numeric).cast::<Var>() };
+  let mut value: *const Var = scratch;
+  'run: while let Some(instruction) = code.get(index) {
     if C::METERED {
       // The meter keeps the instruction being run, so a failure can be
       // located (`Meter::at`). Nothing else in this loop knows about
@@ -761,289 +824,541 @@ pub(crate) fn run<C: VmCalls>(
       meter.at(index);
       meter.charge(1)?;
     }
-    // SAFETY: `value` starts at scratch and each arm reanchors it to live
-    // code, scratch, numeric storage or a checked frame slot. Reads end before
-    // any write. No reference survives replacement of its owner; no callback
-    // can mutate it.
+    // SAFETY: the hot arms keep `Tier`'s accumulator invariant; each reads
+    // its operands before it writes, and writes only plain values over
+    // plain ones (nothing to drop).
     unsafe {
-      match &instruction.op {
-        Op::Fallback | Op::SeqMake(_) | Op::TableMake(..) => break,
-        Op::Const(v) => {
-          value = v;
-        }
-        Op::GetLocal(offset) => value = frames.slot_offset::<false>(*offset),
-        Op::GetMesh(offset) => value = frames.slot_offset::<true>(*offset),
-        Op::Set(b) => {
-          let target = frames.slot(*b);
-          if !std::ptr::eq(value, target) {
-            assign_copy(&mut *target, &*value);
-          }
-          value = target;
-        }
-        Op::Inc(b) => {
-          let target = frames.slot(*b);
-          let Var::Int(n) = &mut *target else {
-            return Err(Error::Activation("Inc: variable is not an Int".into()));
-          };
-          *n = n
-            .checked_add(1)
-            .ok_or_else(|| Error::Activation("Inc: integer overflow".into()))?;
-          value = target;
-        }
-        Op::ConstDrop(v) => {
-          value = v;
-          assign(&mut scratch, Var::None);
-        }
-        Op::GetLocalDrop(offset) => {
-          value = frames.slot_offset::<false>(*offset);
-          assign(&mut scratch, Var::None);
-        }
-        Op::GetMeshDrop(offset) => {
-          value = frames.slot_offset::<true>(*offset);
-          assign(&mut scratch, Var::None);
-        }
-        Op::SetDrop(b) => {
-          let target = frames.slot(*b);
-          if !std::ptr::eq(value, target) {
-            assign_copy(&mut *target, &*value);
-          }
-          value = target;
-          assign(&mut scratch, Var::None);
-        }
-        Op::IncDrop(b) => {
-          let target = frames.slot(*b);
-          let Var::Int(n) = &mut *target else {
-            return Err(Error::Activation("Inc: variable is not an Int".into()));
-          };
-          *n = n
-            .checked_add(1)
-            .ok_or_else(|| Error::Activation("Inc: integer overflow".into()))?;
-          value = target;
-          assign(&mut scratch, Var::None);
-        }
-        Op::Take(key) => {
-          let key = match key {
-            Operand::Const(v) => v,
-            Operand::Bound(b) => &*frames.slot(*b),
-          };
-          // An element by index inline: a fixed read of one kind. Every
-          // other lookup out of line.
-          if let (Var::Seq(items), Var::Int(i)) = (&*value, key)
-            && *i >= 0
-            && (*i as usize) < items.len()
-          {
-            let new = copy(&items[*i as usize]);
-            assign(&mut scratch, new);
-          } else if let Err(e) = take_op(value, key, &raw mut scratch) {
-            return Err(*e);
-          }
-          value = &scratch;
-        }
-        Op::TakeSlot(index) => {
-          // The slot read inline: a fixed read of one kind.
-          if let Some(v) = match &*value {
-            Var::Table(entries) => entries.slot(*index),
-            _ => None,
-          } {
-            let new = copy(v);
-            assign(&mut scratch, new);
-          } else if let Err(e) = take_slot_op(value, *index, &raw mut scratch) {
-            return Err(*e);
-          }
-          value = &scratch;
-        }
-        Op::Push(b) => {
-          // A fixed operation of one kind (a sequence), inline. The
-          // accumulator never points into a sequence's buffer (a Take
-          // copies its element out), so only an input that is the
-          // destination itself (a sequence pushing itself) needs a
-          // snapshot before the slot is mutated.
-          let target = frames.slot(*b);
-          if C::METERED {
-            meter_push(calls.meter().expect("metered"), &*target, &*value)?;
-          }
-          let pushed = if std::ptr::eq(value, target) {
-            let new = copy(&*value);
-            assign(&mut scratch, new);
-            value = &scratch;
-            copy(&scratch)
-          } else {
-            copy(&*value)
-          };
-          match &mut *target {
-            Var::Seq(items) => seq_mut(items).push(pushed),
-            _ => {
-              return Err(Error::Activation(
-                "Push: the variable is not a sequence".into(),
-              ));
+      let frames = &(*t).frames;
+      'slow: {
+        match &instruction.op {
+          Op::Fallback => break 'run,
+          Op::Const(v) => value = v,
+          Op::GetLocal(offset) => value = frames.slot_offset::<false>(*offset),
+          Op::GetMesh(offset) => value = frames.slot_offset::<true>(*offset),
+          Op::Set(b) => {
+            let target = frames.slot(*b);
+            if !std::ptr::eq(value, target) {
+              if (*target).is_plain() && (*value).is_plain() {
+                std::ptr::write(target, std::ptr::read(value));
+              } else {
+                copy_into(target, value);
+              }
             }
+            value = target;
           }
-        }
-        Op::AddIntConst(rhs) => {
-          let Var::Int(lhs) = &*value else {
-            return Err(invalid());
-          };
-          let result = lhs.checked_add(*rhs).ok_or_else(overflow)?;
-          numeric.write(Var::Int(result));
-          value = numeric.as_ptr();
-        }
-        Op::AddIntBound(b) => {
-          let (Var::Int(lhs), Var::Int(rhs)) = (&*value, &*frames.slot(*b)) else {
-            return Err(invalid());
-          };
-          let result = lhs.checked_add(*rhs).ok_or_else(overflow)?;
-          numeric.write(Var::Int(result));
-          value = numeric.as_ptr();
-        }
-        Op::AddFloatConst(rhs) => {
-          let lhs = match &*value {
-            Var::Float(v) => *v,
-            Var::Int(v) => *v as f64,
-            _ => return Err(invalid()),
-          };
-          numeric.write(Var::Float(lhs + rhs));
-          value = numeric.as_ptr();
-        }
-        Op::AddFloatBound(b) => {
-          let number = |v: &Var| match v {
-            Var::Float(v) => Ok(*v),
-            Var::Int(v) => Ok(*v as f64),
-            _ => Err(invalid()),
-          };
-          let result = number(&*value)? + number(&*frames.slot(*b))?;
-          numeric.write(Var::Float(result));
-          value = numeric.as_ptr();
-        }
-        Op::AddFloat4Const(rhs) => {
-          if let Var::Float4(lhs) = &*value {
+          Op::Inc(b) => {
+            let target = frames.slot(*b);
+            let Var::Int(n) = &mut *target else {
+              break 'slow;
+            };
+            let Some(m) = n.checked_add(1) else {
+              break 'slow;
+            };
+            *n = m;
+            value = target;
+          }
+          // The Drop variants release an owned scratch as they reanchor:
+          // plain, it needs nothing.
+          // The Drop variants release an owned scratch as they reanchor:
+          // plain, it needs nothing.
+          Op::ConstDrop(v) => {
+            if !(*scratch).is_plain() {
+              break 'slow;
+            }
+            value = v;
+          }
+          Op::GetLocalDrop(offset) => {
+            if !(*scratch).is_plain() {
+              break 'slow;
+            }
+            value = frames.slot_offset::<false>(*offset);
+          }
+          Op::GetMeshDrop(offset) => {
+            if !(*scratch).is_plain() {
+              break 'slow;
+            }
+            value = frames.slot_offset::<true>(*offset);
+          }
+          Op::SetDrop(b) => {
+            let target = frames.slot(*b);
+            if !(*scratch).is_plain() {
+              break 'slow;
+            }
+            if !std::ptr::eq(value, target) {
+              if !((*target).is_plain() && (*value).is_plain()) {
+                break 'slow;
+              }
+              std::ptr::write(target, std::ptr::read(value));
+            }
+            value = target;
+          }
+          Op::IncDrop(b) => {
+            let target = frames.slot(*b);
+            if !(*scratch).is_plain() {
+              break 'slow;
+            }
+            let Var::Int(n) = &mut *target else {
+              break 'slow;
+            };
+            let Some(m) = n.checked_add(1) else {
+              break 'slow;
+            };
+            *n = m;
+            value = target;
+          }
+          // A plain element by index, a plain struct slot: read, then
+          // written over a plain scratch.
+          Op::Take(key) => {
+            let key = match key {
+              Operand::Const(v) => v,
+              Operand::Bound(b) => &*frames.slot(*b),
+            };
+            let item = match (&*value, key) {
+              (Var::Seq(items), Var::Int(i)) if *i >= 0 && (*i as usize) < items.len() => {
+                &items[*i as usize]
+              }
+              _ => break 'slow,
+            };
+            if !(item.is_plain() && (*scratch).is_plain()) {
+              break 'slow;
+            }
+            let item = std::ptr::read(item);
+            std::ptr::write(scratch, item);
+            value = scratch;
+          }
+          Op::TakeSlot(slot) => {
+            let item = match &*value {
+              Var::Table(entries) => match entries.slot(*slot) {
+                Some(item) => item,
+                None => break 'slow,
+              },
+              _ => break 'slow,
+            };
+            if !(item.is_plain() && (*scratch).is_plain()) {
+              break 'slow;
+            }
+            let item = std::ptr::read(item);
+            std::ptr::write(scratch, item);
+            value = scratch;
+          }
+          Op::AddIntConst(rhs) => {
+            let Var::Int(lhs) = &*value else {
+              break 'slow;
+            };
+            let Some(result) = lhs.checked_add(*rhs) else {
+              break 'slow;
+            };
+            std::ptr::write(numeric, Var::Int(result));
+            value = numeric;
+          }
+          Op::AddIntBound(b) => {
+            let (Var::Int(lhs), Var::Int(rhs)) = (&*value, &*frames.slot(*b)) else {
+              break 'slow;
+            };
+            let Some(result) = lhs.checked_add(*rhs) else {
+              break 'slow;
+            };
+            std::ptr::write(numeric, Var::Int(result));
+            value = numeric;
+          }
+          Op::AddFloatConst(rhs) => {
+            let lhs = match &*value {
+              Var::Float(v) => *v,
+              Var::Int(v) => *v as f64,
+              _ => break 'slow,
+            };
+            std::ptr::write(numeric, Var::Float(lhs + rhs));
+            value = numeric;
+          }
+          Op::AddFloatBound(b) => {
+            let number = |v: &Var| match v {
+              Var::Float(v) => Some(*v),
+              Var::Int(v) => Some(*v as f64),
+              _ => None,
+            };
+            let (Some(lhs), Some(rhs)) = (number(&*value), number(&*frames.slot(*b))) else {
+              break 'slow;
+            };
+            std::ptr::write(numeric, Var::Float(lhs + rhs));
+            value = numeric;
+          }
+          Op::AddFloat4Const(rhs) => {
+            let Var::Float4(lhs) = &*value else {
+              break 'slow;
+            };
             let result = [
               lhs[0] + rhs[0],
               lhs[1] + rhs[1],
               lhs[2] + rhs[2],
               lhs[3] + rhs[3],
             ];
-            numeric.write(Var::Float4(Float4(result)));
-            value = numeric.as_ptr();
-          } else {
-            let new = add_generic(&*value, &Var::Float4(*rhs))?;
-            assign(&mut scratch, new);
-            value = &scratch;
+            std::ptr::write(numeric, Var::Float4(Float4(result)));
+            value = numeric;
           }
-        }
-        Op::AddFloat4Bound(b) => {
-          let rhs = &*frames.slot(*b);
-          if let (Var::Float4(lhs), Var::Float4(rhs)) = (&*value, rhs) {
+          Op::AddFloat4Bound(b) => {
+            let (Var::Float4(lhs), Var::Float4(rhs)) = (&*value, &*frames.slot(*b)) else {
+              break 'slow;
+            };
             let result = [
               lhs[0] + rhs[0],
               lhs[1] + rhs[1],
               lhs[2] + rhs[2],
               lhs[3] + rhs[3],
             ];
-            numeric.write(Var::Float4(Float4(result)));
-            value = numeric.as_ptr();
-          } else {
-            let new = add_generic(&*value, rhs)?;
-            assign(&mut scratch, new);
-            value = &scratch;
+            std::ptr::write(numeric, Var::Float4(Float4(result)));
+            value = numeric;
           }
-        }
-        Op::Pass => {}
-        Op::Clear(b) => {
-          if let Some(moved) = clear_slot(frames.slot(*b), value) {
-            let new = moved;
-            assign(&mut scratch, new);
-            value = &scratch;
-          }
-        }
-        Op::VmCall => match vm_call_op(calls, index, value, &frames)? {
-          Some(output) => {
-            let new = output;
-            assign(&mut scratch, new);
-            value = &scratch;
-          }
-          None => break,
-        },
-        // Jumps leave the value where it is and skip the increment below.
-        Op::Jump(target) => {
-          index = *target as usize;
-          continue;
-        }
-        Op::JumpIfNot(target) => match &*value {
-          Var::Bool(false) => {
+          Op::Pass => {}
+          // Jumps leave the value where it is and skip the output check.
+          Op::Jump(target) => {
             index = *target as usize;
-            continue;
+            continue 'run;
           }
-          Var::Bool(true) => {}
-          _ => return Err(not_a_bool()),
-        },
-        Op::JumpIf(target) => match &*value {
-          Var::Bool(true) => {
-            index = *target as usize;
-            continue;
+          Op::JumpIfNot(target) => match &*value {
+            Var::Bool(false) => {
+              index = *target as usize;
+              continue 'run;
+            }
+            Var::Bool(true) => {}
+            _ => break 'slow,
+          },
+          Op::JumpIf(target) => match &*value {
+            Var::Bool(true) => {
+              index = *target as usize;
+              continue 'run;
+            }
+            Var::Bool(false) => {}
+            _ => break 'slow,
+          },
+          Op::LoopTest(counter, end) => match &mut *frames.slot(*counter) {
+            Var::Int(n) if *n > 0 => *n -= 1,
+            Var::Int(_) => {
+              index = *end as usize;
+              continue 'run;
+            }
+            _ => break 'slow,
+          },
+          // Every slow-tier variant by name rather than a catch-all, so
+          // the jump table covers every tag and needs no range check
+          // first (one instruction on every operation). A new operation
+          // adds its name here: a table entry, no code.
+          Op::Push(b) if !C::METERED => {
+            value = match push_into(frames.slot(*b), value, scratch) {
+              Ok(v) => v,
+              Err(e) => return Err(*e),
+            };
           }
-          Var::Bool(false) => {}
-          _ => return Err(not_a_bool()),
-        },
-        Op::LoopTest(counter, end) => match &mut *frames.slot(*counter) {
-          Var::Int(n) if *n > 0 => *n -= 1,
-          Var::Int(_) => {
-            index = *end as usize;
-            continue;
-          }
-          _ => {
-            return Err(Error::Activation("Repeat: times is not an Int".into()));
-          }
-        },
-        Op::Arith(op, rhs) => {
-          let rhs = match rhs {
-            Operand::Const(v) => v,
-            Operand::Bound(b) => &*frames.slot(*b),
-          };
-          numeric.write(math::arith(*op, arith_name(*op), &*value, rhs)?);
-          value = numeric.as_ptr();
+          Op::Push(_)
+          | Op::SeqMake(_)
+          | Op::TableMake(..)
+          | Op::Arith(..)
+          | Op::Compare(..)
+          | Op::Equal(..)
+          | Op::Count
+          | Op::VmCall
+          | Op::Clear(_) => break 'slow,
         }
-        Op::Compare(cmp, rhs) => {
-          let rhs = match rhs {
-            Operand::Const(v) => v,
-            Operand::Bound(b) => &*frames.slot(*b),
-          };
-          let ordering = crate::shards::compare(&*value, rhs.clone())?;
-          numeric.write(Var::Bool(cmp.holds(ordering)));
-          value = numeric.as_ptr();
+        #[cfg(any(debug_assertions, feature = "output-checks"))]
+        leaf::check_output(instruction.check.0, instruction.check.1, &*value)?;
+        index += 1;
+        continue 'run;
+      }
+      // The one call into the slow tier.
+      let step = slow_op(t, calls, instruction, index, value);
+      value = step.value;
+      match step.next {
+        STOP => break 'run,
+        FAIL => {
+          return Err(
+            (*t)
+              .error
+              .take()
+              .expect("a failing operation sets the error"),
+          );
         }
-        Op::Equal(negate, rhs) => {
-          let rhs = match rhs {
-            Operand::Const(v) => v,
-            Operand::Bound(b) => &*frames.slot(*b),
-          };
-          if C::METERED {
-            let meter = calls.meter().expect("metered");
-            meter.traverse(&*value)?;
-            meter.traverse(rhs)?;
-          }
-          numeric.write(Var::Bool(values::values_equal(&*value, rhs) != *negate));
-          value = numeric.as_ptr();
-        }
-        Op::Count => {
-          numeric.write(Var::Int(count(&*value, calls.meter())?));
-          value = numeric.as_ptr();
+        next => {
+          #[cfg(any(debug_assertions, feature = "output-checks"))]
+          leaf::check_output(instruction.check.0, instruction.check.1, &*value)?;
+          index = next;
         }
       }
-      #[cfg(any(debug_assertions, feature = "output-checks"))]
-      leaf::check_output(instruction.check.0, instruction.check.1, &*value)?;
     }
-    index += 1;
   }
-  // SAFETY: the accumulator is still live by the invariant above. Cloning at
-  // the boundary makes the result independent of all borrowed storage.
-  let output = if std::ptr::eq(value, &scratch) {
-    scratch
-  } else {
-    let output = unsafe { copy(&*value) };
-    release(scratch);
-    output
+  // SAFETY: the accumulator is still live; the output is owned and leaves
+  // the tier, which drops what remains.
+  let output = unsafe {
+    if std::ptr::eq(value, scratch) {
+      std::mem::replace(&mut *scratch, Var::None)
+    } else {
+      copy(&*value)
+    }
   };
   Ok((index, output))
+}
+
+/// `run`'s storage, at one address for the whole run. The accumulator
+/// (`value` in `run` and `slow_op`) points at a constant, a checked frame
+/// slot, `scratch` or `numeric`; each operation reads through it before it
+/// writes and then reanchors it. Both tiers reach this storage only through
+/// the raw pointer `run` takes once, never through a reference to the whole
+/// tier, so the accumulator's pointers into it stay valid (a shared and a
+/// mutable reference to the scratch in one call is undefined behavior,
+/// review 2026-10-11-dcee86c-claude-0b393d#F1).
+struct Tier {
+  frames: Frames,
+  /// Owned output. Compose-selected Drop variants release it when
+  /// reanchoring to external storage; Take/Push/generic arithmetic replace
+  /// it with their output. Typed numeric arithmetic can leave only a
+  /// resource-free numeric value in scratch: its input must be numeric, and
+  /// no obsolete owning value survives the other reanchoring operations.
+  /// This avoids a cleanup branch per Add.
+  scratch: Var,
+  /// Numeric results own no heap storage: written without running `Var`'s
+  /// drop. Only Int/Float/Float4/Bool values are written here; generic
+  /// results use `scratch`. Never read until written.
+  numeric: std::mem::MaybeUninit<Var>,
+  /// The failure of the operation `slow_op` returned `FAIL` for.
+  error: Option<Error>,
+}
+
+/// What `slow_op` returns to `run`: the next instruction (always the one
+/// after it), `STOP` (the VM cannot run it: the run ends before it) or
+/// `FAIL` (`Tier::error`), and the accumulator. Two words, returned in
+/// registers.
+struct Step {
+  next: usize,
+  value: *const Var,
+}
+
+const STOP: usize = usize::MAX - 1;
+const FAIL: usize = usize::MAX;
+
+/// The slow tier: every operation in full, the hot tier's included (their
+/// cases the hot arms leave: a value owning storage, a failure). One
+/// function behind one call site in `run`, so `run`'s code does not depend
+/// on what is here. Marked cold so the compiler keeps `run`'s registers for
+/// the hot path and spills around this call only.
+///
+/// SAFETY: `t` is `run`'s tier pointer and `value` its live accumulator.
+#[cold]
+#[inline(never)]
+unsafe fn slow_op<C: VmCalls>(
+  t: *mut Tier,
+  calls: &C,
+  instruction: &Instruction,
+  index: usize,
+  mut value: *const Var,
+) -> Step {
+  // SAFETY: see above: every access goes through `t`; each operation reads
+  // through the accumulator before it writes and reanchors.
+  unsafe {
+    let scratch: *mut Var = &raw mut (*t).scratch;
+    let numeric: *mut Var = (&raw mut (*t).numeric).cast::<Var>();
+    let frames = &(*t).frames;
+    macro_rules! tri {
+      ($e:expr) => {
+        match $e {
+          Ok(v) => v,
+          Err(e) => {
+            (*t).error = Some(e);
+            return Step { next: FAIL, value };
+          }
+        }
+      };
+    }
+    // The result, owned by the scratch; the accumulator reads it there.
+    macro_rules! own {
+      ($new:expr) => {{
+        let new = $new;
+        assign(&mut *scratch, new);
+        value = scratch;
+      }};
+    }
+    macro_rules! number {
+      ($new:expr) => {{
+        std::ptr::write(numeric, $new);
+        value = numeric;
+      }};
+    }
+    let inc = |b: &Binding| -> Result<*mut Var> {
+      let target = frames.slot(*b);
+      let Var::Int(n) = &mut *target else {
+        return Err(Error::Activation("Inc: variable is not an Int".into()));
+      };
+      *n = n
+        .checked_add(1)
+        .ok_or_else(|| Error::Activation("Inc: integer overflow".into()))?;
+      Ok(target)
+    };
+    match &instruction.op {
+      Op::Fallback | Op::SeqMake(_) | Op::TableMake(..) => return Step { next: STOP, value },
+      Op::Const(v) => value = v,
+      Op::GetLocal(offset) => value = frames.slot_offset::<false>(*offset),
+      Op::GetMesh(offset) => value = frames.slot_offset::<true>(*offset),
+      Op::Set(b) => {
+        let target = frames.slot(*b);
+        if !std::ptr::eq(value, target) {
+          assign_copy(&mut *target, &*value);
+        }
+        value = target;
+      }
+      Op::Inc(b) => value = tri!(inc(b)),
+      Op::ConstDrop(v) => {
+        value = v;
+        assign(&mut *scratch, Var::None);
+      }
+      Op::GetLocalDrop(offset) => {
+        value = frames.slot_offset::<false>(*offset);
+        assign(&mut *scratch, Var::None);
+      }
+      Op::GetMeshDrop(offset) => {
+        value = frames.slot_offset::<true>(*offset);
+        assign(&mut *scratch, Var::None);
+      }
+      Op::SetDrop(b) => {
+        let target = frames.slot(*b);
+        if !std::ptr::eq(value, target) {
+          assign_copy(&mut *target, &*value);
+        }
+        value = target;
+        assign(&mut *scratch, Var::None);
+      }
+      Op::IncDrop(b) => {
+        value = tri!(inc(b));
+        assign(&mut *scratch, Var::None);
+      }
+      Op::Take(key) => {
+        let key = match key {
+          Operand::Const(v) => v,
+          Operand::Bound(b) => &*frames.slot(*b),
+        };
+        let new = match (&*value, key) {
+          (Var::Seq(items), Var::Int(i)) if *i >= 0 && (*i as usize) < items.len() => {
+            copy(&items[*i as usize])
+          }
+          (Var::Table(entries), Var::String(k)) => entries.get(k).map(copy).unwrap_or(Var::None),
+          _ => tri!(data::take_value(&*value, key)),
+        };
+        own!(new);
+      }
+      Op::TakeSlot(slot) => {
+        let found = match &*value {
+          Var::Table(entries) => entries.slot(*slot),
+          _ => None,
+        };
+        let new = match found {
+          Some(v) => copy(v),
+          None => tri!(data::take_slot(&*value, *slot)),
+        };
+        own!(new);
+      }
+      Op::Push(b) => {
+        // The accumulator never points into a sequence's buffer (a Take
+        // copies its element out), so only an input that is the
+        // destination itself (a sequence pushing itself) needs a snapshot
+        // before the slot is mutated.
+        let target = frames.slot(*b);
+        if C::METERED {
+          tri!(meter_push(
+            calls.meter().expect("metered"),
+            &*target,
+            &*value
+          ));
+        }
+        let pushed = if std::ptr::eq(value, target) {
+          own!(copy(&*value));
+          copy(&*scratch)
+        } else {
+          copy(&*value)
+        };
+        match &mut *target {
+          Var::Seq(items) => seq_mut(items).push(pushed),
+          _ => {
+            tri!(Err(Error::Activation(
+              "Push: the variable is not a sequence".into()
+            )))
+          }
+        }
+      }
+      Op::AddIntConst(rhs) => {
+        let Var::Int(lhs) = &*value else {
+          tri!(Err(invalid()))
+        };
+        number!(Var::Int(tri!(lhs.checked_add(*rhs).ok_or_else(overflow))));
+      }
+      Op::AddIntBound(b) => {
+        let (Var::Int(lhs), Var::Int(rhs)) = (&*value, &*frames.slot(*b)) else {
+          tri!(Err(invalid()))
+        };
+        number!(Var::Int(tri!(lhs.checked_add(*rhs).ok_or_else(overflow))));
+      }
+      Op::AddFloatConst(rhs) => {
+        let lhs = match &*value {
+          Var::Float(v) => *v,
+          Var::Int(v) => *v as f64,
+          _ => tri!(Err(invalid())),
+        };
+        number!(Var::Float(lhs + rhs));
+      }
+      Op::AddFloatBound(b) => {
+        let number = |v: &Var| match v {
+          Var::Float(v) => Ok(*v),
+          Var::Int(v) => Ok(*v as f64),
+          _ => Err(invalid()),
+        };
+        let result = tri!(number(&*value)) + tri!(number(&*frames.slot(*b)));
+        number!(Var::Float(result));
+      }
+      Op::AddFloat4Const(rhs) => own!(tri!(add_generic(&*value, &Var::Float4(*rhs)))),
+      Op::AddFloat4Bound(b) => own!(tri!(add_generic(&*value, &*frames.slot(*b)))),
+      Op::Pass => {}
+      // Jumps reach here only to fail: the hot tier takes them otherwise.
+      Op::Jump(_) => unreachable!("an unconditional jump is always taken in run"),
+      Op::JumpIfNot(_) | Op::JumpIf(_) => tri!(Err(not_a_bool())),
+      Op::LoopTest(..) => tri!(Err(Error::Activation("Repeat: times is not an Int".into()))),
+      Op::Arith(op, rhs) => {
+        let rhs = match rhs {
+          Operand::Const(v) => v,
+          Operand::Bound(b) => &*frames.slot(*b),
+        };
+        number!(tri!(math::arith(*op, arith_name(*op), &*value, rhs)));
+      }
+      Op::Compare(cmp, rhs) => {
+        let rhs = match rhs {
+          Operand::Const(v) => v,
+          Operand::Bound(b) => &*frames.slot(*b),
+        };
+        let ordering = tri!(crate::shards::compare(&*value, rhs.clone()));
+        number!(Var::Bool(cmp.holds(ordering)));
+      }
+      Op::Equal(negate, rhs) => {
+        let rhs = match rhs {
+          Operand::Const(v) => v,
+          Operand::Bound(b) => &*frames.slot(*b),
+        };
+        if C::METERED {
+          let meter = calls.meter().expect("metered");
+          tri!(meter.traverse(&*value));
+          tri!(meter.traverse(rhs));
+        }
+        number!(Var::Bool(values::values_equal(&*value, rhs) != *negate));
+      }
+      Op::Count => number!(Var::Int(tri!(count(&*value, calls.meter())))),
+      Op::Clear(b) => {
+        if let Some(moved) = clear_slot(frames.slot(*b), value) {
+          own!(moved);
+        }
+      }
+      Op::VmCall => match tri!(vm_call_op(calls, index, value, frames)) {
+        Some(output) => own!(output),
+        None => return Step { next: STOP, value },
+      },
+    }
+    Step {
+      next: index + 1,
+      value,
+    }
+  }
 }
 
 /// The meter's side of a `Push` onto `target` (the sequence before the
@@ -1074,49 +1389,57 @@ fn arith_name(op: BinOp) -> &'static str {
   }
 }
 
-/// `Take` past `run`'s inline read (an element of a sequence by index): an
-/// entry by key, then the generic lookup with its errors. Out of line, as
-/// everything in `run` that is not a fixed operation on one kind (see
-/// `run`). The result goes straight into `run`'s scratch and a failure is
-/// boxed, so the call returns one register.
+/// `Set`'s copy of a value owning storage, from `run`'s hot tier: a small
+/// function of its own rather than the slow tier's, whose prologue and second
+/// dispatch cost a heap copy about 60 instructions (`Set` of a string runs
+/// every iteration in ordinary scripts).
 ///
-/// The accumulator `value` may be that scratch, so both come as raw
-/// pointers, and the read through `value` ends before the write through
-/// `scratch`, as in `run` itself. A shared and a mutable reference to the
-/// same value in one call is undefined behavior even when the accesses do
-/// not overlap (review 2026-10-11-dcee86c-claude-0b393d#F1).
-///
-/// SAFETY: `value` is `run`'s live accumulator; `scratch` is `run`'s
-/// scratch; `key` is a constant or a frame slot, never the scratch.
+/// SAFETY: `target` is a checked frame slot and `value` the live
+/// accumulator, not `target` itself; it does not point into `target`'s
+/// storage (a Take copies its element out).
 #[inline(never)]
-unsafe fn take_op(
-  value: *const Var,
-  key: &Var,
-  scratch: *mut Var,
-) -> std::result::Result<(), Box<Error>> {
-  // SAFETY: see above; the reference ends with this statement.
-  let new = match (unsafe { &*value }, key) {
-    (Var::Table(entries), Var::String(k)) => entries.get(k).map(copy).unwrap_or(Var::None),
-    (value, key) => data::take_value(value, key).map_err(Box::new)?,
-  };
-  // SAFETY: no reference into the scratch is live.
-  assign(unsafe { &mut *scratch }, new);
-  Ok(())
+unsafe fn copy_into(target: *mut Var, value: *const Var) {
+  // SAFETY: see above.
+  unsafe { assign_copy(&mut *target, &*value) }
 }
 
-/// `TakeSlot` past `run`'s inline slot read: a value that is not a struct
-/// table, with its error, out of line as `take_op` and under its contract.
+/// `Push`, from `run`'s hot tier: a small function of its own, as
+/// `copy_into` (through the slow tier it cost a push about 50 instructions);
+/// a metered run pushes through the slow tier, which charges the meter.
+/// Returns where the accumulator reads afterwards. The accumulator never
+/// points into a sequence's buffer (a Take copies its element out), so only
+/// an input that is the destination itself (a sequence pushing itself)
+/// needs a snapshot, in the scratch, before the slot is mutated.
+///
+/// SAFETY: `target` is a checked frame slot, `value` the live accumulator
+/// and `scratch` the run's scratch, all reached through `run`'s tier
+/// pointer; the read through `value` ends before the scratch is written.
 #[inline(never)]
-unsafe fn take_slot_op(
-  value: *const Var,
-  index: usize,
+unsafe fn push_into(
+  target: *mut Var,
+  mut value: *const Var,
   scratch: *mut Var,
-) -> std::result::Result<(), Box<Error>> {
-  // SAFETY: as in `take_op`; the reference ends with this statement.
-  let new = data::take_slot(unsafe { &*value }, index).map_err(Box::new)?;
-  // SAFETY: no reference into the scratch is live.
-  assign(unsafe { &mut *scratch }, new);
-  Ok(())
+) -> std::result::Result<*const Var, Box<Error>> {
+  // SAFETY: see above.
+  unsafe {
+    let pushed = if std::ptr::eq(value, target) {
+      let new = copy(&*value);
+      assign(&mut *scratch, new);
+      value = scratch;
+      copy(&*scratch)
+    } else {
+      copy(&*value)
+    };
+    match &mut *target {
+      Var::Seq(items) => seq_mut(items).push(pushed),
+      _ => {
+        return Err(Box::new(Error::Activation(
+          "Push: the variable is not a sequence".into(),
+        )));
+      }
+    }
+    Ok(value)
+  }
 }
 
 /// Out of line so `run`'s own frame stays small: a VM call's state would
