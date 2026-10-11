@@ -4293,3 +4293,211 @@ fn a_guard_in_control_state_is_released_on_every_exit() {
     "released on cancellation"
   );
 }
+
+/// A host sees a running program's log lines as they are written, each
+/// with the instance that wrote it, not after the run.
+#[test]
+fn a_session_streams_log_lines_to_the_host() {
+  use std::sync::{Arc, Mutex};
+  let seen: Arc<Mutex<Vec<otter_core::log::Line>>> = Arc::default();
+  let into = seen.clone();
+  let mut session = otter_lang::Session::new();
+  session.set_log_sink(Some(otter_core::log::Sink::stream(move |line| {
+    into.lock().unwrap().push(line)
+  })));
+  session
+    .reload(
+      Source::new(
+        "t.shs",
+        "@wire(main { Keep(n 0) Inc(n) n | Log(\"step\") } looped: true)\n@mesh(m) @schedule(m main) @run(m)",
+      ),
+      &catalog(),
+      &no_defines(),
+    )
+    .unwrap_or_else(|(_, d)| panic!("{d:?}"));
+  for tick in 1..=3 {
+    session.tick();
+    let lines = seen.lock().unwrap();
+    // This tick's line is already there, before the next tick runs.
+    assert_eq!(lines.len(), tick, "{lines:?}");
+    assert_eq!(lines[tick - 1].text, format!("step: {tick}"));
+    assert!(lines[tick - 1].instance.is_some());
+  }
+  // Without a sink, the session leaves the thread's own (here a capture).
+  session.set_log_sink(None);
+  let (_, captured) = otter_core::log::capture(|| session.tick());
+  assert_eq!(captured, ["step: 4"]);
+}
+
+/// `@const(... ignore-redefined: true)` is a default a script argument
+/// (`-D name=value`) replaces; a plain `@const` still refuses the clash.
+#[test]
+fn a_constant_can_be_a_default_for_a_script_argument() {
+  let text = "@const(steps 10 ignore-redefined: true)\n@steps | Math.Add(1)";
+  assert_eq!(completed(&run(text, &no_defines()), "root"), Var::Int(11));
+  let given: HashMap<String, String> = [("steps".to_string(), "50".to_string())].into();
+  assert_eq!(completed(&run(text, &given), "root"), Var::Int(51));
+  // Without the option, the clash is an error, as before.
+  let d = match Program::load(
+    Source::new("t.shs", "@const(steps 10)\n@steps"),
+    &catalog(),
+    &given,
+  ) {
+    Ok(_) => panic!("expected an error"),
+    Err((_, d)) => d,
+  };
+  assert_eq!(d[0].code, "duplicate-binding");
+  let d = load_errors("@const(steps 10 ignore-redefined: \"yes\")\n@steps");
+  assert_eq!(d[0].code, "declaration");
+  // The argument takes the default's type; one that does not parse is an
+  // error at the declaration. Strings stay strings.
+  let bad: HashMap<String, String> = [("steps".to_string(), "many".to_string())].into();
+  let d = match Program::load(Source::new("t.shs", text), &catalog(), &bad) {
+    Ok(_) => panic!("expected an error"),
+    Err((_, d)) => d,
+  };
+  assert_eq!(d[0].code, "script-argument-type");
+  let named = "@const(who \"world\" ignore-redefined: true)\nf\"hello {@who}\"";
+  assert_eq!(
+    completed(&run(named, &no_defines()), "root"),
+    Var::string("hello world")
+  );
+  let who: HashMap<String, String> = [("who".to_string(), "otter".to_string())].into();
+  assert_eq!(
+    completed(&run(named, &who), "root"),
+    Var::string("hello otter")
+  );
+  let flag: HashMap<String, String> = [("fast".to_string(), "true".to_string())].into();
+  let text = "@const(fast false ignore-redefined: true)\n@fast";
+  assert_eq!(completed(&run(text, &flag), "root"), Var::Bool(true));
+}
+
+/// A shard whose state logs when it is released: every way a session ends
+/// its program (stop, either reload, dropping the session) releases it
+/// under the session's log sink.
+mod lingering {
+  use otter_core::describe::ShardDesc;
+  use otter_core::instance::{InstanceCtx, LeafCtx};
+  use otter_core::shard::Flow;
+  use otter_core::shards::leaf::{LeafShard, leaf_type};
+  use otter_core::{Args, ComposeCtx, Composed, Result, ShardType, Type, Var};
+
+  pub struct Released;
+
+  impl Drop for Released {
+    fn drop(&mut self) {
+      otter_core::log::emit("cleanup".into());
+    }
+  }
+
+  pub struct Linger;
+
+  impl LeafShard for Linger {
+    type Compiled = ();
+    type State = Released;
+    const DESC: ShardDesc = ShardDesc::undocumented("Test.Linger", 1);
+
+    fn compose(_: &Args, _: &mut ComposeCtx<'_>) -> Result<Composed<()>> {
+      Ok(Composed {
+        compiled: (),
+        output: Type::none(),
+      })
+    }
+
+    fn instantiate(_: &(), _: &mut InstanceCtx) -> Result<Released> {
+      Ok(Released)
+    }
+
+    fn activate(_: &(), _: &mut Released, _: &mut impl LeafCtx, _: &Var) -> Result<Flow> {
+      Ok(Flow::Next(Var::None))
+    }
+  }
+
+  pub static LINGER: ShardType = leaf_type::<Linger>();
+}
+
+#[test]
+fn a_session_ends_its_program_under_its_log_sink() {
+  let catalog = Catalog::new(&[otter_core::shards::CATALOG, &[&lingering::LINGER]]).unwrap();
+  let program = || {
+    Source::new(
+      "t.shs",
+      "@wire(main { Test.Linger } looped: true)\n@mesh(m) @schedule(m main) @run(m)",
+    )
+  };
+  let empty = || Source::new("t.shs", "none");
+  type End = fn(&mut Option<otter_lang::Session>, &Catalog, Source);
+  let ends: [(&str, End); 4] = [
+    ("stop", |s, _, _| {
+      s.as_mut().unwrap().stop();
+    }),
+    ("reload", |s, c, e| {
+      let reloaded = s.as_mut().unwrap().reload(e, c, &no_defines());
+      assert!(reloaded.is_ok());
+    }),
+    ("reload_preserving", |s, c, e| {
+      let reloaded = s.as_mut().unwrap().reload_preserving(e, c, &no_defines());
+      assert!(reloaded.is_ok());
+    }),
+    ("drop", |s, _, _| drop(s.take())),
+  ];
+  for (name, end) in ends {
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let into = seen.clone();
+    let mut session = otter_lang::Session::new();
+    session.set_log_sink(Some(otter_core::log::Sink::stream(move |line| {
+      into.lock().unwrap().push(line.text)
+    })));
+    session
+      .reload(program(), &catalog, &no_defines())
+      .unwrap_or_else(|(_, d)| panic!("{d:?}"));
+    session.tick();
+    let mut session = Some(session);
+    let ((), outside) = otter_core::log::capture(|| end(&mut session, &catalog, empty()));
+    assert_eq!(*seen.lock().unwrap(), ["cleanup"], "{name}");
+    assert!(outside.is_empty(), "{name}: {outside:?}");
+  }
+}
+
+/// A script argument read through a default has the default's type
+/// wherever it is read, a function's parameter defaults included, and a
+/// default is declared once whether or not the host gives the argument.
+#[test]
+fn script_argument_defaults_are_typed_everywhere_and_declared_once() {
+  let given: HashMap<String, String> = [("n".to_string(), "50".to_string())].into();
+  // Before or after the function that reads it in a parameter default.
+  for text in [
+    "@const(n 10 ignore-redefined: true)\n@fn(F input: None output: Int params: {x: @n} { x })\nF",
+    "@fn(F input: None output: Int params: {x: @n} { x })\n@const(n 10 ignore-redefined: true)\nF",
+  ] {
+    assert_eq!(completed(&run(text, &no_defines()), "root"), Var::Int(10));
+    assert_eq!(completed(&run(text, &given), "root"), Var::Int(50));
+  }
+  // Declared in an included file.
+  let lib = files(&[("lib.shs", "@const(n 10 ignore-redefined: true)")]);
+  let text = "@include(\"lib.shs\")\n@fn(F input: None output: Int params: {x: @n} { x })\nF";
+  for (defines, expected) in [(no_defines(), 10), (given.clone(), 50)] {
+    let program = Program::load_with(Source::new("main.shs", text), &catalog(), &defines, &lib)
+      .unwrap_or_else(|(_, d)| panic!("{d:?}"));
+    let report = program.run().unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(completed(&report, "root"), Var::Int(expected));
+  }
+  // Two declarations of one default are a duplicate, given or not.
+  let twice = "@const(n 10 ignore-redefined: true)\n@const(n \"ten\" ignore-redefined: true)\n@n";
+  for defines in [no_defines(), given.clone()] {
+    let d = match Program::load(Source::new("t.shs", twice), &catalog(), &defines) {
+      Ok(_) => panic!("expected an error"),
+      Err((_, d)) => d,
+    };
+    assert_eq!(d[0].code, "duplicate-binding", "{d:?}");
+  }
+  // A default no argument could replace is refused, given or not.
+  let none = "@const(n none ignore-redefined: true)\n@n";
+  for defines in [no_defines(), given] {
+    let d = match Program::load(Source::new("t.shs", none), &catalog(), &defines) {
+      Ok(_) => panic!("expected an error"),
+      Err((_, d)) => d,
+    };
+    assert_eq!(d[0].code, "declaration", "{d:?}");
+  }
+}
