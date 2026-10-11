@@ -65,6 +65,8 @@ Giovanni's call: no local monitoring, delegate to CI. `scripts/perf-ab.py BASE [
 
 It reports and does not fail yet: shared runners are noisy, and the threshold (`--fail-above`, 3% proposed) is set only after A/A runs (the same revision on both sides) have measured this runner's noise floor, as the jitter measurement set the instruction tolerance. A first local A/A on a hybrid desktop CPU showed spreads up to 33% on single cases (a process on an efficiency core against one on a performance core), which is what the calibration must rule out on the runner.
 
+First measurement on the runner (run 38142369130, macOS arm64, 5 rounds): this pull request against `main`, effectively an A/A since the hot code is identical (hot-asm). Per case the noise is large: median |change| 2.8%, 42 of 88 cases beyond 3%, 5 beyond 10%, the largest 13.5%, median per-round spread 18.5%. The geometric mean over all cases moved +0.04%. So a 3% per-case threshold would fail nearly every run; the likely gate is on the geometric mean (and per case only for large moves), to be decided after A/A runs on `main` (`workflow_dispatch` needs the workflow on the default branch).
+
 ## 4. Later: instruction counts on the device targets
 
 QEMU's TCG plugins (`libinsn.so`) count executed instructions deterministically, and CI already boots the ESP32 firmware in Espressif's QEMU (`scripts/esp32-qemu.sh`). Per-iteration counts on Xtensa and RISC-V would catch regressions that only show on the device. First check whether Espressif's QEMU fork builds with plugin support; this stage follows the Valgrind gate.
