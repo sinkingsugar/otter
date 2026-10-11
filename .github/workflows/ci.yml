@@ -63,13 +63,19 @@ jobs:
     # The interpreter loop and the engine step, summarized from the release
     # disassembly (instructions, spills, calls): any change to them fails
     # here until the baseline is refreshed with the reason in the commit
-    # (docs/runtime-performance-overview.md, lessons 6 and 7).
+    # (docs/runtime-performance-overview.md, lessons 6 and 7). The summary
+    # it measured is uploaded either way, to commit after an intended change.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: python3 scripts/hot-asm.py --check bench/hot-asm/aarch64-apple-darwin.txt
+      - run: python3 scripts/hot-asm.py --check bench/hot-asm/aarch64-apple-darwin.txt --fresh fresh/aarch64-apple-darwin.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hot-asm-aarch64-apple-darwin
+          path: fresh/aarch64-apple-darwin.txt
 
   bench:
     # Compose costs gated against bench/compose/baseline.txt (allocations,
