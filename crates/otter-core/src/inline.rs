@@ -929,28 +929,23 @@ pub(crate) fn run<C: VmCalls>(
               Operand::Const(v) => v,
               Operand::Bound(b) => &*frames.slot(*b),
             };
-            let item = match (&*value, key) {
+            match (&*value, key) {
               (Var::Seq(items), Var::Int(i)) if *i >= 0 && (*i as usize) < items.len() => {
-                &items[*i as usize]
+                let item = &items[*i as usize];
+                if !item.is_plain() {
+                  break 'slow;
+                }
+                // Copied out first: the read ends here, even when the
+                // collection is the scratch itself (a value just built).
+                let item = std::ptr::read(item);
+                if (*scratch).is_plain() {
+                  std::ptr::write(scratch, item);
+                } else {
+                  replace_scratch(scratch, item);
+                }
               }
-              (Var::Table(_), Var::String(_)) => {
-                take_key_into(value, key, scratch);
-                value = scratch;
-                index += 1;
-                continue 'run;
-              }
+              (Var::Table(_), Var::String(_)) => take_key_into(value, key, scratch),
               _ => break 'slow,
-            };
-            if !item.is_plain() {
-              break 'slow;
-            }
-            // Copied out first: the read ends here, even when the
-            // collection is the scratch itself (a value just built).
-            let item = std::ptr::read(item);
-            if (*scratch).is_plain() {
-              std::ptr::write(scratch, item);
-            } else {
-              replace_scratch(scratch, item);
             }
             value = scratch;
           }
@@ -1109,7 +1104,7 @@ pub(crate) fn run<C: VmCalls>(
               Operand::Const(v) => v,
               Operand::Bound(b) => &*frames.slot(*b),
             };
-            if !arith_into(*op, &*value, rhs, numeric) {
+            if !arith_into(*op, value, rhs, numeric) {
               break 'slow;
             }
             value = numeric;
@@ -1119,7 +1114,7 @@ pub(crate) fn run<C: VmCalls>(
               Operand::Const(v) => v,
               Operand::Bound(b) => &*frames.slot(*b),
             };
-            if !compare_into(*cmp, &*value, rhs, numeric) {
+            if !compare_into(*cmp, value, rhs, numeric) {
               break 'slow;
             }
             value = numeric;
@@ -1535,11 +1530,18 @@ unsafe fn replace_scratch(scratch: *mut Var, value: Var) {
 /// instructions and slowed every plain operation; through the slow tier, the
 /// entity tick's `Float3` add paid that tier's prologue and second dispatch.
 ///
-/// SAFETY: `numeric` is the run's numeric slot, reached through its tier
-/// pointer; neither operand is it while it is written (both are read first).
+/// The accumulator comes as a raw pointer: after a numeric result it is the
+/// numeric slot itself, which this writes, so a reference to it in the
+/// same call is undefined behavior even though the read ends first
+/// (review 2026-10-11-dcee86c-claude-0b393d#F1; Astra, 2026-10-11).
+///
+/// SAFETY: `value` is the live accumulator; `rhs` a constant or a frame
+/// slot, never the numeric slot; `numeric` the run's numeric slot, reached
+/// through its tier pointer.
 #[inline(never)]
-unsafe fn arith_into(op: BinOp, value: &Var, rhs: &Var, numeric: *mut Var) -> bool {
-  let result = match (value, rhs) {
+unsafe fn arith_into(op: BinOp, value: *const Var, rhs: &Var, numeric: *mut Var) -> bool {
+  // SAFETY: see above; the reference ends with this statement.
+  let result = match (unsafe { &*value }, rhs) {
     (Var::Int(a), Var::Int(b)) => match op.int(*a, *b) {
       Some(r) => Var::Int(r),
       None => return false,
@@ -1567,10 +1569,11 @@ unsafe fn arith_into(op: BinOp, value: &Var, rhs: &Var, numeric: *mut Var) -> bo
 /// NaN, other kinds), which the slow tier handles. Out of line as
 /// `arith_into`: in `run` it slowed the plain operations.
 ///
-/// SAFETY: as `arith_into`.
+/// SAFETY: as `arith_into`, whose accumulator contract this shares.
 #[inline(never)]
-unsafe fn compare_into(cmp: Cmp, value: &Var, rhs: &Var, numeric: *mut Var) -> bool {
-  let ordering = match (value, rhs) {
+unsafe fn compare_into(cmp: Cmp, value: *const Var, rhs: &Var, numeric: *mut Var) -> bool {
+  // SAFETY: see above; the reference ends with this statement.
+  let ordering = match (unsafe { &*value }, rhs) {
     (Var::Int(a), Var::Int(b)) => a.cmp(b),
     (Var::Float(a), Var::Float(b)) => match a.partial_cmp(b) {
       Some(o) => o,
@@ -1872,6 +1875,71 @@ mod tests {
     let code = instructions([Op::TakeSlot(0)]);
     assert!(run(&code, 0, Var::Int(1), &mut [], &mut [], &NoCalls).is_err());
     assert!(run(&code, 0, Var::None, &mut [], &mut [], &NoCalls).is_err());
+  }
+
+  /// Arithmetic and comparison whose accumulator is the numeric slot (a
+  /// previous numeric result), which the helpers write: the accumulator
+  /// must reach them as a raw pointer (Astra's review of 3f98c2a). Under
+  /// Miri, references there were undefined behavior.
+  #[test]
+  fn numeric_chains_read_the_numeric_slot_before_writing_it() {
+    let int = Operand::Const(Var::Int(2));
+    let code = instructions([
+      Op::AddIntConst(1),
+      Op::Arith(BinOp::Multiply, int.clone()),
+      Op::Arith(BinOp::Add, int.clone()),
+    ]);
+    let (_, out) = run(&code, 0, Var::Int(1), &mut [], &mut [], &NoCalls).unwrap();
+    assert_eq!(out, Var::Int(6));
+    let code = instructions([
+      Op::AddIntConst(1),
+      Op::Compare(Cmp::More, Operand::Const(Var::Int(0))),
+    ]);
+    let (_, out) = run(&code, 0, Var::Int(1), &mut [], &mut [], &NoCalls).unwrap();
+    assert_eq!(out, Var::Bool(true));
+    let f3 = Operand::Const(Var::float3(1.0, 2.0, 3.0));
+    let code = instructions([
+      Op::Arith(BinOp::Add, f3.clone()),
+      Op::Arith(BinOp::Multiply, f3),
+    ]);
+    let (_, out) = run(
+      &code,
+      0,
+      Var::float3(0.0, 0.0, 0.0),
+      &mut [],
+      &mut [],
+      &NoCalls,
+    )
+    .unwrap();
+    assert_eq!(out, Var::float3(1.0, 4.0, 9.0));
+    // A key read of the result of a key read: through `take_key_into`.
+    let table = |e: Vec<(&str, Var)>| Var::from_table(e.into_iter().collect::<Table>());
+    let input = table(vec![("a", table(vec![("b", Var::Int(5))]))]);
+    let code = instructions([
+      Op::Take(Operand::Const(Var::string("a"))),
+      Op::Take(Operand::Const(Var::string("b"))),
+    ]);
+    let (_, out) = run(&code, 0, input, &mut [], &mut [], &NoCalls).unwrap();
+    assert_eq!(out, Var::Int(5));
+  }
+
+  /// A key read's result is checked against its declared output, like
+  /// every other operation's (it once skipped the check).
+  #[cfg(any(debug_assertions, feature = "output-checks"))]
+  #[test]
+  fn a_key_read_checks_its_output() {
+    let mut code = vec![Instruction::new(
+      Some(InlineOp(Op::Take(Operand::Const(Var::string("a"))))),
+      "Take",
+      Type::int(),
+    )];
+    lower_scratch_releases(&mut code);
+    let input = Var::from_table(
+      [("a", Var::string("not an int"))]
+        .into_iter()
+        .collect::<Table>(),
+    );
+    assert!(run(&code, 0, input, &mut [], &mut [], &NoCalls).is_err());
   }
 
   fn instructions(ops: impl IntoIterator<Item = Op>) -> Vec<Instruction> {
