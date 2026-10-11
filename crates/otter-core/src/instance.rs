@@ -59,6 +59,11 @@ pub trait LeafCtx: Frames {
   fn meter(&self) -> Option<&crate::compose_time::Meter> {
     None
   }
+  /// The mesh's services (docs/host-requirements.md H3): look them up here,
+  /// at activation, never in compose. Empty at compose time.
+  fn services(&self) -> &crate::service::Services {
+    crate::service::Services::empty()
+  }
 }
 
 /// How a mesh treats instances waiting on an async operation.

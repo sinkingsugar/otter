@@ -167,6 +167,11 @@ impl ComposeCtx<'_> {
         limits.output_bytes
       )));
     };
+    if value.holds_object() {
+      return Err(failure(
+        "the result holds an object, which cannot be a constant".to_string(),
+      ));
+    }
     if !output.admits(&value) {
       return Err(failure(format!(
         "the result {} is not the pipeline's output type {output}",

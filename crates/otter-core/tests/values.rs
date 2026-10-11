@@ -5,7 +5,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use otter_core::shards::defs::*;
-use otter_core::{Float4, Mesh, Outcome, Shape, Table, Type, Var, WireDef};
+use otter_core::{Float4, Mesh, Outcome, Shape, ShardDef, Table, Type, Var, WireDef};
 
 fn hash_of(v: &impl Hash) -> u64 {
   let mut h = DefaultHasher::new();
@@ -366,4 +366,114 @@ fn values_built_from_one_shared_value_cost_what_they_hold() {
   assert_eq!(w, v.clone().into_struct_tables());
   assert_ne!(v, tables(2));
   assert_ne!(v.clone().into_struct_tables(), tables(2));
+}
+
+static SESSION: otter_core::object::ObjectType =
+  otter_core::object::ObjectType::new("Test.Session");
+static OTHER: otter_core::object::ObjectType = otter_core::object::ObjectType::new("Test.Other");
+
+/// A host object that counts its drops.
+struct Session(Arc<std::sync::atomic::AtomicUsize>);
+
+impl otter_core::object::Object for Session {
+  fn object_type(&self) -> &'static otter_core::object::ObjectType {
+    &SESSION
+  }
+}
+
+impl Drop for Session {
+  fn drop(&mut self) {
+    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+  }
+}
+
+struct Other;
+
+impl otter_core::object::Object for Other {
+  fn object_type(&self) -> &'static otter_core::object::ObjectType {
+    &OTHER
+  }
+}
+
+#[test]
+fn objects_are_values_released_with_their_last_holder() {
+  let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+  let dropped = || drops.load(std::sync::atomic::Ordering::SeqCst);
+  let session = Var::object(Session(drops.clone()));
+  {
+    // Held by a mesh variable, read into locals, a sequence and a table.
+    let mut mesh = Mesh::new();
+    mesh.declare_var("s", session.clone(), true);
+    let out = run(
+      &mut mesh,
+      vec![
+        get("s"),
+        declare("a"),
+        konst(Var::seq(vec![])),
+        declare("items"),
+        ShardDef::new(
+          &otter_core::shards::data::TABLE_MAKE,
+          vec![val(Var::seq(vec![Var::string("k")])), var("a")],
+        ),
+        declare("t"),
+        get("a"),
+        push("items"),
+        get("t"),
+      ],
+    )
+    .unwrap();
+    assert_eq!(out.as_table().unwrap().get("k"), Some(&session));
+    drop(out);
+    assert_eq!(dropped(), 0, "the mesh variable and the host still hold it");
+  }
+  assert_eq!(dropped(), 0, "the host still holds it");
+  drop(session);
+  assert_eq!(dropped(), 1, "the last holder released it, once");
+}
+
+#[test]
+fn objects_compare_hash_and_print_by_identity() {
+  let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+  let a = Var::object(Session(drops.clone()));
+  let b = Var::object(Session(drops));
+  assert_eq!(a, a.clone());
+  assert_ne!(a, b);
+  assert_eq!(hash_of(&a), hash_of(&a.clone()));
+  let (ia, ib) = (a.object_ref().unwrap().id(), b.object_ref().unwrap().id());
+  assert!(ib > ia, "ids are assigned in creation order");
+  assert_eq!(a.to_string(), format!("Test.Session#{ia}"));
+  assert!(a.as_object::<Session>().is_some());
+  assert!(a.as_object::<Other>().is_none());
+  // Typed by name: admitted by its own type, not another's, and by Any.
+  let ty = a.type_of();
+  assert_eq!(ty, SESSION.to_type());
+  assert_eq!(ty.to_string(), "Test.Session");
+  assert!(ty.admits(&a));
+  assert!(!OTHER.to_type().admits(&a));
+  assert!(!ty.admits(&Var::object(Other)));
+  assert!(Type::any().admits(&a));
+  assert!(Type::union([ty, Type::int()]).admits(&a));
+  assert_ne!(
+    Type::union([ty, OTHER.to_type()]),
+    ty,
+    "two object types stay apart in a union"
+  );
+}
+
+#[test]
+fn an_object_is_never_a_constant() {
+  let session = Var::object(Session(Arc::default()));
+  for constant in [
+    session.clone(),
+    Var::seq(vec![Var::Int(1), session.clone()]),
+    Var::table([("deep", Var::seq(vec![session.clone()]))]),
+  ] {
+    assert!(constant.holds_object());
+    let err = run(&mut Mesh::new(), vec![konst(constant)]).unwrap_err();
+    let otter_core::Error::Diagnostic(d) = err else {
+      panic!("expected a diagnostic, got {err:?}")
+    };
+    assert_eq!(d.code, "object-in-constant", "{}", d.message);
+  }
+  assert!(!Var::seq(vec![Var::Int(1)]).holds_object());
 }

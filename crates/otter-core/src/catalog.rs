@@ -7,6 +7,7 @@
 
 use crate::describe::{DefaultValue, InputDesc, OutputDesc, Params, Requirement, TypeName};
 use crate::diagnostic::json_str;
+use crate::object::ObjectType;
 use crate::shard::ShardType;
 
 /// The JSON schema identifier of catalog documents.
@@ -14,6 +15,8 @@ pub const SCHEMA: &str = "otter-catalog/1";
 
 pub struct Catalog {
   shards: Vec<&'static ShardType>,
+  /// Object types scripts can name in signatures (docs/host-requirements.md H1).
+  objects: Vec<&'static ObjectType>,
 }
 
 impl Catalog {
@@ -47,7 +50,46 @@ impl Catalog {
       shards.push(ty);
     }
     shards.sort_by_key(|s| s.name());
-    Ok(Catalog { shards })
+    Ok(Catalog {
+      shards,
+      objects: Vec::new(),
+    })
+  }
+
+  /// Adds per-crate lists of object types, e.g.
+  /// `catalog.with_objects(&[otter_llm::OBJECTS])`. Fails on a duplicate
+  /// name, or a name that is not `Module.Name` (an uppercase start, a dot):
+  /// object types are namespaced by the module that defines them, and never
+  /// shadow a builtin type.
+  pub fn with_objects(mut self, lists: &[&[&'static ObjectType]]) -> Result<Catalog, String> {
+    for ty in lists.iter().flat_map(|list| list.iter()) {
+      let namespaced = ty
+        .name
+        .split('.')
+        .all(|part| part.starts_with(|c: char| c.is_ascii_uppercase()))
+        && ty.name.contains('.');
+      if !namespaced {
+        return Err(format!(
+          "object type `{}` must be named `Module.Name`",
+          ty.name
+        ));
+      }
+      if self.objects.iter().any(|o| o.name == ty.name) {
+        return Err(format!("duplicate object type in catalog: {}", ty.name));
+      }
+      self.objects.push(ty);
+    }
+    self.objects.sort_by_key(|o| o.name);
+    Ok(self)
+  }
+
+  /// The object type with this name.
+  pub fn object_type(&self, name: &str) -> Option<&'static ObjectType> {
+    self.objects.iter().copied().find(|o| o.name == name)
+  }
+
+  pub fn objects(&self) -> &[&'static ObjectType] {
+    &self.objects
   }
 
   /// The shard with this name or alias.

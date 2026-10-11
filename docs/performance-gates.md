@@ -29,7 +29,7 @@ Wall-clock time on shared CI runners is noisier than the regressions that matter
 - `bench_instances` steady ticks, `bench_depth` (suspend/resume through deep nesting), `bench_tables`;
 - the async path (`bench_async`) if its per-iteration count is stable under Valgrind's serialized threads; otherwise left to the wall-clock A/B;
 - a preserving reload cycle;
-- added with A1: object clone/drop through sequences, tables and mesh variables, and a service lookup at activation.
+- added with A1 (done): object clone/drop through locals, sequences and tables (`object/*`; mesh variables take the same `Var` copy and drop), and a service lookup at activation (`service/lookup`).
 
 The driver should reuse the VM suite's script generator rather than copying it (factor it into a module both harnesses import).
 
@@ -66,6 +66,8 @@ Giovanni's call: no local monitoring, delegate to CI. `scripts/perf-ab.py BASE [
 It reports and does not fail yet: shared runners are noisy, and the threshold (`--fail-above`, 3% proposed) is set only after A/A runs (the same revision on both sides) have measured this runner's noise floor, as the jitter measurement set the instruction tolerance. A first local A/A on a hybrid desktop CPU showed spreads up to 33% on single cases (a process on an efficiency core against one on a performance core), which is what the calibration must rule out on the runner.
 
 First measurement on the runner (run 38142369130, macOS arm64, 5 rounds): this pull request against `main`, effectively an A/A since the hot code is identical (hot-asm). Per case the noise is large: median |change| 2.8%, 42 of 88 cases beyond 3%, 5 beyond 10%, the largest 13.5%, median per-round spread 18.5%. The geometric mean over all cases moved +0.04%. So a 3% per-case threshold would fail nearly every run; the likely gate is on the geometric mean (and per case only for large moves), to be decided after A/A runs on `main` (`workflow_dispatch` needs the workflow on the default branch).
+
+A/A on `main` (run 38143043858, `0121099` against itself): median |change| 8.9%, 40 of 88 cases beyond 10%, the largest 43.6%; geometric mean −0.70%. The runner's per-case noise varies between runs (2.8% median in the first measurement, 8.9% here), so no per-case threshold is usable; the geometric mean stayed within about 1 to 2% in both. The first A1 change measured (`Var::Object`, `inline::run` 76 instructions larger) came out at −1.41% geometric mean, heap cases −4.6%: within the noise, so no evidence of a cost, nor proof of none. Proposal: if the A/B is to fail at all, on the geometric mean beyond 3%, with more rounds to tighten it.
 
 ## 4. Later: instruction counts on the device targets
 

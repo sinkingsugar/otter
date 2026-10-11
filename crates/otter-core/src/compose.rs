@@ -1701,6 +1701,19 @@ impl ComposeCtx<'_> {
         continue;
       }
       let (operand, ty) = match &arg.value {
+        ParamValue::Value(v) if v.holds_object() => {
+          return Err(
+            fn_error(
+              name,
+              "object-in-constant",
+              format!(
+                "{name}: {} is a constant holding an object; objects are passed at run time, through a variable",
+                param.name
+              ),
+            )
+            .with_param(&param.name, index),
+          );
+        }
         ParamValue::Value(v) => (Operand::Const(v.clone().into_struct_tables()), v.type_of()),
         ParamValue::Var(var) => {
           let info = self
