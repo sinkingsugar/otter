@@ -1739,3 +1739,502 @@ fn take_outcome_retires_finished_records() {
   assert_eq!(mesh.take_outcome(s), Some(Outcome::Completed(Var::None)));
   assert!(mesh.instance_ids().is_empty());
 }
+
+// --- Spawned instances (docs/host-requirements.md H5) ---
+
+use otter_core::wire_instance::{Completion, Request, WireInstance};
+
+fn completion(handle: &Var) -> &std::sync::Arc<Completion> {
+  handle
+    .as_object::<WireInstance>()
+    .expect("a Wire.Instance")
+    .completion()
+}
+
+fn failure_code(outcome: &Outcome) -> &'static str {
+  match outcome {
+    Outcome::Failed(otter_core::Error::Diagnostic(d)) => d.code,
+    other => panic!("expected a diagnostic, got {other:?}"),
+  }
+}
+
+/// The finished records by wire name (one each).
+fn finished_by_wire(mesh: &mut Mesh) -> std::collections::HashMap<String, Outcome> {
+  mesh
+    .take_finished()
+    .into_iter()
+    .map(|(_, wire, outcome)| (wire, outcome))
+    .collect()
+}
+
+/// A mesh holding `wires`, with `sleeper` (runs until stopped) spawned by
+/// the host and its handle in the mesh variable `w`. Returns the handle.
+fn mesh_with_sleeper(wires: Vec<WireDef>) -> (Mesh, Var) {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("sleeper", true, vec![pause()]));
+  let sleeper = mesh.compile("sleeper", Type::none()).unwrap();
+  let id = mesh.spawn(&sleeper, Var::None).unwrap();
+  let handle = mesh.handle(id).unwrap();
+  mesh.declare_var("w", handle.clone(), false);
+  for def in wires {
+    mesh.add_wire(def);
+  }
+  (mesh, handle)
+}
+
+fn start(mesh: &mut Mesh, name: &str) -> otter_core::InstanceId {
+  let wire = mesh.compile(name, Type::none()).unwrap();
+  mesh.spawn(&wire, Var::None).unwrap()
+}
+
+/// An owner's end cancels its children, theirs in turn, in the tick it
+/// ends, whatever the wake mode; a looped child is not cancelled by its
+/// owner's iterations.
+#[test]
+fn an_owner_ending_cancels_its_tree_in_the_same_tick() {
+  for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+    let _ = take_probe_events();
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(wire("grand", true, vec![probe("grand"), pause()]));
+    mesh.add_wire(wire(
+      "child",
+      true,
+      vec![probe("child"), once(vec![spawn("grand")]), pause()],
+    ));
+    mesh.add_wire(wire(
+      "parent",
+      false,
+      vec![spawn("child"), pause(), pause(), pause()],
+    ));
+    start(&mut mesh, "parent");
+    // Tick 1 spawns the child, tick 2 the grandchild; the parent ends in
+    // tick 4.
+    for _ in 0..3 {
+      mesh.tick();
+    }
+    assert_eq!(mesh.running(), 3, "{mode:?}");
+    assert_eq!(mesh.tick(), 0, "{mode:?}");
+    let finished = finished_by_wire(&mut mesh);
+    assert!(matches!(finished["parent"], Outcome::Completed(_)));
+    assert_eq!(finished["child"], Outcome::Cancelled, "{mode:?}");
+    assert_eq!(finished["grand"], Outcome::Cancelled, "{mode:?}");
+    let events = take_probe_events();
+    for tag in ["child", "grand"] {
+      let cleanups = events
+        .iter()
+        .filter(|e| e.tag == tag && e.kind == ProbeEventKind::Cleanup)
+        .count();
+      assert_eq!(cleanups, 1, "{tag} {mode:?}");
+    }
+  }
+}
+
+/// A child spawned in the tick its owner ends is cancelled without being
+/// instantiated; a detached one runs on.
+#[test]
+fn spawn_then_exit_cancels_the_queued_child_unless_detached() {
+  let _ = take_probe_events();
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("child", true, vec![probe("child"), pause()]));
+  mesh.add_wire(wire("owner", false, vec![spawn("child")]));
+  mesh.add_wire(wire("detacher", false, vec![spawn_detached("child")]));
+  start(&mut mesh, "owner");
+  assert_eq!(mesh.tick(), 0);
+  let finished = finished_by_wire(&mut mesh);
+  assert_eq!(finished["child"], Outcome::Cancelled);
+  assert!(take_probe_events().is_empty(), "never instantiated");
+
+  start(&mut mesh, "detacher");
+  for _ in 0..5 {
+    assert_eq!(mesh.tick(), 1);
+  }
+  let finished = finished_by_wire(&mut mesh);
+  assert!(matches!(finished["detacher"], Outcome::Completed(_)));
+  assert_eq!(mesh.instance_ids().len(), 1);
+}
+
+/// A child parked on async work, under `OnNotify`, is cancelled in the
+/// tick its owner ends: the request wakes it; the pending future is
+/// dropped (here aborting the request).
+#[test]
+fn a_parked_child_is_cancelled_when_its_owner_ends() {
+  sim::reset();
+  let mut mesh = Mesh::new();
+  mesh.set_wake_mode(WakeMode::OnNotify);
+  mesh.add_wire(wire("child", false, vec![request(1000, false, true)]));
+  mesh.add_wire(wire("owner", false, vec![spawn("child"), pause(), pause()]));
+  start(&mut mesh, "owner");
+  mesh.tick(); // The owner spawns the child.
+  mesh.tick(); // The child parks on its request.
+  assert_eq!(sim::request_states(), vec![RequestState::Pending]);
+  assert_eq!(mesh.tick(), 0); // The owner ends.
+  let finished = finished_by_wire(&mut mesh);
+  assert_eq!(finished["child"], Outcome::Cancelled);
+  assert_eq!(sim::request_states(), vec![RequestState::Aborted]);
+}
+
+/// Any number of instances wait on one; a waiter that goes away removes
+/// its registration; a stop reaches every waiter as a distinct error.
+#[test]
+fn waiters_share_one_instance_and_leave_cleanly() {
+  for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+    let (mut mesh, handle) = mesh_with_sleeper(vec![
+      wire("a", false, vec![wait("w")]),
+      wire("b", false, vec![wait("w")]),
+      wire("gone", false, vec![wait("w")]),
+    ]);
+    mesh.set_wake_mode(mode);
+    let ids: Vec<_> = ["a", "b", "gone"]
+      .into_iter()
+      .map(|w| start(&mut mesh, w))
+      .collect();
+    mesh.tick();
+    mesh.tick();
+    assert_eq!(completion(&handle).waiter_count(), 3);
+    mesh.cancel(ids[2]);
+    assert_eq!(completion(&handle).waiter_count(), 2, "{mode:?}");
+    // The host stops the sleeper through its handle.
+    completion(&handle).request(Request::Stop);
+    mesh.tick();
+    assert_eq!(completion(&handle).outcome(), Some(Outcome::Stopped));
+    mesh.tick();
+    let finished = finished_by_wire(&mut mesh);
+    for w in ["a", "b"] {
+      assert_eq!(failure_code(&finished[w]), "wire-stopped", "{w} {mode:?}");
+    }
+    assert_eq!(finished["gone"], Outcome::Cancelled);
+    assert_eq!(mesh.running(), 0);
+  }
+}
+
+/// What Wait, Peek and IsRunning see for every way an instance ends:
+/// its value, its error, a stop, a cancellation, and a cleanup that
+/// panicked (the outcome is published after cleanup, so it is the panic).
+#[test]
+fn wait_and_peek_see_every_ending() {
+  let divide_by_zero =
+    otter_core::ShardDef::new(&otter_core::shards::math::DIVIDE, vec![val(Var::Int(0))]);
+  #[allow(unused_mut)]
+  let mut cases: Vec<(&str, Vec<otter_core::ShardDef>, bool)> = vec![
+    ("completes", vec![pause(), konst(Var::Int(7))], false),
+    (
+      "fails",
+      vec![pause(), konst(Var::Int(1)), divide_by_zero],
+      false,
+    ),
+    ("stopped", vec![pause_secs(100.0)], true),
+  ];
+  // Where panics unwind (not on WASI, which aborts).
+  #[cfg(panic = "unwind")]
+  cases.push((
+    "stuck",
+    vec![probe_mode("c", "panic-cleanup"), pause_secs(100.0)],
+    true,
+  ));
+  for (name, flow, stop) in cases {
+    let mut mesh = Mesh::new();
+    mesh.add_wire(wire("target", false, flow));
+    let mut waiter = vec![
+      spawn("target"),
+      declare("t"),
+      is_running("t"),
+      declare("before"),
+    ];
+    if stop {
+      // Once the target has run (and has state to clean up): it starts at
+      // the end of this tick and first runs in the next, after the waiter.
+      waiter.push(pause());
+      waiter.push(pause());
+      waiter.push(stop_instance("t"));
+    }
+    waiter.push(wait("t"));
+    waiter.push(declare("waited"));
+    waiter.push(is_running("t"));
+    waiter.push(declare("after"));
+    waiter.push(peek("t"));
+    mesh.add_wire(wire("waiter", false, waiter));
+    let id = start(&mut mesh, "waiter");
+    mesh.run(10);
+    let outcome = mesh.take_outcome(id).unwrap();
+    match name {
+      "completes" => assert_eq!(outcome, Outcome::Completed(Var::Int(7))),
+      "fails" => assert!(
+        matches!(&outcome, Outcome::Failed(e) if e.to_string().contains("zero")),
+        "{outcome:?}"
+      ),
+      "stopped" => assert_eq!(failure_code(&outcome), "wire-stopped"),
+      _ => assert!(
+        matches!(&outcome, Outcome::Failed(e) if e.to_string().contains("panic in cleanup")),
+        "{outcome:?}"
+      ),
+    }
+  }
+}
+
+/// A cancelled target fails Wait with its own code; Peek reads none while
+/// it runs.
+#[test]
+fn waiting_on_a_cancelled_instance_is_a_distinct_error() {
+  let (mut mesh, handle) = mesh_with_sleeper(vec![
+    wire("peeker", false, vec![peek("w")]),
+    wire("waiter", false, vec![wait("w")]),
+  ]);
+  let peeker = start(&mut mesh, "peeker");
+  let waiter = start(&mut mesh, "waiter");
+  mesh.tick();
+  assert_eq!(
+    mesh.take_outcome(peeker),
+    Some(Outcome::Completed(Var::None))
+  );
+  let sleeper = mesh.instance_ids()[0];
+  mesh.cancel(sleeper);
+  assert_eq!(completion(&handle).outcome(), Some(Outcome::Cancelled));
+  mesh.tick();
+  assert_eq!(
+    failure_code(&mesh.take_outcome(waiter).unwrap()),
+    "wire-cancelled"
+  );
+}
+
+/// A timeout fails Wait once it passes, under either wake mode (a timed
+/// wait is resumed every tick, not only when woken).
+#[test]
+fn wait_times_out() {
+  for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+    let (mut mesh, handle) =
+      mesh_with_sleeper(vec![wire("waiter", false, vec![wait_timeout("w", 0.0)])]);
+    mesh.set_wake_mode(mode);
+    let waiter = start(&mut mesh, "waiter");
+    mesh.tick();
+    mesh.tick();
+    assert_eq!(
+      failure_code(&mesh.take_outcome(waiter).unwrap()),
+      "wait-timeout",
+      "{mode:?}"
+    );
+    assert_eq!(completion(&handle).waiter_count(), 0);
+    assert!(!completion(&handle).is_finished());
+  }
+}
+
+/// A looped owner's iterations do not end its children, and the children
+/// it keeps are only the running ones.
+#[test]
+fn a_looped_owner_keeps_only_running_children() {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("quick", false, vec![konst(Var::Int(1))]));
+  mesh.add_wire(wire("sleeper", true, vec![pause()]));
+  mesh.add_wire(wire(
+    "owner",
+    true,
+    vec![once(vec![spawn("sleeper")]), spawn("quick"), pause()],
+  ));
+  let owner = start(&mut mesh, "owner");
+  for _ in 0..50 {
+    mesh.tick();
+    mesh.take_finished();
+  }
+  let handle = mesh.handle(owner).unwrap();
+  // The sleeper, plus at most the quick child of this iteration and the
+  // last.
+  assert!(completion(&handle).child_count() <= 3);
+  assert_eq!(mesh.running(), 2, "the owner and its sleeper");
+}
+
+/// Handles held by the host or in mesh variables stay valid: across a
+/// preserving reload they keep naming the original instance (retained:
+/// still running; cancelled by the reload: Cancelled), and dropping the
+/// mesh cancels what still runs.
+#[test]
+fn handles_survive_reload_and_mesh_destruction() {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("kept", true, vec![pause()]));
+  mesh.add_wire(wire("replaced", true, vec![pause()]));
+  let kept = start(&mut mesh, "kept");
+  let replaced = start(&mut mesh, "replaced");
+  let (kept_handle, replaced_handle) = (mesh.handle(kept).unwrap(), mesh.handle(replaced).unwrap());
+  mesh.declare_var("held", replaced_handle.clone(), false);
+  mesh.tick();
+
+  let mut next = mesh.revision();
+  next.add_wire(wire("kept", true, vec![pause()]));
+  next.add_wire(wire("replaced", true, vec![pause(), pause()]));
+  let removed = [replaced].into_iter().collect();
+  mesh.validate_reload(&mut next, &removed).unwrap();
+  mesh.install_revision(next, &removed);
+  assert!(!completion(&kept_handle).is_finished());
+  assert_eq!(
+    completion(&replaced_handle).outcome(),
+    Some(Outcome::Cancelled)
+  );
+  let held = mesh.get_var("held").unwrap();
+  assert!(std::sync::Arc::ptr_eq(
+    completion(&held),
+    completion(&replaced_handle)
+  ));
+  mesh.take_finished();
+  mesh.tick();
+  assert!(!completion(&kept_handle).is_finished());
+
+  drop(mesh);
+  assert_eq!(completion(&kept_handle).outcome(), Some(Outcome::Cancelled));
+}
+
+/// An instance cannot wait for itself.
+#[test]
+fn waiting_for_oneself_is_an_error() {
+  let (mut mesh, _) = mesh_with_sleeper(vec![wire("selfish", false, vec![pause(), wait("w")])]);
+  let id = start(&mut mesh, "selfish");
+  mesh.set_var("w", mesh.handle(id).unwrap());
+  mesh.run(5);
+  let outcome = mesh.take_outcome(id).unwrap();
+  assert!(
+    matches!(&outcome, Outcome::Failed(e) if e.to_string().contains("cannot wait for itself")),
+    "{outcome:?}"
+  );
+}
+
+/// A request made before a target's activation decides how it ends, under
+/// either wake mode: made between ticks, the target never runs; made in
+/// the tick the target completes in (a `Stop(w)` before it, or its owner
+/// ending), the target ends as the request says, not Completed.
+#[test]
+fn a_request_wins_over_a_completion_in_the_same_tick() {
+  for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+    let _ = take_probe_events();
+    // Between ticks, by the host.
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(wire(
+      "quick",
+      false,
+      vec![probe("quick"), konst(Var::Int(7))],
+    ));
+    let id = start(&mut mesh, "quick");
+    let handle = mesh.handle(id).unwrap();
+    completion(&handle).request(Request::Stop);
+    assert_eq!(mesh.tick(), 0);
+    assert_eq!(
+      completion(&handle).outcome(),
+      Some(Outcome::Stopped),
+      "{mode:?}"
+    );
+    assert!(take_probe_events().is_empty(), "never instantiated");
+
+    // In the tick, by Stop(w) before the target's first activation.
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(wire("quick", false, vec![konst(Var::Int(7))]));
+    mesh.add_wire(wire(
+      "stopper",
+      false,
+      vec![
+        spawn("quick"),
+        declare("t"),
+        pause(),
+        stop_instance("t"),
+        wait("t"),
+      ],
+    ));
+    let stopper = start(&mut mesh, "stopper");
+    mesh.run(10);
+    let outcome = mesh.take_outcome(stopper).unwrap();
+    assert_eq!(failure_code(&outcome), "wire-stopped", "{mode:?}");
+
+    // In the tick, by the owner ending before the child's first activation.
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(wire("quick", false, vec![konst(Var::Int(7))]));
+    mesh.add_wire(wire("owner", false, vec![spawn("quick"), pause()]));
+    start(&mut mesh, "owner");
+    mesh.run(10);
+    let finished = finished_by_wire(&mut mesh);
+    assert_eq!(finished["quick"], Outcome::Cancelled, "{mode:?}");
+  }
+}
+
+/// A reload that ends an owner ends its children before it returns, even
+/// when their own definitions are unchanged.
+#[test]
+fn a_reload_ending_an_owner_ends_its_children() {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("child", true, vec![pause()]));
+  mesh.add_wire(wire("grand", true, vec![pause()]));
+  mesh.add_wire(wire(
+    "middle",
+    true,
+    vec![once(vec![spawn("grand")]), pause()],
+  ));
+  mesh.add_wire(wire(
+    "owner",
+    true,
+    vec![once(vec![spawn("child"), spawn("middle")]), pause()],
+  ));
+  let owner = start(&mut mesh, "owner");
+  for _ in 0..3 {
+    mesh.tick();
+  }
+  assert_eq!(mesh.running(), 4);
+  let mut next = mesh.revision();
+  next.add_wire(wire("child", true, vec![pause()]));
+  next.add_wire(wire("grand", true, vec![pause()]));
+  next.add_wire(wire(
+    "middle",
+    true,
+    vec![once(vec![spawn("grand")]), pause()],
+  ));
+  next.add_wire(wire("owner", true, vec![pause()]));
+  let removed = [owner].into_iter().collect();
+  mesh.validate_reload(&mut next, &removed).unwrap();
+  mesh.install_revision(next, &removed);
+  assert_eq!(mesh.running(), 0);
+  let finished = finished_by_wire(&mut mesh);
+  for w in ["owner", "child", "middle", "grand"] {
+    assert_eq!(finished[w], Outcome::Cancelled, "{w}");
+  }
+}
+
+/// A timeout past what the clock can represent waits without a deadline;
+/// its registration goes when the waiter does.
+#[test]
+fn an_enormous_timeout_waits_without_a_deadline() {
+  let (mut mesh, handle) =
+    mesh_with_sleeper(vec![wire("waiter", false, vec![wait_timeout("w", 1.0e19)])]);
+  let waiter = start(&mut mesh, "waiter");
+  for _ in 0..3 {
+    mesh.tick();
+  }
+  assert_eq!(mesh.outcome(waiter), None);
+  assert_eq!(completion(&handle).waiter_count(), 1);
+  mesh.cancel(waiter);
+  assert_eq!(completion(&handle).waiter_count(), 0);
+}
+
+/// Peek on an instance that ended fails as Wait does; a completed `none`
+/// is a value.
+#[test]
+fn peek_reports_every_ending() {
+  let (mut mesh, handle) = mesh_with_sleeper(vec![wire("peeker", false, vec![peek("w")])]);
+  completion(&handle).request(Request::Stop);
+  let peeker = start(&mut mesh, "peeker");
+  mesh.run(5);
+  assert_eq!(
+    failure_code(&mesh.take_outcome(peeker).unwrap()),
+    "wire-stopped"
+  );
+
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("nothing", false, vec![konst(Var::None)]));
+  mesh.add_wire(wire(
+    "peeker",
+    false,
+    vec![spawn("nothing"), declare("t"), pause(), pause(), peek("t")],
+  ));
+  let peeker = start(&mut mesh, "peeker");
+  mesh.run(5);
+  assert_eq!(
+    mesh.take_outcome(peeker),
+    Some(Outcome::Completed(Var::None))
+  );
+}

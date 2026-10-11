@@ -15,6 +15,10 @@ pub const SCHEMA: &str = "otter-catalog/1";
 
 pub struct Catalog {
   shards: Vec<&'static ShardType>,
+  /// Every name a shard answers to (canonical names and aliases), sorted
+  /// for binary search: looking a name up does not get slower as the
+  /// catalog grows.
+  index: Vec<(&'static str, &'static ShardType)>,
   /// Object types scripts can name in signatures (docs/host-requirements.md H1).
   objects: Vec<&'static ObjectType>,
 }
@@ -50,9 +54,20 @@ impl Catalog {
       shards.push(ty);
     }
     shards.sort_by_key(|s| s.name());
+    let mut index: Vec<_> = shards
+      .iter()
+      .flat_map(|&s| {
+        std::iter::once(s.name())
+          .chain(s.desc.aliases.iter().copied())
+          .map(move |n| (n, s))
+      })
+      .collect();
+    index.sort_by_key(|&(name, _)| name);
+    // The core's own object types (`Wire.Instance`), whatever the lists.
     Ok(Catalog {
       shards,
-      objects: Vec::new(),
+      index,
+      objects: crate::wire_instance::OBJECTS.to_vec(),
     })
   }
 
@@ -101,10 +116,10 @@ impl Catalog {
   /// The shard with this name or alias.
   pub fn get(&self, name: &str) -> Option<&'static ShardType> {
     self
-      .shards
-      .iter()
-      .copied()
-      .find(|s| s.name() == name || s.desc.aliases.contains(&name))
+      .index
+      .binary_search_by(|&(n, _)| n.cmp(name))
+      .ok()
+      .map(|at| self.index[at].1)
   }
 
   /// Every name the catalog resolves: canonical names and aliases.

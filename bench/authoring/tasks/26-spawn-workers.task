@@ -6,5 +6,5 @@ Define a worker process that receives an integer as its input and logs that inte
 30
 === reference
 @wire(worker { Math.Multiply(10) | Log })
-@wire(main { 1 | Spawn(worker) 2 | Spawn(worker) 3 | Spawn(worker) })
+@wire(main { 1 | Spawn(worker detach: true) 2 | Spawn(worker detach: true) 3 | Spawn(worker detach: true) })
 @mesh(m) @schedule(m main) @run(m)

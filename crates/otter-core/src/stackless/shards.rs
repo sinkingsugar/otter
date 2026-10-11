@@ -1,7 +1,7 @@
 //! Composite adapters expose immutable child code to the iterative runner.
 use super::Control;
 use crate::args::Args;
-use crate::compose::{CompiledWire, ComposeCtx};
+use crate::compose::ComposeCtx;
 use crate::error::Result;
 use crate::flow::CompiledFlow;
 use crate::function::CallCompiled;
@@ -23,24 +23,126 @@ macro_rules! leaf_instantiate {
 pub struct Spawn;
 
 impl Shard for Spawn {
-  type Compiled = Arc<CompiledWire>;
+  type Compiled = SpawnCompiled;
   type State = ();
   const NAME: &'static str = SPAWN_DESC.name;
   const VERSION: u32 = SPAWN_DESC.version;
 
-  fn compose(args: &Args, ctx: Ctx) -> Result<Composed<Arc<CompiledWire>>> {
+  fn compose(args: &Args, ctx: Ctx) -> Result<Composed<SpawnCompiled>> {
     compose_spawn(args, ctx)
   }
-  leaf_instantiate!(Arc<CompiledWire>);
+  leaf_instantiate!(SpawnCompiled);
 
   fn activate(
-    wire: &Arc<CompiledWire>,
+    spawn: &SpawnCompiled,
     _: &mut (),
     ctx: &mut ActivationCtx<'_>,
     input: &Var,
   ) -> Result<Step> {
-    ctx.spawn(wire.clone(), input.clone());
-    Ok(Step::Next(input.clone()))
+    let completion = ctx.spawn(spawn.wire.clone(), input.clone(), spawn.detach);
+    Ok(Step::Next(crate::wire_instance::WireInstance::var(
+      completion,
+    )))
+  }
+}
+
+/// Waits for a spawned instance to end. The resume point is its
+/// registration with the instance's completion, removed when the wait ends
+/// or its state is dropped (the waiting instance was cancelled).
+pub struct Wait;
+
+/// A wait in progress.
+pub struct Registration {
+  completion: Arc<crate::wire_instance::Completion>,
+  key: u64,
+  deadline: Option<Instant>,
+}
+
+impl Drop for Registration {
+  fn drop(&mut self) {
+    self.completion.unwait(self.key);
+  }
+}
+
+impl Shard for Wait {
+  type Compiled = instances::WaitCompiled;
+  type State = Option<Registration>;
+  const NAME: &'static str = instances::WAIT_DESC.name;
+  const VERSION: u32 = instances::WAIT_DESC.version;
+
+  fn compose(args: &Args, ctx: Ctx) -> Result<Composed<instances::WaitCompiled>> {
+    instances::compose_wait(args, ctx)
+  }
+
+  fn instantiate(_: &instances::WaitCompiled, _: &mut InstanceCtx) -> Result<Option<Registration>> {
+    Ok(None)
+  }
+
+  fn activate(
+    wait: &instances::WaitCompiled,
+    waiting: &mut Option<Registration>,
+    ctx: &mut ActivationCtx<'_>,
+    _: &Var,
+  ) -> Result<Step> {
+    let (outcome, completion) = match waiting {
+      None => {
+        let value = ctx.get(wait.handle);
+        let completion = crate::wire_instance::completion_of(&value)?.clone();
+        // A deadline past what the clock represents is no deadline.
+        let deadline = wait.timeout.and_then(|t| Instant::now().checked_add(t));
+        if Arc::ptr_eq(&completion, ctx.completion) {
+          return Err(crate::Error::Activation(format!(
+            "Wait: an instance of {} cannot wait for itself",
+            completion.wire()
+          )));
+        }
+        match completion.wait(ctx.waker()) {
+          Err(outcome) => (outcome, completion),
+          Ok(key) => {
+            *waiting = Some(Registration {
+              completion,
+              key,
+              deadline,
+            });
+            if deadline.is_none() {
+              ctx.set_waiting();
+            }
+            return Ok(Step::Suspend);
+          }
+        }
+      }
+      Some(registration) => match registration.completion.outcome() {
+        Some(outcome) => {
+          let completion = registration.completion.clone();
+          *waiting = None;
+          (outcome, completion)
+        }
+        None if registration.deadline.is_some_and(|d| Instant::now() >= d) => {
+          let wire = registration.completion.wire().to_string();
+          *waiting = None;
+          return Err(crate::Error::Diagnostic(Box::new(
+            crate::diagnostic::Diagnostic::new(
+              crate::diagnostic::Phase::Activate,
+              "activation-error",
+              "wait-timeout",
+              format!(
+                "Wait: the instance of {wire} did not end within {}s",
+                wait.timeout.expect("a deadline").as_secs_f64()
+              ),
+            )
+            .shard("Wait"),
+          )));
+        }
+        None => {
+          // Polled every tick with a deadline; woken by the end otherwise.
+          if registration.deadline.is_none() {
+            ctx.set_waiting();
+          }
+          return Ok(Step::Suspend);
+        }
+      },
+    };
+    instances::ended(outcome, completion.wire(), "Wait").map(Step::Next)
   }
 }
 

@@ -12,6 +12,7 @@
 pub mod async_shard;
 pub mod control;
 pub mod data;
+pub mod instances;
 pub mod leaf;
 pub mod math;
 pub mod sim;
@@ -61,6 +62,9 @@ pub static REPEAT: ShardType = ShardType::new(REPEAT_DESC).implemented_by::<sl::
 pub static WHILE: ShardType = ShardType::new(WHILE_DESC).implemented_by::<sl::While>();
 pub static PAUSE: ShardType = ShardType::new(PAUSE_DESC).implemented_by::<sl::Pause>();
 pub static SPAWN: ShardType = ShardType::new(SPAWN_DESC).implemented_by::<sl::Spawn>();
+pub static WAIT: ShardType = ShardType::new(instances::WAIT_DESC).implemented_by::<sl::Wait>();
+pub static PEEK: ShardType = leaf_type::<instances::Peek>();
+pub static IS_RUNNING: ShardType = leaf_type::<instances::IsRunning>();
 pub static PROBE: ShardType = leaf_type::<leaf::Probe>();
 pub static REQUEST: ShardType = async_shard::async_type::<sim::Request>();
 pub static RETURN: ShardType = leaf_type::<leaf::Return>();
@@ -138,6 +142,9 @@ pub static CATALOG: &[&ShardType] = &[
   &WHILE,
   &PAUSE,
   &SPAWN,
+  &WAIT,
+  &PEEK,
+  &IS_RUNNING,
   &RETURN,
   &PROBE,
   &REQUEST,
@@ -1299,41 +1306,61 @@ pub(crate) fn compose_pause(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Com
   })
 }
 
-pub static SPAWN_PARAMS: &[ParamDecl] = &[decl(
-  "wire",
-  crate::shard_doc!("The wire to start a new instance of."),
-  Forms::WIRE,
-  NONE_TYPES,
-  Requirement::Required,
-)];
+pub static SPAWN_PARAMS: &[ParamDecl] = &[
+  decl(
+    "wire",
+    crate::shard_doc!("The wire to start a new instance of."),
+    Forms::WIRE,
+    NONE_TYPES,
+    Requirement::Required,
+  ),
+  decl(
+    "detach",
+    crate::shard_doc!(
+      "Leave the new instance to the mesh: it keeps running when the instance that spawned it ends. By default the spawner owns it and its end cancels it."
+    ),
+    Forms::LITERAL,
+    &[TypeName::Bool],
+    Requirement::Default(DefaultValue::Bool(false)),
+  ),
+];
 
 pub const SPAWN_DESC: ShardDesc = ShardDesc {
   name: "Spawn",
-  version: 1,
-  summary: crate::shard_doc!("Starts a new instance of a wire."),
+  version: 2,
+  summary: crate::shard_doc!("Starts a new instance of a wire, and outputs it."),
   help: crate::shard_doc!(
-    "The new instance receives Spawn's input and starts on the next tick, with its own variables. The wire is compiled once, through the compose cache, and every spawned instance shares the compiled wire. Passes its input through."
+    "The new instance receives Spawn's input and starts at the end of the tick, with its own variables. Outputs the instance (a `Wire.Instance`) for Wait, Peek, IsRunning and Stop. The instance that spawned it owns it: when that one ends (not when an iteration of a looped wire ends), the new instance is cancelled in the same tick, with everything it spawned in turn, unless `detach: true`. The wire is compiled once, through the compose cache, and every spawned instance shares the compiled wire."
   ),
   params: Params::Declared(SPAWN_PARAMS),
   input: InputDesc::Any,
-  output: OutputDesc::Passthrough,
+  output: OutputDesc::Fixed(TypeName::Object(&crate::wire_instance::WIRE_INSTANCE)),
   targets: Targets::All,
   aliases: &[],
   effects: crate::signature::Effects::IO,
   lifetime: crate::signature::Lifetime::Stateless,
 };
 
+pub struct SpawnCompiled {
+  pub(crate) wire: Arc<CompiledWire>,
+  pub(crate) detach: bool,
+}
+
 pub(crate) fn compose_spawn(
   args: &Args,
   ctx: &mut ComposeCtx<'_>,
-) -> Result<Composed<Arc<CompiledWire>>> {
+) -> Result<Composed<SpawnCompiled>> {
   let name = args.wire("wire").expect("decoded Wire");
   let input = ctx.input();
+  let wire = ctx
+    .compose_wire(name, input)
+    .map_err(|e| wire_ref_error(e, args, "Spawn"))?;
   Ok(Composed {
-    compiled: ctx
-      .compose_wire(name, input)
-      .map_err(|e| wire_ref_error(e, args, "Spawn"))?,
-    output: input,
+    compiled: SpawnCompiled {
+      wire,
+      detach: args.bool("detach").expect("decoded Bool"),
+    },
+    output: crate::wire_instance::WIRE_INSTANCE.to_type(),
   })
 }
 
@@ -1691,6 +1718,31 @@ pub mod defs {
   }
   pub fn spawn(wire: &str) -> ShardDef {
     ShardDef::new(&SPAWN, vec![ParamValue::Wire(wire.to_string())])
+  }
+  /// `Wait(handle)`, the handle read from a variable.
+  pub fn wait(handle: &str) -> ShardDef {
+    ShardDef::new(&WAIT, vec![var(handle)])
+  }
+  /// `Wait(handle timeout: seconds)`.
+  pub fn wait_timeout(handle: &str, seconds: f64) -> ShardDef {
+    ShardDef::new(&WAIT, vec![var(handle), val(Var::Float(seconds))])
+  }
+  pub fn peek(handle: &str) -> ShardDef {
+    ShardDef::new(&PEEK, vec![var(handle)])
+  }
+  pub fn is_running(handle: &str) -> ShardDef {
+    ShardDef::new(&IS_RUNNING, vec![var(handle)])
+  }
+  /// `Stop(handle)`: stops another instance.
+  pub fn stop_instance(handle: &str) -> ShardDef {
+    ShardDef::new(&values::STOP, vec![var(handle)])
+  }
+  /// `Spawn(wire detach: true)`: the instance outlives its spawner.
+  pub fn spawn_detached(wire: &str) -> ShardDef {
+    ShardDef::new(
+      &SPAWN,
+      vec![ParamValue::Wire(wire.to_string()), val(Var::Bool(true))],
+    )
   }
   pub fn probe(tag: &str) -> ShardDef {
     ShardDef::new(&PROBE, vec![val(Var::string(tag))])

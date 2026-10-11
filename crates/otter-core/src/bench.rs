@@ -64,7 +64,8 @@ pub fn wires() -> Vec<WireDef> {
     WireDef {
       name: "spawner".into(),
       looped: false,
-      flow: vec![repeat(vec![spawn("entity")], var("n"))],
+      // The entities outlive the spawner, which ends at once.
+      flow: vec![repeat(vec![spawn_detached("entity")], var("n"))],
     },
   ]
 }

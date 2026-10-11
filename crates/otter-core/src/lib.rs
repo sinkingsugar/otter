@@ -32,6 +32,7 @@ pub mod signature;
 pub mod stackless;
 pub mod types;
 pub mod var;
+pub mod wire_instance;
 
 pub use args::{Arg, Args};
 pub use catalog::Catalog;

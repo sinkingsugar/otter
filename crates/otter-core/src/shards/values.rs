@@ -176,13 +176,16 @@ impl LeafShard for Log {
   fn activate(
     prefix: &Self::Compiled,
     _: &mut (),
-    _: &mut impl LeafCtx,
+    ctx: &mut impl LeafCtx,
     input: &Var,
   ) -> Result<Flow> {
     let value = input.text();
-    crate::log::emit(match prefix {
-      Some(p) => format!("{p}: {value}"),
-      None => value,
+    crate::log::emit_line(crate::log::Line {
+      text: match prefix {
+        Some(p) => format!("{p}: {value}"),
+        None => value,
+      },
+      instance: Some(ctx.instance()),
     });
     Ok(Flow::Next(input.clone()))
   }
@@ -190,17 +193,19 @@ impl LeafShard for Log {
 
 // --- Stop ---
 
+pub static STOP_PARAMS: &[ParamDecl] = &[instances::handle_param(Requirement::Optional)];
+
 pub const STOP_DESC: ShardDesc = ShardDesc {
   name: "Stop",
   version: 1,
-  summary: crate::shard_doc!("Ends the instance."),
+  summary: crate::shard_doc!("Ends this instance, or a spawned one."),
   help: crate::shard_doc!(
-    "Stops the wire's instance (a looped wire does not restart); the instance's outcome is Stopped. Nothing after it runs."
+    "Without `wire`: stops the running instance (a looped wire does not restart); its outcome is Stopped, and nothing after Stop runs. With `wire`: asks the mesh to stop that instance, in this tick (its outcome is Stopped, and the instances it owns are cancelled), and passes its input through; stopping an instance that already ended does nothing."
   ),
-  params: Params::Declared(&[]),
+  params: Params::Declared(STOP_PARAMS),
   input: InputDesc::Any,
   output: OutputDesc::Dynamic(crate::shard_doc!(
-    "none: nothing after it runs (type Never)"
+    "without `wire`, none: nothing after it runs (type Never); with it, the input"
   )),
   targets: Targets::All,
   aliases: &[],
@@ -211,24 +216,41 @@ pub const STOP_DESC: ShardDesc = ShardDesc {
 pub struct Stop;
 
 impl LeafShard for Stop {
-  type Compiled = ();
+  /// The variable holding the instance to stop; `None` stops this one.
+  type Compiled = Option<Binding>;
   type State = ();
   const DESC: ShardDesc = STOP_DESC;
 
-  fn compose(_: &Args, _: &mut ComposeCtx<'_>) -> Result<Composed<()>> {
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Option<Binding>>> {
+    if args.get("wire").is_some() {
+      return Ok(Composed {
+        compiled: Some(instances::compose_handle(args, "Stop", ctx)?),
+        output: ctx.input(),
+      });
+    }
     // Never produces a value: a flow ending in Stop fits any expected type.
     Ok(Composed {
-      compiled: (),
+      compiled: None,
       output: Type::never(),
     })
   }
 
-  fn instantiate(_: &(), _: &mut InstanceCtx) -> Result<()> {
+  fn instantiate(_: &Option<Binding>, _: &mut InstanceCtx) -> Result<()> {
     Ok(())
   }
 
-  fn activate(_: &(), _: &mut (), _: &mut impl LeafCtx, _: &Var) -> Result<Flow> {
-    Ok(Flow::Stop)
+  fn activate(
+    handle: &Option<Binding>,
+    _: &mut (),
+    ctx: &mut impl LeafCtx,
+    input: &Var,
+  ) -> Result<Flow> {
+    let Some(handle) = handle else {
+      return Ok(Flow::Stop);
+    };
+    let value = ctx.get(*handle);
+    crate::wire_instance::completion_of(&value)?.request(crate::wire_instance::Request::Stop);
+    Ok(Flow::Next(input.clone()))
   }
 }
 
