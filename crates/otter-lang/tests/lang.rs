@@ -4118,6 +4118,17 @@ fn a_catalog_refuses_duplicate_and_unqualified_object_types() {
   );
   assert!(base().with_objects(&[&[&PLAIN]]).is_err());
   assert!(base().with_objects(&[&[&LOWER]]).is_err());
+  // Names a script could not write (review 2026-10-11-b263ee9-codex-a6c596#F4).
+  static SPACE: otter_core::object::ObjectType =
+    otter_core::object::ObjectType::new("Test.Bad Name");
+  static PUNCT: otter_core::object::ObjectType = otter_core::object::ObjectType::new("Test.Bad!");
+  static EMPTY: otter_core::object::ObjectType = otter_core::object::ObjectType::new("Test.");
+  static FINE: otter_core::object::ObjectType =
+    otter_core::object::ObjectType::new("Test.Good_Name-2");
+  for bad in [&SPACE, &PUNCT, &EMPTY] {
+    assert!(base().with_objects(&[&[bad]]).is_err(), "{}", bad.name);
+  }
+  assert!(base().with_objects(&[&[&FINE]]).is_ok());
 }
 
 /// Guards in a control shard's `State` (docs/host-requirements.md H4): the
