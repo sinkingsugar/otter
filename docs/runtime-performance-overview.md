@@ -273,48 +273,65 @@ experiment and full VM rerun:
    5 percent faster, the VM suite unchanged against `34fddd7`. CI's
    `hot-asm` job now fails on any change to these summaries, so growth is a
    decision recorded in a commit, not a side effect.
-9. **`inline::run` holds plain operations and fixed reads of one kind,
-   nothing else (2026-10-11).** Adding an object variant to `Var` grew
-   `run` by 76 instructions (84 on aarch64) without changing what any
-   workload executed: the VM's `Set` inlined the value copy and drop, an
-   arm per storage kind. The compiler allocates registers and lays out
-   blocks for the whole loop at once, so any code there moves every
-   operation (lesson 6), and the plain fast paths should not depend on what
-   complex kinds exist. Measured with the instruction gate (exact counts,
-   `bench/instructions`), on `0121099`:
-   - one function per operation behind a dispatch loop (isolation by
-     construction): +34 to +67 percent on plain operations (a call per
-     operation, the accumulator in memory). Rejected. Guaranteed tail
-     calls (`become`) would make it cheap; they are not stable;
-   - the rarer storage kinds through one out-of-line arm of the inlined
-     copy: 13 more instructions on every string, sequence and table copy
-     (the whole match saves registers around the call); a catch-all arm
-     instead turned the jump table into a chain of compares (up to 13
-     percent). Rejected;
-   - the heap copy out of line alone: one more instruction per operation
-     everywhere (a register reloaded in the loop head);
-   - adopted: the heap copy (`assign_copy_slow`), `Take` by key and its
-     generic cases, and `TakeSlot`'s errors out of line; an element by
-     index, a struct table's slot and `Push` stay inline (fixed code for one
-     kind). Plain operations equal or faster (`add-int` −4.4 percent,
-     inlined calls −4.4, `assign-int` −1.8, `take-seq` −1.2; entity and
-     depth equal); a heap copy into a variable +4 instructions (`assign`
-     of strings, sequences and tables +4 to +5 percent, `update` +0.1 to
-     +1.7), `push` +1 to +2 (register allocation, the same code),
-     `make-seq`, `make-table` and `table/rebuild-16` +2 per iteration
-     (+0.0 to +0.1 percent, not per operation), `var-key-take-16` +0.4.
-     `run` is 1,172 instructions, from 1,371, with 2 indirect branches
-     (6) and 89 stack stores (111).
-   The rule is written on `run` itself: a new kind of value goes out of
-   line, so it cannot change `run`; the instruction gate and hot-asm show
-   any slip. It narrows what can move `run`, not everything: compiler
-   optimization and `Var`'s layout still need the gates. An out-of-line
-   helper that reads the accumulator and writes the scratch takes both as
-   raw pointers and ends the read before the write: as references they
-   alias whenever the accumulator is the scratch, which Miri reports as
-   undefined behavior (review `2026-10-11-dcee86c-claude-0b393d#F1`).
-   Returning the value instead is sound but moved the plain paths again
-   (`add-int` gave back its gain, entity and depth +0.1 percent).
+9. **Two tiers: `inline::run` holds only the hot tier's fast cases
+   (2026-10-11).** Adding an object variant to `Var` grew `run` by 76
+   instructions (84 on aarch64) without changing what any workload
+   executed: the VM's `Set` inlined the value copy and drop, an arm per
+   storage kind. The compiler allocates registers and lays out blocks for
+   the whole loop at once, so code there moves every operation (lesson 6),
+   and the plain fast paths should not depend on which complex kinds or how
+   many operations exist. The design, agreed with Astra:
+   - **Tiers.** The `Op` variants up to `LoopTest` are the hot tier, with
+     fixed tags (`size::hot_tags_are_fixed`); every later variant is the
+     slow tier, named in `run`'s match so the jump table needs no range
+     check. `run` runs a hot operation's fast case only (plain operands, no
+     failure) and sends everything else through one call to `slow_op`,
+     which implements every operation in full (it never takes a jump: a
+     jump reaches it only to fail).
+   - **Warm helpers.** What ordinary scripts run every iteration but cannot
+     stay inline without kind-specific code goes through small dedicated
+     functions, not the slow tier: a heap `Set` (`copy_into`), `Push`
+     beyond its inline common case (`push_into`), typed arithmetic and
+     numeric comparison (`arith_into`, `compare_into`), a key read
+     (`take_key_into`), releasing an owned scratch (`replace_scratch`,
+     `release_scratch`). Through the slow tier these cost 50 to 90
+     instructions each (its prologue and second dispatch).
+   - **State.** `run`'s storage is one `Tier` reached through a raw pointer;
+     the frames are arrays indexed by the binding's frame. A helper that
+     reads the accumulator and writes the scratch or the numeric slot takes
+     the accumulator as a raw pointer and ends the read before the write:
+     as a reference it aliases whenever the accumulator is that slot, which
+     Miri reports as undefined behavior (review
+     `2026-10-11-dcee86c-claude-0b393d#F1`, and Astra's review of
+     `3f98c2a` for `arith_into`/`compare_into`; regression tests in
+     `inline::tests`).
+   Measured with the instruction gate on both architectures (CI; aarch64
+   also locally with `bench/instructions/run.py --qemu aarch64`), against
+   `0121099`, at `8812e64`: `run` 663 instructions with 10 stack loads (from
+   1,371 and 116). x86-64: all 85 workloads faster (`add-int` −5%, `get`
+   −6%, `update-int` −11%, `assign-int` −9%, `take-table` −23%, `push`
+   −11%, entity −4.6%, depth −6.3%). aarch64: 56 faster (`const` −14%,
+   `get` −15%, `add-int` −12%, `take` −11 to −18%, entity −2.1%, depth
+   −3%) and 29 slower, approved as exceptions: a heap `Set` +10 to +12
+   instructions per copy (`assign` of strings, sequences and tables +7 to
+   +12.5%, `update` +0.1 to +2.6%; the copy is out of line and generic
+   aarch64 Linux outlines its atomics too; the shared reference-count
+   header is the follow-up), `add-float4` +2 per add (the bound slot's
+   address through the frame arrays), and per-iteration constants
+   (`push-shared-seq/8` +23, `make-*` +7 to +10, `rebuild-16` +11,
+   `chain-16` +4).
+   Rejected on the way, measured: one function per operation behind a
+   dispatch loop (+34 to +67 percent on plain operations, without
+   guaranteed tail calls); the rarer storage kinds through an out-of-line
+   arm of the inlined copy (+13 instructions on every heap copy) or a
+   catch-all arm (the jump table became a chain of compares); the heap
+   copy out of line in the old single loop (one more instruction on every
+   operation); typed arithmetic inline in `run` (926 instructions, every
+   plain operation slower); `assign` calls in many hot arms (register
+   pressure everywhere); a local copy of the frame descriptor (one
+   instruction per slot less on x86-64, aarch64's plain-path gains lost).
+   The rule narrows what can move `run`, not everything: compiler choices
+   and `Var`'s layout still need the gates, on both architectures.
 
 Keep the VM foundation and pursue collection ownership/access and short mixed
 flows next. The latest results and remaining misses belong in the

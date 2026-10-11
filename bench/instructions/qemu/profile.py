@@ -59,7 +59,16 @@ def by_function(blocks, table, base):
     return per
 
 
+def build_plugin():
+    PLUGIN.parent.mkdir(parents=True, exist_ok=True)
+    cflags = subprocess.run(["pkg-config", "--cflags", "glib-2.0"], text=True,
+                            stdout=subprocess.PIPE).stdout.split()
+    subprocess.run(["cc", "-shared", "-fPIC", "-O2", *cflags, "-o", str(PLUGIN),
+                    str(Path(__file__).with_name("insnblocks.c"))], check=True)
+
+
 def main():
+    build_plugin()
     binary, n = Path(sys.argv[1]), int(sys.argv[2])
     rest = sys.argv[sys.argv.index("--") + 1:]
     table = symbols(binary)

@@ -53,3 +53,17 @@ git switch -   && python3 bench/instructions/run.py --check /tmp/before.txt
 ```
 
 The whole set takes about 5 seconds on 24 cores.
+
+## aarch64 on an x86-64 machine (QEMU)
+
+CI measures both targets, and on a pull request also measures its base and reports the difference on both (job summary, `compare-*` artifacts). To iterate on aarch64 locally without a round trip:
+
+```sh
+python3 bench/instructions/run.py --qemu aarch64 --write /tmp/before.txt   # at the base
+python3 bench/instructions/run.py --qemu aarch64 --check /tmp/before.txt   # after the change
+python3 bench/instructions/qemu/profile.py target/aarch64-unknown-linux-gnu/release/examples/bench_gate 1000 -- table rebuild-16 '{n}'
+```
+
+`--qemu aarch64` cross-builds the driver (`aarch64-unknown-linux-gnu`, linked with `aarch64-linux-gnu-gcc`) and runs every workload under `qemu-aarch64` with an instruction-counting plugin (`qemu/insncount.c`, built by `run.py`). Needs `qemu-user`, the aarch64 cross gcc and glibc (`/usr/aarch64-linux-gnu`), QEMU's plugin header and `rustup target add aarch64-unknown-linux-gnu`. Runs disable address randomization (`setarch -R`): QEMU counts the target's own `malloc`, whose paths depend on addresses. The counts are exact and close to CI's Cachegrind on aarch64 (74 of 85 main-to-head differences within one instruction per iteration when validated, the rest within the C library's share), but not equal to them, so a QEMU baseline has its own name (`aarch64-unknown-linux-gnu-qemu`) and never stands in for CI's. Cache and branch columns are not measured (`-`).
+
+`qemu/profile.py` attributes per-block counts (`qemu/insnblocks.c`) to the driver's functions by N/2N differencing, as Callgrind does for the host: what a regression on aarch64 costs, and where.
