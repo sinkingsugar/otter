@@ -734,39 +734,50 @@ fn overflow() -> Error {
 // within `run` while both original slices remain exclusively borrowed.
 #[derive(Clone, Copy)]
 struct Frames {
-  locals: *mut Var,
-  locals_len: usize,
-  locals_bytes: usize,
-  mesh: *mut Var,
-  mesh_len: usize,
-  mesh_bytes: usize,
+  /// The locals' and the mesh's frames, indexed by `LOCALS` and `MESH`:
+  /// a binding's slot is one indexed load, not a choice between two
+  /// (which the two architectures compiled differently, each paying an
+  /// instruction per slot in one placement of this struct or the other).
+  base: [*mut Var; 2],
+  len: [usize; 2],
+  bytes: [usize; 2],
 }
 
+const LOCALS: usize = 0;
+const MESH_FRAME: usize = 1;
+
 impl Frames {
+  fn new(locals: &mut [Var], mesh: &mut [Var]) -> Frames {
+    Frames {
+      base: [locals.as_mut_ptr(), mesh.as_mut_ptr()],
+      len: [locals.len(), mesh.len()],
+      bytes: [std::mem::size_of_val(locals), std::mem::size_of_val(mesh)],
+    }
+  }
+
   #[inline(always)]
   fn slot_offset<const MESH: bool>(&self, offset: SlotOffset) -> *mut Var {
-    let (base, bytes) = if MESH {
-      (self.mesh, self.mesh_bytes)
-    } else {
-      (self.locals, self.locals_bytes)
-    };
-    assert!(offset.0 < bytes, "inline binding outside its frame");
+    let frame = if MESH { MESH_FRAME } else { LOCALS };
+    assert!(
+      offset.0 < self.bytes[frame],
+      "inline binding outside its frame"
+    );
     // SAFETY: SlotOffset is an aligned whole-Var offset constructed with
     // checked multiplication. Frame byte lengths are multiples of Var size,
     // so offset < bytes also proves the entire Var fits. Bases come from the
     // original exclusive borrows; no new mutable reference is constructed.
-    unsafe { base.cast::<u8>().add(offset.0).cast::<Var>() }
+    unsafe { self.base[frame].cast::<u8>().add(offset.0).cast::<Var>() }
   }
 
   #[inline(always)]
   fn slot(&self, b: Binding) -> *mut Var {
-    let (base, len, index) = match b {
-      Binding::Local(i) => (self.locals, self.locals_len, i),
-      Binding::Mesh(i) => (self.mesh, self.mesh_len, i),
+    let (frame, index) = match b {
+      Binding::Local(i) => (LOCALS, i),
+      Binding::Mesh(i) => (MESH_FRAME, i),
     };
-    assert!(index < len, "inline binding outside its frame");
+    assert!(index < self.len[frame], "inline binding outside its frame");
     // SAFETY: checked against the length of the exclusively borrowed frame.
-    unsafe { base.add(index) }
+    unsafe { self.base[frame].add(index) }
   }
 }
 
@@ -795,14 +806,7 @@ pub(crate) fn run<C: VmCalls>(
   // The hot tier reads its own copy of the frame descriptor: through the
   // tier, every slot address was computed by selecting an address and
   // loading from it (one more instruction per slot).
-  let frames = Frames {
-    locals: locals.as_mut_ptr(),
-    locals_len: locals.len(),
-    locals_bytes: std::mem::size_of_val(locals),
-    mesh: mesh.as_mut_ptr(),
-    mesh_len: mesh.len(),
-    mesh_bytes: std::mem::size_of_val(mesh),
-  };
+  let frames = Frames::new(locals, mesh);
   let mut tier = Tier {
     frames,
     // Own the incoming output so replacing it releases captured values
@@ -833,6 +837,7 @@ pub(crate) fn run<C: VmCalls>(
     // its operands before it writes, and writes only plain values over
     // plain ones (nothing to drop).
     unsafe {
+      let frames = &(*t).frames;
       'slow: {
         match &instruction.op {
           // The run ends before these: the engine activates a fallback,
@@ -866,45 +871,45 @@ pub(crate) fn run<C: VmCalls>(
             value = target;
           }
           // The Drop variants release an owned scratch as they reanchor:
-          // plain, it needs nothing.
-          // The Drop variants release an owned scratch as they reanchor:
-          // plain, it needs nothing.
+          // plain, it needs nothing; owned (a value a constructor or a
+          // Take left), through `release_scratch`.
+          // Each releases the scratch last, after its own checks: the
+          // accumulator may be the scratch until it reanchors, and a
+          // `break 'slow` redoes the whole operation.
           Op::ConstDrop(v) => {
-            if !(*scratch).is_plain() {
-              break 'slow;
-            }
             value = v;
+            if !(*scratch).is_plain() {
+              release_scratch(scratch);
+            }
           }
           Op::GetLocalDrop(offset) => {
-            if !(*scratch).is_plain() {
-              break 'slow;
-            }
             value = frames.slot_offset::<false>(*offset);
+            if !(*scratch).is_plain() {
+              release_scratch(scratch);
+            }
           }
           Op::GetMeshDrop(offset) => {
-            if !(*scratch).is_plain() {
-              break 'slow;
-            }
             value = frames.slot_offset::<true>(*offset);
+            if !(*scratch).is_plain() {
+              release_scratch(scratch);
+            }
           }
           Op::SetDrop(b) => {
             let target = frames.slot(*b);
-            if !(*scratch).is_plain() {
-              break 'slow;
-            }
             if !std::ptr::eq(value, target) {
-              if !((*target).is_plain() && (*value).is_plain()) {
-                break 'slow;
+              if (*target).is_plain() && (*value).is_plain() {
+                std::ptr::write(target, std::ptr::read(value));
+              } else {
+                copy_into(target, value);
               }
-              std::ptr::write(target, std::ptr::read(value));
             }
             value = target;
+            if !(*scratch).is_plain() {
+              release_scratch(scratch);
+            }
           }
           Op::IncDrop(b) => {
             let target = frames.slot(*b);
-            if !(*scratch).is_plain() {
-              break 'slow;
-            }
             let Var::Int(n) = &mut *target else {
               break 'slow;
             };
@@ -913,6 +918,9 @@ pub(crate) fn run<C: VmCalls>(
             };
             *n = m;
             value = target;
+            if !(*scratch).is_plain() {
+              release_scratch(scratch);
+            }
           }
           // A plain element by index, a plain struct slot: read, then
           // written over a plain scratch.
@@ -924,6 +932,12 @@ pub(crate) fn run<C: VmCalls>(
             let item = match (&*value, key) {
               (Var::Seq(items), Var::Int(i)) if *i >= 0 && (*i as usize) < items.len() => {
                 &items[*i as usize]
+              }
+              (Var::Table(_), Var::String(_)) => {
+                take_key_into(value, key, scratch);
+                value = scratch;
+                index += 1;
+                continue 'run;
               }
               _ => break 'slow,
             };
@@ -1569,6 +1583,41 @@ unsafe fn compare_into(cmp: Cmp, value: &Var, rhs: &Var, numeric: *mut Var) -> b
   true
 }
 
+/// Releases an owned scratch for a Drop variant (`ConstDrop`, `SetDrop`,
+/// ...) about to reanchor: what a constructor or an owned result left there.
+/// Cold and out of line: through the slow tier this cost a constructor's
+/// loop about 90 instructions an iteration on aarch64.
+///
+/// SAFETY: `scratch` is the run's scratch, reached through its tier
+/// pointer, and the accumulator does not read it (the variant reanchors).
+#[cold]
+#[inline(never)]
+unsafe fn release_scratch(scratch: *mut Var) {
+  // SAFETY: see above.
+  unsafe { assign(&mut *scratch, Var::None) }
+}
+
+/// `Take` of a table's entry by a string key, into the scratch (`none`
+/// for a missing key): a small function of its own, as `copy_into`; through
+/// the slow tier this cost a read by a variable key about 45 instructions on
+/// aarch64. The table and the key are read before the scratch is written
+/// (the table may be the scratch itself: raw pointers, review
+/// 2026-10-11-dcee86c-claude-0b393d#F1).
+///
+/// SAFETY: `value` is the live accumulator, a table; `key` a string that is
+/// a constant or a frame slot, never the scratch; `scratch` the run's
+/// scratch, reached through its tier pointer.
+#[inline(never)]
+unsafe fn take_key_into(value: *const Var, key: &Var, scratch: *mut Var) {
+  // SAFETY: see above; the reference ends with this statement.
+  let new = match (unsafe { &*value }, key) {
+    (Var::Table(entries), Var::String(k)) => entries.get(k).map(copy).unwrap_or(Var::None),
+    _ => unreachable!("run checked a table and a string key"),
+  };
+  // SAFETY: no reference into the scratch is live.
+  unsafe { assign(&mut *scratch, new) }
+}
+
 /// Out of line so `run`'s own frame stays small: a VM call's state would
 /// otherwise be set up in every segment's prologue.
 #[inline(never)]
@@ -1600,7 +1649,7 @@ unsafe fn vm_call_op<C: VmCalls>(
     }
     callee_locals[callee.input_slot] = input.clone();
     // SAFETY: the mesh frame through the same pointer this run uses.
-    let mesh = std::slice::from_raw_parts_mut(frames.mesh, frames.mesh_len);
+    let mesh = std::slice::from_raw_parts_mut(frames.base[MESH_FRAME], frames.len[MESH_FRAME]);
     let result = if callee.constructors {
       run_segment(callee.code, 0, input, callee_locals, mesh, &callee.calls)
     } else {

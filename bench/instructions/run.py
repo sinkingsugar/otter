@@ -13,6 +13,7 @@ allocations itself, so the same run gives both.
   run.py --check FILE       against another baseline (e.g. one written at the base)
   run.py --jitter 5                                spread across repeated runs
   run.py --allocations-only --check ...            natively, without Valgrind
+  run.py --qemu aarch64 --write /tmp/before.txt    aarch64 counts on an x86-64 machine (QEMU)
 
 Instruction counts depend on the exact Valgrind and C library build, so a
 baseline is only comparable in the environment it was written in (its header
@@ -88,25 +89,50 @@ def capture(command):
         return "not available"
 
 
-def environment(valgrind):
+# `--qemu ARCH`: the driver cross-built for ARCH and run under QEMU's
+# user-mode emulator, counting executed instructions with a plugin
+# (`qemu/insncount.c`). Exact and deterministic like Cachegrind, but it
+# counts the target's own C library and simulates no caches: a local
+# stand-in for CI's job on that architecture, to compare two revisions on
+# one machine, not to check CI's baselines.
+QEMU = {
+    "aarch64": {"target": "aarch64-unknown-linux-gnu", "sysroot": "/usr/aarch64-linux-gnu",
+                "linker": "aarch64-linux-gnu-gcc", "emulator": "qemu-aarch64"},
+}
+PLUGIN = ROOT / "target/insncount/libinsncount.so"
+
+
+def environment(counter, qemu):
     """What instruction counts depend on, besides the source: recorded in the
     baseline and compared before a check."""
     target = re.search(r"host: (\S+)", capture(["rustc", "-vV"]))
     # ldd names the distribution's package revision, which libc_ver does not.
     libc = capture(["ldd", "--version"]).splitlines()[0] or " ".join(platform.libc_ver())
     env = {"rustc": capture(["rustc", "-V"]), "target": target.group(1) if target else "unknown", "libc": libc}
-    if valgrind:
+    if counter == "cachegrind":
         env["valgrind"] = capture(["valgrind", "--version"])
+    elif counter == "qemu":
+        env["target"] = qemu["target"] + "-qemu"
+        env["libc"] = "glibc " + capture([qemu["emulator"], "-L", qemu["sysroot"],
+                                          qemu["sysroot"] + "/lib/libc.so.6"]).splitlines()[0]
+        env["qemu"] = capture([qemu["emulator"], "--version"]).splitlines()[0]
     return env
 
 
-def measure(driver, workload, n, scratch, valgrind):
-    """Totals of one run at `n` iterations, keyed by COLUMNS."""
+def measure(driver, workload, n, scratch, counter, qemu):
+    """Totals of one run at `n` iterations, keyed by COLUMNS (those the
+    counter measures)."""
     command = [str(driver), *workload.argv(n)]
     out = scratch / f"{workload.name.replace('/', '_')}-{n}.cg"
-    if valgrind:
+    if counter == "cachegrind":
         command = ["valgrind", "--tool=cachegrind", "--cache-sim=yes", "--branch-sim=yes", *CACHES,
                    f"--cachegrind-out-file={out}", *command]
+    elif counter == "qemu":
+        # Without address randomization: the target's malloc, counted here
+        # (Cachegrind substitutes its own), takes paths that depend on
+        # addresses, and the counts varied between runs.
+        command = ["setarch", "-R", qemu["emulator"], "-L", qemu["sysroot"], "-plugin",
+                   f"{PLUGIN},out={out}", *command]
     p = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode:
         raise RuntimeError(f"{workload.name} at {n} failed ({p.returncode}): {' '.join(command)}\n"
@@ -117,7 +143,9 @@ def measure(driver, workload, n, scratch, valgrind):
         "allocs": int(re.search(r"GATE_ALLOCS: (\d+)", p.stdout).group(1)),
         "bytes": int(re.search(r"GATE_BYTES: (\d+)", p.stdout).group(1)),
     }
-    if valgrind:
+    if counter == "qemu":
+        totals["ir"] = int(out.read_text())
+    elif counter == "cachegrind":
         text = out.read_text()
         events = re.search(r"^events: (.+)$", text, re.M).group(1).split()
         counts = dict(zip(events, map(int, re.search(r"^summary: (.+)$", text, re.M).group(1).split())))
@@ -128,17 +156,17 @@ def measure(driver, workload, n, scratch, valgrind):
     return totals
 
 
-def per_iteration(driver, workload, scratch, valgrind):
+def per_iteration(driver, workload, scratch, counter, qemu):
     n = workload.n
     # Equal digit counts keep the scripts and arguments the same length.
     assert len(str(n)) == len(str(2 * n)), workload.name
-    one, two = (measure(driver, workload, k, scratch, valgrind) for k in (n, 2 * n))
+    one, two = (measure(driver, workload, k, scratch, counter, qemu) for k in (n, 2 * n))
     return {column: (two[column] - one[column]) / n for column in one}
 
 
-def run_all(driver, selected, scratch, valgrind, jobs):
+def run_all(driver, selected, scratch, counter, qemu, jobs):
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = {w.name: pool.submit(per_iteration, driver, w, scratch, valgrind) for w in selected}
+        futures = {w.name: pool.submit(per_iteration, driver, w, scratch, counter, qemu) for w in selected}
         return {name: future.result() for name, future in futures.items()}
 
 
@@ -148,7 +176,8 @@ def write_baseline(path, results, env):
              *(f"# {key}: {value}" for key, value in env.items()),
              "# workload " + " ".join(COLUMNS)]
     for name, row in results.items():
-        lines.append(" ".join([name, *(f"{row[c]:.2f}" for c in COLUMNS)]))
+        # A column the counter does not measure is `-` (QEMU: the caches).
+        lines.append(" ".join([name, *(f"{row[c]:.2f}" if c in row else "-" for c in COLUMNS)]))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
 
@@ -160,7 +189,7 @@ def read_baseline(path):
             env[m.group(1)] = m.group(2)
         elif line and not line.startswith("#"):
             name, *values = line.split()
-            rows[name] = dict(zip(COLUMNS, map(float, values)))
+            rows[name] = {c: float(v) for c, v in zip(COLUMNS, values) if v != "-"}
     return env, rows
 
 
@@ -201,19 +230,31 @@ def main():
                       help="default: bench/instructions/TARGET.txt for this host")
     mode.add_argument("--jitter", type=int, metavar="RUNS", help="run every workload RUNS times and report the spread")
     p.add_argument("--allocations-only", action="store_true", help="run natively, without Valgrind: allocations and bytes only")
+    p.add_argument("--qemu", choices=sorted(QEMU), help="count instructions for this architecture under QEMU instead of Cachegrind")
     p.add_argument("--ignore-environment", action="store_true", help="check against a baseline from another environment")
     p.add_argument("--filter", default="", help="only workloads whose name matches this regular expression")
     p.add_argument("--jobs", type=int, default=os.cpu_count(), help="parallel runs (counts do not depend on it)")
     p.add_argument("--driver", type=Path, default=DRIVER, help="a prebuilt driver; builds the default one otherwise")
     p.add_argument("--fresh", type=Path, help="with --check, also write the measured baseline here (CI's artifact)")
     args = p.parse_args()
-    valgrind = not args.allocations_only
-    if args.write and not valgrind:
+    qemu = QEMU.get(args.qemu)
+    counter = None if args.allocations_only else ("qemu" if qemu else "cachegrind")
+    if args.write and not counter:
         p.error("--write needs the instruction counts; drop --allocations-only")
-    if args.driver == DRIVER:
+    if qemu:
+        if args.driver == DRIVER:
+            env_vars = dict(os.environ, **{f"CARGO_TARGET_{qemu['target'].upper().replace('-', '_')}_LINKER": qemu["linker"]})
+            subprocess.run(["cargo", "build", "--release", "-p", "otter-lang", "--example", "bench_gate",
+                            "--target", qemu["target"]], cwd=ROOT, check=True, env=env_vars)
+            args.driver = ROOT / "target" / qemu["target"] / "release/examples/bench_gate"
+        PLUGIN.parent.mkdir(parents=True, exist_ok=True)
+        cflags = capture(["pkg-config", "--cflags", "glib-2.0"]).split()
+        subprocess.run(["cc", "-shared", "-fPIC", "-O2", *cflags, "-o", str(PLUGIN),
+                        str(Path(__file__).with_name("qemu") / "insncount.c")], check=True)
+    elif args.driver == DRIVER:
         subprocess.run(["cargo", "build", "--release", "-p", "otter-lang", "--example", "bench_gate"],
                        cwd=ROOT, check=True)
-    env = environment(valgrind)
+    env = environment(counter, qemu)
     for mode in ("check", "write"):
         if getattr(args, mode) is HOST:
             setattr(args, mode, Path(__file__).with_name(f"{env['target']}.txt"))
@@ -223,7 +264,7 @@ def main():
         if not selected:
             p.error("no workload matches --filter")
         if args.jitter:
-            runs = [run_all(args.driver, selected, scratch, valgrind, args.jobs) for _ in range(args.jitter)]
+            runs = [run_all(args.driver, selected, scratch, counter, qemu, args.jobs) for _ in range(args.jitter)]
             steady = True
             for w in selected:
                 for column in runs[0][w.name]:
@@ -233,7 +274,7 @@ def main():
                         print(f"{w.name} {column}: {min(values):.3f} .. {max(values):.3f}")
             print("no jitter" if steady else "jitter found")
             return 0 if steady else 1
-        results = run_all(args.driver, selected, scratch, valgrind, args.jobs)
+        results = run_all(args.driver, selected, scratch, counter, qemu, args.jobs)
     if args.write:
         if args.filter:
             p.error("--write records every workload; drop --filter")
@@ -250,8 +291,8 @@ def main():
     if args.filter:
         baseline = {k: v for k, v in baseline.items() if re.search(args.filter, k)}
     mismatch = [f"{k}: baseline {base_env.get(k)!r}, here {v!r}" for k, v in env.items() if base_env.get(k) != v]
-    gated = GATED if valgrind else ("allocs", "bytes")
-    if mismatch and valgrind and not args.ignore_environment:
+    gated = GATED if counter else ("allocs", "bytes")
+    if mismatch and counter and not args.ignore_environment:
         print("The baseline was written in another environment; instruction counts are not comparable:\n  "
               + "\n  ".join(mismatch)
               + "\nUse --allocations-only, --ignore-environment, or a baseline written here.", file=sys.stderr)
