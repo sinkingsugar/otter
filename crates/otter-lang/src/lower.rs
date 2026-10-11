@@ -330,7 +330,15 @@ fn lower_files<'a>(
     reads: Vec::new(),
   };
   let mut out = Lowered::default();
-  // Function signatures first: a call may precede its declaration, and
+  // Script-argument defaults before anything reads a name: a function's
+  // parameter defaults may read one, and must see it with its type.
+  for stmt in &program.statements {
+    if let Some((name, params, block)) = default_decl(stmt) {
+      l.piped_declaration(name, stmt);
+      l.const_decl(block, params);
+    }
+  }
+  // Function signatures next: a call may precede its declaration, and
   // bodies may call each other.
   let mut bodies = Vec::new();
   for stmt in &program.statements {
@@ -348,6 +356,7 @@ fn lower_files<'a>(
   for stmt in &program.statements {
     if let Some((name, params, block)) = top_level_func(stmt)
       && name.node == "const"
+      && !is_default(params)
     {
       l.piped_declaration(name, stmt);
       l.const_decl(block, params);
@@ -459,6 +468,35 @@ fn top_level_func(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> 
     }
     _ => None,
   }
+}
+
+/// A `@const` that is a default for a script argument.
+fn default_decl(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> {
+  let Statement::Pipeline(pipe) = stmt else {
+    return None;
+  };
+  let block = &pipe.blocks[0];
+  match &block.kind {
+    BlockKind::Func { name, params } if name.node == "const" && is_default(params.as_ref()) => {
+      Some((name, params.as_ref(), block))
+    }
+    _ => None,
+  }
+}
+
+/// Whether a `@const`'s parameters end with `ignore-redefined: true`: a
+/// default for a script argument.
+fn is_default(params: Option<&Params>) -> bool {
+  params.and_then(|p| p.items.last()).is_some_and(|last| {
+    last
+      .name
+      .as_ref()
+      .is_some_and(|n| n.node == "ignore-redefined")
+      && matches!(
+        &last.value.blocks[..],
+        [b] if b.kind == BlockKind::Literal(Literal::Bool(true))
+      )
+  })
 }
 
 fn statement_span(stmt: &Statement) -> Span {
@@ -1857,7 +1895,10 @@ impl Lowerer<'_> {
     // A default: the script argument of the same name, when given, wins,
     // read as the default's type (arguments arrive as strings).
     if default {
-      let BlockKind::Literal(kind) = &value.kind else {
+      let BlockKind::Literal(
+        kind @ (Literal::Int(_) | Literal::Float(_) | Literal::Bool(_) | Literal::String(_)),
+      ) = &value.kind
+      else {
         self.problem(Problem::construct(
           value.span,
           "generic",
@@ -1867,6 +1908,16 @@ impl Lowerer<'_> {
         return;
       };
       if let Some(given) = self.defines.get(&name.node) {
+        // The argument replaces this default, not a second declaration.
+        if self.consts.contains_key(&name.node) {
+          self.problem(Problem::construct(
+            name.span,
+            "generic",
+            "duplicate-binding",
+            format!("`@{}` is already defined", name.node),
+          ));
+          return;
+        }
         let parsed = match kind {
           Literal::Int(_) => given.trim().parse().ok().map(Literal::Int),
           Literal::Float(_) => given.trim().parse().ok().map(Literal::Float),

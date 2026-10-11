@@ -104,7 +104,10 @@ pub fn with_sink<R>(sink: Option<Sink>, f: impl FnOnce() -> R) -> R {
   impl Drop for Restore {
     fn drop(&mut self) {
       if let Some(outer) = self.0.take() {
-        CAPTURE.with(|c| *c.borrow_mut() = outer);
+        // The displaced sink is dropped after the borrow ends: a stream may
+        // own host resources whose release logs.
+        let displaced = CAPTURE.with(|c| c.replace(outer));
+        drop(displaced);
       }
     }
   }
@@ -145,6 +148,26 @@ mod tests {
       emit("from here".into());
     });
     assert_eq!(lines, ["from a worker", "from here"]);
+  }
+
+  #[test]
+  fn a_stream_whose_release_logs_is_dropped_outside_the_sink() {
+    struct Guard;
+    impl Drop for Guard {
+      fn drop(&mut self) {
+        emit("sink dropped".into());
+      }
+    }
+    let ((), lines) = capture(|| {
+      let guard = Guard;
+      with_sink(
+        Some(Sink::stream(move |_| {
+          let _ = &guard;
+        })),
+        || {},
+      );
+    });
+    assert_eq!(lines, ["sink dropped"]);
   }
 
   #[test]

@@ -260,9 +260,16 @@ impl Session {
   /// records. At `@run`'s iteration limit, cancels remaining instances and
   /// reports their outcomes in this same call. Idle calls are no-ops.
   pub fn tick(&mut self) -> Vec<Finished> {
+    self.logging(Self::tick_inner)
+  }
+
+  /// Runs `f` with the session's log sink, if it has one: everything that
+  /// runs the program or ends it (ticks, stops, reloads that cancel work)
+  /// logs there.
+  fn logging<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
     match self.log.clone() {
-      Some(sink) => otter_core::log::with_sink(Some(sink), || self.tick_inner()),
-      None => self.tick_inner(),
+      Some(sink) => otter_core::log::with_sink(Some(sink), || f(self)),
+      None => f(self),
     }
   }
 
@@ -296,10 +303,7 @@ impl Session {
   /// the revision's mesh and compose cache. Safe to call repeatedly.
   /// Dropping the session also cancels work, but discards the outcomes.
   pub fn stop(&mut self) -> Vec<Finished> {
-    match self.log.clone() {
-      Some(sink) => otter_core::log::with_sink(Some(sink), || self.stop_inner()),
-      None => self.stop_inner(),
-    }
+    self.logging(Self::stop_inner)
   }
 
   fn stop_inner(&mut self) -> Vec<Finished> {
@@ -354,6 +358,16 @@ impl Session {
     if self.active.is_none() {
       return self.reload(source, catalog, defines);
     }
+    // Replaced instances are cancelled here, and their cleanup may log.
+    self.logging(|session| session.preserve(source, catalog, defines))
+  }
+
+  fn preserve(
+    &mut self,
+    source: Source,
+    catalog: &Catalog,
+    defines: &std::collections::HashMap<String, String>,
+  ) -> Result<Vec<Finished>, (Source, Vec<Diagnostic>)> {
     let program = self.load(source, catalog, defines)?;
     let active = self.active.as_mut().expect("active mesh");
     let mut candidate = active.mesh.revision();
@@ -411,6 +425,15 @@ impl Session {
       .and_then(|r| r.fps)
       .and_then(|fps| Duration::try_from_secs_f64(1.0 / fps).ok());
     Ok(finished)
+  }
+}
+
+impl Drop for Session {
+  /// Ends the program with the session's log sink, as `stop` does.
+  fn drop(&mut self) {
+    if self.active.is_some() {
+      self.logging(|session| drop(session.active.take()));
+    }
   }
 }
 
