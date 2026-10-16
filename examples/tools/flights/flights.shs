@@ -1,0 +1,116 @@
+// Shared by the Google Flights tools (search-flights.shs, cheap-dates.shs):
+// the `tfs` itinerary token, defensive reads of the page's positional
+// payload, formatting, and the fetch with its retry.
+
+@const(user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+@const(no-price 2147483647)
+
+// --- a minimal protobuf encoder: varint and length-delimited fields ---
+
+@fn(PbTag input: None output: Bytes params: {field: Int wire: Int} {
+  field | Mul(8) | Add(wire) | ToLEB128
+})
+@fn(PbVarint input: None output: Bytes params: {field: Int value: Int} {
+  [PbTag(field: field wire: 0) (value | ToLEB128)] | Bytes.Join
+})
+@fn(PbMsg input: None output: Bytes params: {field: Int body: Bytes} {
+  [PbTag(field: field wire: 2) (body | Count | ToLEB128) body] | Bytes.Join
+})
+@fn(PbStr input: None output: Bytes params: {field: Int text: String} {
+  PbMsg(field: field body: (text | StringToBytes))
+})
+// One FlightData leg: date@2, from_airport@13{airport@2}, to_airport@14{airport@2}.
+@fn(PbLeg input: None output: Bytes params: {date: String from: String to: String} {
+  [
+    PbStr(field: 2 text: date)
+    PbMsg(field: 13 body: PbStr(field: 2 text: from))
+    PbMsg(field: 14 body: PbStr(field: 2 text: to))
+  ] | Bytes.Join
+})
+
+// --- defensive reads of the positional payload ---
+
+// The element at `i` of a sequence, or none (not a sequence, too short).
+@fn(At input: Any output: Any params: {i: Int} {
+  If({IsSeq} {
+    ExpectSeq = s
+    If({s | Count | IsMore(i)} {s | Take(i)} {none})
+  } {none})
+})
+@fn(Last input: Any output: Any params: {} {
+  If({IsSeq} {
+    ExpectSeq = s
+    s | Count | Sub(1) = j
+    If({j | IsMoreEqual(0)} {s | Take(j)} {none})
+  } {none})
+})
+@fn(IntOr input: Any output: Int params: {default: Int} {
+  If({IsInt} {ExpectInt} {default})
+})
+@fn(StringOr input: Any output: String params: {default: String} {
+  If({IsString} {ExpectString} {default})
+})
+@fn(SeqOr input: Any output: [Any] params: {} {
+  If({IsSeq} {ExpectSeq} {[]})
+})
+// A row's price: the last element of row[1][0], a number; `no-price` without one.
+@fn(Price input: Any output: Int params: {} {
+  At(i: 1) | At(i: 0) | Last = p
+  p | If({IsFloat} {ExpectFloat | ToInt} {p | IntOr(default: @no-price)})
+})
+
+// --- formatting ---
+
+@fn(Pad2 input: Int output: String params: {} {
+  Add(100) | ToString | Slice(from: 1)
+})
+@fn(FmtMins input: Int output: String params: {} {
+  = mins
+  f"{mins | Div(60)}h{mins | Mod(60) | Pad2}m"
+})
+// [y m d] and [h m] as "2026-08-20 07:35".
+@fn(FmtDateTime input: Any output: String params: {time: Any} {
+  = date
+  [
+    (date | At(i: 0) | IntOr(default: 0) | ToString) "-"
+    (date | At(i: 1) | IntOr(default: 0) | Pad2) "-"
+    (date | At(i: 2) | IntOr(default: 0) | Pad2) " "
+    (time | At(i: 0) | IntOr(default: 0) | Pad2) ":"
+    (time | At(i: 1) | IntOr(default: 0) | Pad2)
+  ] | String.Join
+})
+
+// --- fetching ---
+
+// The ds:1 flight data of a search page, parsed, or none when Google
+// served a degraded page (no rows) `tries` times in a row. One request at a
+// time: concurrent ones multiplexed over one HTTP/2 connection get degraded
+// pages.
+@fn(FetchFlights input: String output: Any params: {tries: Int} {
+  = url
+  "" | Var(payload)
+  0 | Var(attempt)
+  Repeat({
+    Inc(attempt)
+    attempt | When({IsMore(1)} {Pause(0.8)})
+    Maybe({
+      Http.Get(url headers: {
+        user-agent: @user-agent
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        accept-language: "en-US,en;q=0.9"
+      } timeout: 60) | String.Split("AF_initDataCallback({key: 'ds:1'") = parts
+      parts | Count | When({IsMoreEqual(2)} {
+        parts | Take(1) | String.Split("', data:") | Take(1) | String.Split(", sideChannel") | Take(0) = text
+        text | FromJson | SeqOr | Count | When({IsMore(3)} {text | Update(payload)})
+      })
+    } {Log("google-flights: request failed")})
+  } until: {Any({payload | IsNot("")} {attempt | IsMoreEqual(tries)})})
+  payload | If({Is("")} {none} {payload | FromJson})
+})
+
+// The search page of an itinerary token.
+@fn(SearchUrl input: Bytes output: String params: {currency: String} {
+  ToBase64 | String.EncodeURI = tfs
+  ["https://www.google.com/travel/flights/search?tfs=" tfs "&curr=" currency "&hl=en"] | String.Join
+})
+
