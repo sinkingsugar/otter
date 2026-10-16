@@ -663,6 +663,79 @@ fn names_declared_in_blocks_do_not_escape() {
   assert_eq!(mesh.outcome(id), Some(&Outcome::Completed(Var::Int(5))));
 }
 
+/// Frontend temporaries (`%` names) stay visible after the block declaring
+/// them, but a block that might not run leaves them uninitialized: an
+/// assignment counts after it only when nothing conditional encloses it.
+#[test]
+fn assignments_in_branches_do_not_initialize_after_them() {
+  let branch = |flow: Vec<otter_core::ShardDef>| when(vec![konst(Var::Bool(true))], flow);
+  let mut mesh = Mesh::new();
+  let uninitialized = [
+    // Declared in a branch.
+    vec![branch(vec![konst(Var::Int(1)), declare("%a")]), get("%a")],
+    // Declared in a branch, assigned in another.
+    vec![
+      branch(vec![konst(Var::Int(1)), declare("%a")]),
+      branch(vec![konst(Var::Int(2)), update("%a")]),
+      get("%a"),
+    ],
+    // Assigned in a nested branch, read in the enclosing one.
+    vec![
+      branch(vec![konst(Var::Int(1)), declare("%a")]),
+      branch(vec![
+        branch(vec![konst(Var::Int(2)), update("%a")]),
+        get("%a"),
+      ]),
+    ],
+  ];
+  for (i, flow) in uninitialized.into_iter().enumerate() {
+    let name = format!("uninitialized-{i}");
+    mesh.add_wire(wire(&name, false, flow));
+    let (code, _) = compose_error(&mut mesh, &name);
+    assert_eq!(code, "possibly-uninitialized", "{name}");
+  }
+  // Assigned unconditionally after the branch, or in the enclosing branch
+  // before a nested one: initialized from there on.
+  let initialized = [
+    (
+      vec![
+        branch(vec![konst(Var::Int(1)), declare("%a")]),
+        konst(Var::Int(2)),
+        update("%a"),
+        get("%a"),
+      ],
+      Var::Int(2),
+    ),
+    (
+      vec![
+        branch(vec![konst(Var::Int(1)), declare("%a")]),
+        branch(vec![
+          konst(Var::Int(2)),
+          update("%a"),
+          branch(vec![konst(Var::Int(3)), update("%a")]),
+          get("%a"),
+        ]),
+      ],
+      // When outputs its input.
+      Var::None,
+    ),
+  ];
+  for (i, (flow, expected)) in initialized.into_iter().enumerate() {
+    let name = format!("initialized-{i}");
+    mesh.add_wire(wire(&name, false, flow));
+    let compiled = mesh
+      .compile(&name, Type::none())
+      .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    let id = mesh.spawn(&compiled, Var::None).unwrap();
+    mesh.run(5);
+    assert_eq!(
+      mesh.outcome(id),
+      Some(&Outcome::Completed(expected)),
+      "{name}"
+    );
+  }
+}
+
 // --- occurrence paths in diagnostics ---
 
 fn diagnostic(mesh: &mut Mesh, name: &str) -> otter_core::Diagnostic {

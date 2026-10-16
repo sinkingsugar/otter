@@ -5130,3 +5130,58 @@ Msg(text level: "error")
   let d = load_or_compose_errors(r#"Msg("x" level: "loud")"#);
   assert_eq!(d[0].code, "invalid-argument-value");
 }
+
+/// Past 16 nested flows, compose finds which argument holds a flow through
+/// an index instead of a scan: problems and occurrences in any of them are
+/// still located at their own source.
+#[test]
+fn many_flow_arguments_are_located_like_few() {
+  use otter_core::diagnostic::PathStep;
+  // The bad flow at each position, among few flows and among many.
+  for flows in [3, 40] {
+    for bad in [0, flows / 2, flows - 1] {
+      let args: Vec<&str> = (0..flows)
+        .map(|i| {
+          if i == bad {
+            "{Add(\"a\")}"
+          } else {
+            "{IsMore(0)}"
+          }
+        })
+        .collect();
+      let all = format!("1 | All({})", args.join(" "));
+      let pairs: Vec<String> = args.iter().map(|p| format!("{p} {{\"x\"}}")).collect();
+      let cond = format!("1 | Cond({})", pairs.join(" "));
+      let cases: Vec<String> = (0..flows)
+        .map(|i| match i == bad {
+          true => format!("{i} {{Add(\"a\")}}"),
+          false => format!("{i} {{\"x\"}}"),
+        })
+        .collect();
+      let match_ = format!("1 | Match([{}] default: {{\"y\"}})", cases.join(" "));
+      for script in [all, cond, match_] {
+        let d = load_or_compose_errors(&script);
+        let column = script.find("Add(\"a\")").unwrap() as u32 + 1;
+        assert_eq!(at(&d[0]), (1, column), "{flows} flows, bad {bad}: {script}");
+      }
+    }
+  }
+  // Every occurrence in 40 flows is located at its own shard.
+  let script = format!("1 | All({})", "{IsMore(0)} ".repeat(40));
+  let report = check(&script);
+  assert!(report.ok(), "{}", report.to_json());
+  let mut columns: Vec<u32> = report.wires[0]
+    .occurrences
+    .iter()
+    .filter(
+      |o| matches!(o.occurrence.path.last(), Some(PathStep::Shard {name, ..}) if name == "IsMore"),
+    )
+    .map(|o| o.column.unwrap())
+    .collect();
+  columns.sort();
+  let expected: Vec<u32> = script
+    .match_indices("IsMore")
+    .map(|(i, _)| i as u32 + 1)
+    .collect();
+  assert_eq!(columns, expected);
+}

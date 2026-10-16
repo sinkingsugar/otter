@@ -2222,7 +2222,8 @@ impl Lowerer<'_> {
         (_, None) => None,
       };
       resolved.push((param, decl));
-      // Variadic arguments are numbered for occurrence paths (`Item`).
+      // Variadic arguments are numbered for occurrence paths (`Item`), in
+      // ascending order.
       if decl.is_some_and(|d| d.variadic) {
         variadic_items.push(resolved.len() - 1);
       }
@@ -2305,7 +2306,7 @@ impl Lowerer<'_> {
           });
           if let Some(d) = decl {
             nested.push(PathStep::Param(d.name.clone()));
-            if let Some(item) = variadic_items.iter().position(|i| *i == n) {
+            if let Ok(item) = variadic_items.binary_search(&n) {
               nested.push(PathStep::Item(item));
             }
           }

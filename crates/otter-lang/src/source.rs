@@ -38,6 +38,10 @@ struct File {
   start: usize,
   /// The index in `line_starts` of its first line.
   first_line: usize,
+  /// Each non-ASCII character's byte offset in the file, with the bytes
+  /// beyond one per character up to and including it, so a column is found
+  /// without counting the line's characters. Empty for ASCII text.
+  wide: Vec<(usize, usize)>,
 }
 
 impl Source {
@@ -61,10 +65,19 @@ impl Source {
       self.line_starts.push(self.text.len());
     }
     let start = self.text.len();
+    let mut wide = Vec::new();
+    if !text.is_ascii() {
+      let mut extra = 0;
+      for (i, c) in text.char_indices().filter(|(_, c)| !c.is_ascii()) {
+        extra += c.len_utf8() - 1;
+        wide.push((i, extra));
+      }
+    }
     self.files.push(File {
       name: name.into(),
       start,
       first_line: self.line_starts.len() - 1,
+      wide,
     });
     self.text.push_str(text);
     self
@@ -92,9 +105,18 @@ impl Source {
       Err(i) => i - 1,
     };
     let start = self.line_starts[line];
-    let column = self.text[start..offset].chars().count() + 1;
-    let first = self.file(offset).first_line;
-    ((line - first) as u32 + 1, column as u32)
+    // A line is within one file.
+    let file = self.file(offset);
+    // Bytes beyond one per character before `offset` in the file.
+    let extra = |offset: usize| match file
+      .wide
+      .partition_point(|&(at, _)| at < offset - file.start)
+    {
+      0 => 0,
+      i => file.wide[i - 1].1,
+    };
+    let column = offset - start - (extra(offset) - extra(start)) + 1;
+    ((line - file.first_line) as u32 + 1, column as u32)
   }
 
   /// `line:column`, for messages that point at another position.
@@ -136,6 +158,15 @@ mod tests {
     // é is two bytes, one column.
     assert_eq!(s.line_col(5), (2, 2));
     assert_eq!(s.line_col(s.text.len()), (3, 1));
+    // Wider characters, on lines after others and in an added file.
+    let mut s = Source::new("t", "\u{e9}\u{1f9a6}a\u{4e2d}b\n\u{e9}x");
+    let lib = s.add("lib", "\u{4e2d}y");
+    for (offset, c) in s.text.char_indices() {
+      let line_start = s.text[..offset].rfind('\n').map_or(0, |i| i + 1);
+      let column = s.text[line_start..offset].chars().count() as u32 + 1;
+      assert_eq!(s.line_col(offset).1, column, "{c:?} at {offset}");
+    }
+    assert_eq!(s.line_col(lib.start + 3), (1, 2));
   }
 
   #[test]
