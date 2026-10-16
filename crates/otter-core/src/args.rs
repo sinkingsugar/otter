@@ -48,7 +48,7 @@ enum Inner {
   Decoded {
     decls: &'static [ParamDecl],
     values: Vec<Option<ParamValue>>,
-    /// The arguments of a variadic last parameter, in order.
+    /// The arguments of the variadic parameter, in order.
     rest: Vec<ParamValue>,
   },
 }
@@ -202,7 +202,9 @@ impl Args {
       .find_map(|(decl, value)| matches(value.as_ref()?).map(|case| (decl.name, case)));
     // A flow among variadic arguments (`All`, `Any`): the argument's index.
     declared.or_else(|| {
-      let decl = decls.last()?;
+      let decl = decls
+        .iter()
+        .find(|d| d.requirement == Requirement::Variadic)?;
       rest
         .iter()
         .enumerate()
@@ -304,9 +306,8 @@ pub fn decode(desc: &ShardDesc, args: &[Arg]) -> Result<Args> {
   let mut values: Vec<Option<ParamValue>> = vec![None; decls.len()];
   let mut rest: Vec<ParamValue> = Vec::new();
   let variadic = decls
-    .last()
-    .filter(|d| d.requirement == Requirement::Variadic)
-    .map(|_| decls.len() - 1);
+    .iter()
+    .position(|d| d.requirement == Requirement::Variadic);
   let mut seen_named = false;
   for (position, arg) in args.iter().enumerate() {
     let index = match &arg.name {

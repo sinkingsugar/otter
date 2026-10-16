@@ -5,9 +5,11 @@
 //! `String.DecodeURI`, `Slice`, `Bytes.Join`, `ToBase64`, `FromBase64`,
 //! `ToLEB128`, `FromLEB128`, `ToJson`, `FromJson`, the type tests
 //! (`IsInt`, `IsFloat`, `IsBool`, `IsString`, `IsBytes`, `IsSeq`,
-//! `IsTable`), `Fail` and `Sort`. All leaf shards; none runs at compose
-//! time (they are not on the audited list in `compose_time.rs`, and their
-//! work is not charged to its meter).
+//! `IsTable`), `Fail` and `Sort`, then `String.CodePoints`,
+//! `String.FromCodePoints`, `String.CleanUTF8`, `HexToBytes`,
+//! `BytesToInts` and `IntsToBytes`. All leaf shards. The first group does
+//! not run at compose time (not on the audited list in `compose_time.rs`,
+//! its work not charged to the meter); the second does, charged by size.
 //!
 //! Strings are measured in characters, as `Count` does: `Slice` on a
 //! string takes characters, never a part of one.
@@ -15,8 +17,9 @@
 use std::sync::Arc;
 
 use super::leaf::{LeafShard, leaf_type};
-use super::values::{Pure, PureOp, fail, mismatch, one_of, pure_desc};
+use super::values::{Pure, PureOp, fail, meter_bytes, mismatch, one_of, pure_desc};
 use super::*;
+use crate::compose_time::Meter;
 use crate::instance::{InstanceCtx, LeafCtx};
 use crate::shard::Flow;
 
@@ -48,6 +51,12 @@ pub static IS_SEQ: ShardType = leaf_type::<Pure<IsType<IsSeqK>>>();
 pub static IS_TABLE: ShardType = leaf_type::<Pure<IsType<IsTableK>>>();
 pub static FAIL: ShardType = leaf_type::<Fail>();
 pub static SORT: ShardType = leaf_type::<Sort>();
+pub static STRING_CODE_POINTS: ShardType = leaf_type::<Pure<CodePointsOp>>();
+pub static STRING_FROM_CODE_POINTS: ShardType = leaf_type::<Pure<FromCodePointsOp>>();
+pub static STRING_CLEAN_UTF8: ShardType = leaf_type::<Pure<CleanUtf8Op>>();
+pub static HEX_TO_BYTES: ShardType = leaf_type::<Pure<HexToBytesOp>>();
+pub static BYTES_TO_INTS: ShardType = leaf_type::<Pure<BytesToIntsOp>>();
+pub static INTS_TO_BYTES: ShardType = leaf_type::<Pure<IntsToBytesOp>>();
 
 const STRING: &[TypeName] = &[TypeName::String];
 const SEQ: &[TypeName] = &[TypeName::Seq];
@@ -1135,6 +1144,237 @@ impl LeafShard for Sort {
       Some(e) => Err(e),
       None => Ok(Flow::Next(Var::seq(items))),
     }
+  }
+}
+
+// --- String.CodePoints, String.FromCodePoints, String.CleanUTF8 ---
+//
+// From here on, the shards are on the compose-time list (`compose_time.rs`):
+// each charges its meter by the size it allocates.
+
+const INT_SEQ_INPUT: &[TypeName] = &[TypeName::Seq];
+
+/// Whether `input` is a sequence of Ints, the input `FromCodePoints` and
+/// `IntsToBytes` take (`[Any]` must be narrowed with `ExpectIntSeq`).
+fn int_seq(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
+  if Type::seq(Type::int()).accepts(input) {
+    Ok(input)
+  } else {
+    Err(INT_SEQ_INPUT)
+  }
+}
+
+/// A sequence of `len` elements is about to be allocated.
+fn allocate_seq(meter: &Meter, len: usize) -> Result<()> {
+  meter.allocate(len.saturating_mul(std::mem::size_of::<Var>()))
+}
+
+pub struct CodePointsOp;
+impl PureOp for CodePointsOp {
+  const DESC: ShardDesc = pure_desc(
+    "String.CodePoints",
+    crate::shard_doc!("Outputs a string's characters as their Unicode code points (Ints)."),
+    crate::shard_doc!("One Int per character, as `Count` counts them: `\"hé\"` is `[104 233]`."),
+    InputDesc::Types(STRING),
+    OutputDesc::Dynamic(crate::shard_doc!("a sequence of Ints")),
+  );
+  fn output(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
+    one_of(input, STRING, Type::seq(Type::int()))
+  }
+  fn meter(input: &Var, meter: &Meter) -> Result<()> {
+    let text = input.as_str().unwrap_or("");
+    meter_bytes(input, meter)?;
+    allocate_seq(meter, text.chars().count())
+  }
+  fn apply(input: &Var) -> Result<Var> {
+    let text = input.as_str().unwrap_or("");
+    Ok(Var::seq(
+      text
+        .chars()
+        .map(|c| Var::Int(i64::from(u32::from(c))))
+        .collect(),
+    ))
+  }
+}
+
+pub struct FromCodePointsOp;
+impl PureOp for FromCodePointsOp {
+  const DESC: ShardDesc = pure_desc(
+    "String.FromCodePoints",
+    crate::shard_doc!("Builds a string from Unicode code points (a sequence of Ints)."),
+    crate::shard_doc!(
+      "Each Int must be a Unicode scalar value: 0 to 0x10FFFF, surrogates (0xD800 to 0xDFFF) excluded. Any other is an activation error naming its index."
+    ),
+    InputDesc::Types(INT_SEQ_INPUT),
+    OutputDesc::Fixed(TypeName::String),
+  );
+  fn output(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
+    int_seq(input).map(|_| Type::string())
+  }
+  fn meter(input: &Var, meter: &Meter) -> Result<()> {
+    meter.allocate(4 * input.as_seq().map_or(0, <[Var]>::len))
+  }
+  fn apply(input: &Var) -> Result<Var> {
+    let items = input.as_seq().unwrap_or(&[]);
+    let mut out = String::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+      let c = match item {
+        Var::Int(n) => u32::try_from(*n).ok().and_then(char::from_u32),
+        _ => None,
+      };
+      match c {
+        Some(c) => out.push(c),
+        None => {
+          return Err(fail(
+            "String.FromCodePoints",
+            &format!("element {i} ({item}) is not a Unicode scalar value"),
+          ));
+        }
+      }
+    }
+    Ok(Var::from_string(Arc::from(out)))
+  }
+}
+
+const TEXT_OR_BYTES: &[TypeName] = &[TypeName::Bytes, TypeName::String];
+
+pub struct CleanUtf8Op;
+impl PureOp for CleanUtf8Op {
+  const DESC: ShardDesc = pure_desc(
+    "String.CleanUTF8",
+    crate::shard_doc!("Reads a byte string as UTF-8 text, replacing what is not UTF-8."),
+    crate::shard_doc!(
+      "Each invalid sequence becomes U+FFFD (`�`), so the output is always a string; `BytesToString` fails instead. A string is valid UTF-8 already and passes through."
+    ),
+    InputDesc::Types(TEXT_OR_BYTES),
+    OutputDesc::Fixed(TypeName::String),
+  );
+  fn output(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
+    one_of(input, TEXT_OR_BYTES, Type::string())
+  }
+  fn meter(input: &Var, meter: &Meter) -> Result<()> {
+    match input {
+      // At most three bytes for each invalid one.
+      Var::Bytes(b) => meter.allocate(b.len().saturating_mul(3)),
+      _ => Ok(()),
+    }
+  }
+  fn apply(input: &Var) -> Result<Var> {
+    match input {
+      Var::String(_) => Ok(input.clone()),
+      Var::Bytes(b) => Ok(Var::from_string(Arc::from(String::from_utf8_lossy(b)))),
+      _ => Err(fail("String.CleanUTF8", "input type mismatch")),
+    }
+  }
+}
+
+// --- HexToBytes, BytesToInts, IntsToBytes ---
+
+pub struct HexToBytesOp;
+impl PureOp for HexToBytesOp {
+  const DESC: ShardDesc = ShardDesc {
+    aliases: &["FromHex"],
+    ..pure_desc(
+      "HexToBytes",
+      crate::shard_doc!("Decodes hexadecimal text into a byte string."),
+      crate::shard_doc!(
+        "Two digits a byte, either case, with an optional `0x` prefix; an odd number of digits reads as if a `0` led them, so `ToHex`'s Ints read back (`\"0xabc\"` is `@bytes(0abc)`). Any other character is an activation error."
+      ),
+      InputDesc::Types(STRING),
+      OutputDesc::Fixed(TypeName::Bytes),
+    )
+  };
+  fn output(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
+    one_of(input, STRING, Type::bytes())
+  }
+  fn meter(input: &Var, meter: &Meter) -> Result<()> {
+    meter.allocate(input.as_str().map_or(0, str::len) / 2 + 1)
+  }
+  fn apply(input: &Var) -> Result<Var> {
+    let text = input.as_str().unwrap_or("");
+    let digits = text
+      .strip_prefix("0x")
+      .or_else(|| text.strip_prefix("0X"))
+      .unwrap_or(text)
+      .as_bytes();
+    let value = |i: usize| -> Result<u8> {
+      match (digits[i] as char).to_digit(16) {
+        Some(d) => Ok(d as u8),
+        None => Err(fail(
+          "HexToBytes",
+          &format!("{:?} at {i} is not a hex digit", digits[i] as char),
+        )),
+      }
+    };
+    let mut out = Vec::with_capacity(digits.len().div_ceil(2));
+    let mut i = 0;
+    if digits.len() % 2 == 1 {
+      out.push(value(0)?);
+      i = 1;
+    }
+    while i < digits.len() {
+      out.push(value(i)? << 4 | value(i + 1)?);
+      i += 2;
+    }
+    Ok(Var::from_bytes(Arc::from(out)))
+  }
+}
+
+pub struct BytesToIntsOp;
+impl PureOp for BytesToIntsOp {
+  const DESC: ShardDesc = pure_desc(
+    "BytesToInts",
+    crate::shard_doc!("Outputs a byte string's bytes as Ints (0 to 255)."),
+    "",
+    InputDesc::Types(&[TypeName::Bytes]),
+    OutputDesc::Dynamic(crate::shard_doc!("a sequence of Ints")),
+  );
+  fn output(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
+    one_of(input, &[TypeName::Bytes], Type::seq(Type::int()))
+  }
+  fn meter(input: &Var, meter: &Meter) -> Result<()> {
+    allocate_seq(meter, input.as_bytes().map_or(0, <[u8]>::len))
+  }
+  fn apply(input: &Var) -> Result<Var> {
+    let bytes = input.as_bytes().unwrap_or(&[]);
+    Ok(Var::seq(
+      bytes.iter().map(|b| Var::Int(i64::from(*b))).collect(),
+    ))
+  }
+}
+
+pub struct IntsToBytesOp;
+impl PureOp for IntsToBytesOp {
+  const DESC: ShardDesc = pure_desc(
+    "IntsToBytes",
+    crate::shard_doc!("Builds a byte string from Ints, one byte each."),
+    crate::shard_doc!(
+      "Every Int must be 0 to 255; any other is an activation error naming its index."
+    ),
+    InputDesc::Types(INT_SEQ_INPUT),
+    OutputDesc::Fixed(TypeName::Bytes),
+  );
+  fn output(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
+    int_seq(input).map(|_| Type::bytes())
+  }
+  fn meter(input: &Var, meter: &Meter) -> Result<()> {
+    meter.allocate(input.as_seq().map_or(0, <[Var]>::len))
+  }
+  fn apply(input: &Var) -> Result<Var> {
+    let items = input.as_seq().unwrap_or(&[]);
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+      match item {
+        Var::Int(n) if (0..=255).contains(n) => out.push(*n as u8),
+        _ => {
+          return Err(fail(
+            "IntsToBytes",
+            &format!("element {i} ({item}) is not a byte (0 to 255)"),
+          ));
+        }
+      }
+    }
+    Ok(Var::from_bytes(Arc::from(out)))
   }
 }
 

@@ -939,7 +939,7 @@ fn diagnostic_type_refs_cover_tables_and_sets() {
 }
 
 /// A variadic parameter collects the remaining positional arguments and
-/// cannot be named; only the last parameter may be variadic.
+/// cannot be named; the parameters after it are named, never required.
 #[test]
 fn variadic_parameters_take_the_remaining_positional_arguments() {
   use otter_core::describe::{Forms, ParamDecl, Requirement, check_params};
@@ -971,25 +971,47 @@ fn variadic_parameters_take_the_remaining_positional_arguments() {
   .unwrap();
   assert_eq!(err.diagnostic().unwrap().code, "variadic-by-name");
 
-  static NOT_LAST: &[ParamDecl] = &[
+  const fn param(name: &'static str, requirement: Requirement) -> ParamDecl {
     ParamDecl {
-      name: "A",
+      name,
       help: "",
       forms: Forms::LITERAL,
       types: &[],
-      requirement: Requirement::Variadic,
+      requirement,
       ty: None,
-    },
-    ParamDecl {
-      name: "B",
-      help: "",
-      forms: Forms::LITERAL,
-      types: &[],
-      requirement: Requirement::Optional,
-      ty: None,
-    },
+    }
+  }
+  // A required parameter after the variadic one could never be given
+  // positionally, nor a second variadic one.
+  static REQUIRED_AFTER: &[ParamDecl] = &[
+    param("a", Requirement::Variadic),
+    param("b", Requirement::Required),
   ];
-  assert_eq!(check_params(NOT_LAST), Err(0));
+  assert_eq!(check_params(REQUIRED_AFTER), Err(0));
+  static TWO: &[ParamDecl] = &[
+    param("a", Requirement::Variadic),
+    param("b", Requirement::Variadic),
+  ];
+  assert_eq!(check_params(TWO), Err(0));
+  // An optional one is given by name (`Cond`'s `passthrough:`).
+  static OPTIONAL_AFTER: &[ParamDecl] = &[
+    param("a", Requirement::Variadic),
+    param("b", Requirement::Optional),
+  ];
+  assert_eq!(check_params(OPTIONAL_AFTER), Ok(()));
+  use otter_core::shards::COND;
+  let flow = || Arg::pos(ParamValue::Flow(Vec::new()));
+  let decoded = decode(
+    &COND.desc,
+    &[
+      flow(),
+      flow(),
+      Arg::named("passthrough", ParamValue::Value(Var::Bool(false))),
+    ],
+  )
+  .unwrap();
+  assert_eq!(decoded.variadic("branches").len(), 2);
+  assert_eq!(decoded.bool("passthrough"), Some(false));
 }
 
 /// A parameter can declare a full type (`[Int]`, a table with keys): the

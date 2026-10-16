@@ -4801,3 +4801,220 @@ fn a_tool_reports_the_effects_of_its_calls() {
   assert!(waits.suspends && waits.time, "{waits:?}");
   assert!(load("\"x\" | Log").effects().io);
 }
+
+// --- the rest of the core catalog (docs/host-requirements.md §3) ---
+
+#[test]
+fn code_points_hex_and_byte_ints() {
+  let v = root_value(
+    r#"
+"hé" | String.CodePoints = cps
+cps | String.FromCodePoints = back
+"c328" | HexToBytes | String.CleanUTF8 = cleaned
+"ok" | String.CleanUTF8 = text
+"0xABC" | FromHex | BytesToInts = ints
+[1 2 255] | IntsToBytes | ToHex = hex
+[cps back cleaned text ints hex]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[[104 233] "hé" "�(" "ok" [10 188] "0102ff"]"#
+  );
+  for (script, expected) in [
+    ("[55296] | String.FromCodePoints", "element 0 (55296)"),
+    ("[1 256] | IntsToBytes", "element 1 (256)"),
+    (r#""0x1g" | HexToBytes"#, "'g' at 1"),
+  ] {
+    let message = root_failure(script);
+    assert!(message.contains(expected), "{script}: {message}");
+  }
+  // `[Any]` is narrowed first.
+  let d = load_or_compose_errors(r#""[1]" | FromJson | ExpectSeq | IntsToBytes"#);
+  assert_eq!(d[0].code, "input-type-mismatch");
+}
+
+#[test]
+fn sequence_variables_change_in_place() {
+  let v = root_value(
+    r#"
+[1 2] | Var(xs)
+3 | AppendTo(xs)
+0 | PrependTo(xs)
+[4 5] | Extend(xs) = extended
+PopFront(xs) = first
+DropFront(xs)
+"b" | Var(s)
+"c" | AppendTo(s)
+"a" | PrependTo(s)
+"01" | HexToBytes | Var(b)
+"02" | HexToBytes | AppendTo(b)
+Remove(xs {IsMore(3)}) = kept
+[] | ExpectIntSeq | Var(empty)
+DropFront(empty)
+{a: 1} | ToAnyTable | Var(t)
+[xs extended first s (b | ToHex) kept empty] = before
+Clear(xs)
+Clear(t)
+[before xs t]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[[[2 3] [4 5] 0 "abc" "0102" [2 3] []] [] {}]"#
+  );
+  assert_eq!(
+    root_failure("[] | ExpectIntSeq | Var(xs)\nPopFront(xs)"),
+    "activation error: PopFront: the sequence is empty"
+  );
+  // A failing predicate leaves the variable as it was.
+  let v = root_value(
+    "[1 2 3] | Var(xs)\nMaybe({Remove(xs {Assert.IsNot(2) | IsMore(1)})} silent: true)\nxs",
+  );
+  assert_eq!(v.to_string(), "[1 2 3]");
+  for (script, code) in [
+    ("[1] = xs\n2 | AppendTo(xs)", "immutable-binding"),
+    (
+      "[1] | Var(xs)\n\"a\" | AppendTo(xs)",
+      "variable-type-mismatch",
+    ),
+    ("1 | Var(n)\n2 | AppendTo(n)", "variable-type-mismatch"),
+    (
+      "[1] | Var(xs)\n[\"a\"] | Extend(xs)",
+      "variable-type-mismatch",
+    ),
+    ("{a: 1} | Var(t)\nClear(t)", "variable-type-mismatch"),
+    ("\"a\" | Var(s)\nPopFront(s)", "variable-type-mismatch"),
+    ("[1] | Var(xs)\nRemove(xs {Add(1)})", "predicate-not-bool"),
+    ("PopFront(nope)", "unknown-variable"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+  }
+}
+
+#[test]
+fn reverse_and_index_of() {
+  let v = root_value(
+    r#"
+[1 2 3] | Reverse = r
+"héllo" | Reverse = s
+"0102" | HexToBytes | Reverse | ToHex = b
+[0 1 1 0 1 1] | IndexOf([1 1]) = run
+[0 1 1 0 1 1] | IndexOf([1 1] all: true) = runs
+[[1] [2]] | IndexOf([2]) = element
+[1 2.5] | IndexOf(2.5) = mixed
+[1 2] | IndexOf(5) = missing
+[r s b run runs element mixed missing]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"[[3 2 1] "olléh" "0201" 1 [1 4] 1 1 -1]"#);
+  for script in [r#"[1 2] | IndexOf("a")"#, "[1 2] | IndexOf([])"] {
+    assert!(!check(script).ok(), "{script}");
+  }
+}
+
+#[test]
+fn checks_assertions_and_type_changes() {
+  let v = root_value(
+    r#"
+[(true | IsTrue) (true | IsFalse) (false | IsFalse)] = bools
+5 | Pass | Assert.Is(5.0) | Assert.IsNot(4) = passed
+none | ToAny | Var(anything)
+"text" | Update(anything)
+{a: 1} | ToAnyTable | Var(t)
+{b: "x"} | Update(t)
+"[[1.5], [\"a\"]]" | FromJson | ExpectSeq = rows
+rows | Take(0) | ExpectFloatSeq = floats
+rows | Take(1) | ExpectStringSeq = strings
+[bools passed (anything | ExpectString) t floats strings]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[[true false true] 5 "text" {b: "x"} [1.5] ["a"]]"#
+  );
+  assert_eq!(
+    root_failure("[1 2] | Assert.Is([1 3])"),
+    "activation error: Assert.Is: expected [1 3], got [1 2]"
+  );
+  assert!(root_failure("1 | Assert.IsNot(1.0)").contains("anything but 1.0"));
+  assert!(
+    root_failure(r#""[1, \"a\"]" | FromJson | ExpectIntSeq"#).contains("element 1 is String")
+  );
+  for (script, code) in [
+    (r#"1 | Assert.Is("a")"#, "input-type-mismatch"),
+    ("1 | ExpectIntSeq", "input-type-mismatch"),
+    ("1 | IsTrue", "input-type-mismatch"),
+    ("1 | ToAnyTable", "input-type-mismatch"),
+    // Any must be narrowed before typed use.
+    ("1 | ToAny | Add(1)", "input-type-mismatch"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+  }
+}
+
+#[test]
+fn cond_runs_the_first_true_branch_and_when_not_the_false_one() {
+  let v = root_value(
+    r#"
+0 | Var(checked)
+5 | Cond({Inc(checked) | false} {"a"} {Inc(checked) | true} {"b"} {Inc(checked) | true} {"c"} passthrough: false) = picked
+-1 | Cond({IsMore(0)} {"positive"} passthrough: false) = unmatched
+5 | Cond({true} {"ignored"}) | Add(1) = passed
+[] | ExpectIntSeq | Var(seen)
+3 | WhenNot({IsMore(4)} {AppendTo(seen)})
+7 | WhenNot({IsMore(4)} {AppendTo(seen)})
+#( 2 | Cond({IsLess(0)} {"neg"} {IsMore(0)} {"pos"} passthrough: false) ) = folded
+[picked checked unmatched passed seen folded]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"["b" 2 -1 6 [3] "pos"]"#);
+  // Without passthrough the output is the actions' and the input's union.
+  let d = load_or_compose_errors(r#"1 | Cond({true} {"a"} passthrough: false) | String.Trim"#);
+  assert_eq!(d[0].code, "input-type-mismatch");
+  for (script, code) in [
+    ("1 | Cond({true})", "cond-pairs"),
+    ("1 | Cond({1} {2})", "predicate-not-bool"),
+    ("1 | WhenNot({1} {Pass})", "predicate-not-bool"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+  }
+  // A problem inside a branch is located there.
+  let d = load_or_compose_errors("1 | Cond({true} {\"a\"} {IsMore(\"x\")} {\"b\"})");
+  assert_eq!((d[0].line, d[0].column), (Some(1), Some(24)));
+}
+
+#[test]
+fn msg_writes_at_a_level_and_epoch_counts_from_1970() {
+  let (report, lines) = otter_core::log::capture(|| {
+    run(
+      r#"
+"in" | Msg("plain") | Msg("careful" level: "warning") | Msg("hidden" level: "debug")
+"x" = text
+Msg(text level: "error")
+[Time.Epoch Time.EpochMs]
+"#,
+      &no_defines(),
+    )
+  });
+  assert_eq!(lines, ["plain", "[warning] careful", "[error] x"]);
+  let v = completed(&report, "root");
+  let (Some(Var::Int(s)), Some(Var::Int(ms))) = (
+    v.as_seq().and_then(|s| s.first()).cloned(),
+    v.as_seq().and_then(|s| s.get(1)).cloned(),
+  ) else {
+    panic!("{v}")
+  };
+  // After 2026-01-01 (a device without a time source counts from 1970),
+  // and the same instant within a second.
+  assert!(
+    s > 1_767_225_600 || (cfg!(target_os = "espidf") && s >= 0),
+    "{s}"
+  );
+  assert!((ms / 1000 - s).abs() <= 1, "{s} {ms}");
+  let d = load_or_compose_errors(r#"Msg("x" level: "loud")"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
+}

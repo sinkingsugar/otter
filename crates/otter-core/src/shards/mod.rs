@@ -10,11 +10,13 @@
 //! [`defs`] has helpers that build [`ShardDef`]s, standing in for the parser.
 
 pub mod async_shard;
+pub mod checks;
 pub mod control;
 pub mod data;
 pub mod date;
 pub mod leaf;
 pub mod math;
+pub mod seqs;
 pub mod sim;
 pub mod text;
 pub mod values;
@@ -52,6 +54,9 @@ pub static IS_LESS: ShardType = leaf_type::<leaf::IsLess>();
 pub static IS_MORE_EQUAL: ShardType = leaf_type::<leaf::IsMoreEqual>();
 pub static WHEN: ShardType = ShardType::new(WHEN_DESC).implemented_by::<sl::When>();
 pub static IF: ShardType = ShardType::new(control::IF_DESC).implemented_by::<sl::If>();
+pub static WHEN_NOT: ShardType =
+  ShardType::new(control::WHEN_NOT_DESC).implemented_by::<control::WhenNot>();
+pub static COND: ShardType = ShardType::new(control::COND_DESC).implemented_by::<control::Cond>();
 pub static MATCH: ShardType = ShardType::new(control::MATCH_DESC).implemented_by::<sl::Match>();
 pub static MAYBE: ShardType = ShardType::new(control::MAYBE_DESC).controlled_by::<control::Maybe>();
 pub static ALL: ShardType = ShardType::new(control::ALL_DESC).implemented_by::<sl::All>();
@@ -82,7 +87,9 @@ pub static CATALOG: &[&ShardType] = &[
   &IS_LESS,
   &IS_MORE_EQUAL,
   &WHEN,
+  &WHEN_NOT,
   &IF,
+  &COND,
   &MATCH,
   &MAYBE,
   &ALL,
@@ -120,6 +127,9 @@ pub static CATALOG: &[&ShardType] = &[
   &values::IS_NONE,
   &values::IS_NOT_NONE,
   &values::TIME_NOW,
+  &values::TIME_EPOCH,
+  &values::TIME_EPOCH_MS,
+  &values::MSG,
   &values::TO_STRING,
   &values::TO_INT,
   &values::TO_FLOAT,
@@ -167,6 +177,37 @@ pub static CATALOG: &[&ShardType] = &[
   &text::IS_TABLE,
   &text::FAIL,
   &text::SORT,
+  &text::STRING_CODE_POINTS,
+  &text::STRING_FROM_CODE_POINTS,
+  &text::STRING_CLEAN_UTF8,
+  &text::HEX_TO_BYTES,
+  &text::BYTES_TO_INTS,
+  &text::INTS_TO_BYTES,
+  &checks::IS_TRUE,
+  &checks::IS_FALSE,
+  &checks::PASS,
+  &checks::TO_ANY,
+  &checks::TO_ANY_TABLE,
+  &checks::EXPECT_INT_SEQ,
+  &checks::EXPECT_FLOAT_SEQ,
+  &checks::EXPECT_BOOL_SEQ,
+  &checks::EXPECT_STRING_SEQ,
+  &checks::EXPECT_BYTES_SEQ,
+  &checks::EXPECT_TABLE_SEQ,
+  &checks::EXPECT_FLOAT2_SEQ,
+  &checks::EXPECT_FLOAT3_SEQ,
+  &checks::EXPECT_FLOAT4_SEQ,
+  &checks::ASSERT_IS,
+  &checks::ASSERT_IS_NOT,
+  &seqs::APPEND_TO,
+  &seqs::PREPEND_TO,
+  &seqs::EXTEND,
+  &seqs::CLEAR,
+  &seqs::POP_FRONT,
+  &seqs::DROP_FRONT,
+  &seqs::REVERSE,
+  &seqs::INDEX_OF,
+  &seqs::REMOVE,
   &date::DATE_PARSE,
   &date::DATE_FORMAT,
   &REPEAT,
@@ -918,6 +959,8 @@ pub struct Predicated {
   /// Lowered into the parent flow's code at compose (`ComposeCtx::flatten`).
   pub(crate) pred: Arc<CompiledFlow>,
   pub(crate) body: Arc<CompiledFlow>,
+  /// The body runs when the predicate is false (`WhenNot`).
+  pub(crate) negate: bool,
 }
 
 /// Composes a predicate flow (which must output Bool) and a body flow that
@@ -952,6 +995,7 @@ fn compose_predicate_and_body(
     compiled: Predicated {
       pred: Arc::new(pred),
       body: Arc::new(body),
+      negate: false,
     },
     output: input,
   })

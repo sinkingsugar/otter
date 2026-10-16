@@ -468,10 +468,12 @@ impl<'a> Walk<'a> {
 /// at the listed version, so a new version is excluded until it is audited
 /// again; host shards are never eligible. Shards with effects or persistent
 /// state are absent (`Keep`, `Once`, `Log`, `Maybe`, which logs what it
-/// catches, `Time.Now`, `Pause`, `Spawn`), as are `Stop` and `Return`,
-/// which have no value to give.
+/// catches, `Msg`, `Time.Now`, `Time.Epoch`, `Pause`, `Spawn`), as are
+/// `Stop` and `Return`, which have no value to give. Not audited yet: the
+/// text-tool shards in `text.rs` before `String.CodePoints`, and `Remove`
+/// (a composite through the public interface).
 static SAFE: &[(&ShardType, u32)] = {
-  use crate::shards::{data, math, values, *};
+  use crate::shards::{checks, data, math, seqs, text, values, *};
   &[
     // Constant work.
     (&CONST, 1),
@@ -504,10 +506,18 @@ static SAFE: &[(&ShardType, u32)] = {
     (&values::TO_FLOAT3, 1),
     (&values::TO_FLOAT4, 1),
     (&data::TAKE, 1),
+    (&checks::IS_TRUE, 1),
+    (&checks::IS_FALSE, 1),
+    (&checks::PASS, 1),
+    (&checks::TO_ANY, 1),
+    (&checks::TO_ANY_TABLE, 1),
+    (&seqs::CLEAR, 1),
     // Composites: the engine and the VM charge their dispatches; `Match`
     // charges each case it compares by size.
     (&WHEN, 1),
+    (&WHEN_NOT, 1),
     (&IF, 1),
+    (&COND, 1),
     (&MATCH, 1),
     (&ALL, 1),
     (&ANY, 1),
@@ -544,6 +554,30 @@ static SAFE: &[(&ShardType, u32)] = {
     (&values::EXPECT_FLOAT2, 1),
     (&values::EXPECT_FLOAT3, 1),
     (&values::EXPECT_FLOAT4, 1),
+    (&checks::EXPECT_INT_SEQ, 1),
+    (&checks::EXPECT_FLOAT_SEQ, 1),
+    (&checks::EXPECT_BOOL_SEQ, 1),
+    (&checks::EXPECT_STRING_SEQ, 1),
+    (&checks::EXPECT_BYTES_SEQ, 1),
+    (&checks::EXPECT_TABLE_SEQ, 1),
+    (&checks::EXPECT_FLOAT2_SEQ, 1),
+    (&checks::EXPECT_FLOAT3_SEQ, 1),
+    (&checks::EXPECT_FLOAT4_SEQ, 1),
+    (&checks::ASSERT_IS, 1),
+    (&checks::ASSERT_IS_NOT, 1),
+    (&text::STRING_CODE_POINTS, 1),
+    (&text::STRING_FROM_CODE_POINTS, 1),
+    (&text::STRING_CLEAN_UTF8, 1),
+    (&text::HEX_TO_BYTES, 1),
+    (&text::BYTES_TO_INTS, 1),
+    (&text::INTS_TO_BYTES, 1),
+    (&seqs::APPEND_TO, 1),
+    (&seqs::PREPEND_TO, 1),
+    (&seqs::EXTEND, 1),
+    (&seqs::POP_FRONT, 1),
+    (&seqs::DROP_FRONT, 1),
+    (&seqs::REVERSE, 1),
+    (&seqs::INDEX_OF, 1),
   ]
 };
 

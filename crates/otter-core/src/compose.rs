@@ -270,6 +270,46 @@ fn call_site(c: &CallCompiled) -> CallSite {
   }
 }
 
+/// Lowers branch `k` of a chain of branches (`If`, `Cond`:
+/// [`crate::shards::control::IfCompiled`]) and those after it: the
+/// predicate, a jump past the branch when it is false, the branch, and a
+/// jump to the end, retargeted once the rest is lowered; after the last
+/// branch, `else` or the input. Recursive, so a chain needs no list of
+/// jumps (the depth is the number of branches). One branch is `If`'s code.
+fn flat_branches(
+  flat: &mut Flat,
+  chain: &crate::shards::control::IfCompiled,
+  k: usize,
+  saved: Binding,
+  input: Type,
+) {
+  use crate::inline::Op;
+  if k == chain.branches {
+    flat.op(Op::get(saved), input);
+    if let Some(otherwise) = chain.otherwise() {
+      flat.append(otherwise);
+      if chain.passthrough {
+        flat.op(Op::get(saved), input);
+      }
+    }
+    return;
+  }
+  if k > 0 {
+    flat.op(Op::get(saved), input);
+  }
+  flat.append(&chain.flows[2 * k]);
+  let skip = flat.op(Op::JumpIfNot(0), Type::any());
+  flat.op(Op::get(saved), input);
+  flat.append(&chain.flows[2 * k + 1]);
+  if chain.passthrough {
+    flat.op(Op::get(saved), input);
+  }
+  let to_end = flat.op(Op::Jump(0), Type::any());
+  flat.target(skip);
+  flat_branches(flat, chain, k + 1, saved, input);
+  flat.target(to_end);
+}
+
 /// A flow's code under construction: nodes, instructions and the node each
 /// instruction stands for (`CompiledFlow::pc_nodes`).
 struct Flat {
@@ -1010,7 +1050,12 @@ impl ComposeCtx<'_> {
         flat.op(Op::Set(saved), input);
         let top = flat.here();
         flat.append(&p.pred);
-        let exit = flat.op(Op::JumpIfNot(0), Type::any());
+        // `WhenNot` leaves on true.
+        let exit = if p.negate {
+          flat.op(Op::JumpIf(0), Type::any())
+        } else {
+          flat.op(Op::JumpIfNot(0), Type::any())
+        };
         flat.op(Op::get(saved), input);
         flat.append(&p.body);
         if looping {
@@ -1164,23 +1209,7 @@ impl ComposeCtx<'_> {
       Control::If(i) => {
         let saved = Binding::Local(self.declare_hidden(input));
         flat.op(Op::Set(saved), input);
-        flat.append(&i.flows[0]);
-        let to_else = flat.op(Op::JumpIfNot(0), Type::any());
-        flat.op(Op::get(saved), input);
-        flat.append(&i.flows[1]);
-        if i.passthrough {
-          flat.op(Op::get(saved), input);
-        }
-        let to_end = flat.op(Op::Jump(0), Type::any());
-        flat.target(to_else);
-        flat.op(Op::get(saved), input);
-        if let Some(els) = i.flows.get(2) {
-          flat.append(els);
-          if i.passthrough {
-            flat.op(Op::get(saved), input);
-          }
-        }
-        flat.target(to_end);
+        flat_branches(flat, i, 0, saved, input);
         flat.release(saved, input);
       }
       _ => return false,
