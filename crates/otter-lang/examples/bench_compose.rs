@@ -100,6 +100,45 @@ fn functions(count: usize) -> String {
   src + " | Log\n"
 }
 
+/// `flows` flow arguments to `All`, in one call; flat, in calls of 16.
+fn flow_args(flows: usize, flat: bool) -> String {
+  let per_call = if flat { 16 } else { flows };
+  let mut src = String::new();
+  for _ in 0..flows / per_call {
+    src += &format!("1 | All({})\n", "{IsMore(0)} ".repeat(per_call));
+  }
+  src + "1 | Log\n"
+}
+
+/// `Match` with `cases` cases, in one call; flat, in calls of 16.
+fn match_cases(cases: usize, flat: bool) -> String {
+  let per_call = if flat { 16 } else { cases };
+  let mut src = String::new();
+  for _ in 0..cases / per_call {
+    let arms: String = (0..per_call)
+      .map(|c| format!("{c} {{\"c{c}\"}} "))
+      .collect();
+    src += &format!("3 | Match([{arms}] default: {{\"other\"}})\n");
+  }
+  src + "1 | Log\n"
+}
+
+/// `statements` statements each running a nested flow, binding a name each;
+/// flat, binding none, so a block's end costs the same with every name
+/// visible as with none.
+fn bound_flows(statements: usize, flat: bool) -> String {
+  let mut src = String::new();
+  for i in 0..statements {
+    src += "1 | All({IsMore(0)})";
+    src += &if flat {
+      "\n".to_string()
+    } else {
+      format!(" = a{i}\n")
+    };
+  }
+  src + "1 | Log\n"
+}
+
 struct Measured {
   name: &'static str,
   ns: f64,
@@ -171,6 +210,12 @@ fn main() {
       "map-table-reload-flat",
       reload(map_tables_looped(14, 200, true)),
     ),
+    measure("flow-args", compose(flow_args(16384, false))),
+    measure("flow-args-flat", compose(flow_args(16384, true))),
+    measure("match-cases", compose(match_cases(16384, false))),
+    measure("match-cases-flat", compose(match_cases(16384, true))),
+    measure("bound-flows", compose(bound_flows(8192, false))),
+    measure("bound-flows-flat", compose(bound_flows(8192, true))),
     measure("literals", compose(literals(1000))),
     measure("functions", compose(functions(200))),
   ];

@@ -1,7 +1,13 @@
 # workload allocs bytes (bench_compose --write)
-shared-table-reads 117532 11060643
-shared-table-reads-flat 114217 10243733
-map-table-reload 46618 7005450
-map-table-reload-flat 40492 3261054
-literals 218242 21955436
-functions 50472 4824185
+shared-table-reads 119538 11412669
+shared-table-reads-flat 115223 10451689
+map-table-reload 47424 7223101
+map-table-reload-flat 40698 3283473
+flow-args 1065262 114483573
+flow-args-flat 1138882 116354831
+match-cases 966987 98541785
+match-cases-flat 1123522 107360015
+bound-flows 1245470 130560929
+bound-flows-flat 983252 112981775
+literals 219248 22202553
+functions 50478 4924233

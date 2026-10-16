@@ -74,14 +74,19 @@ impl FrameLayout {
   }
 
   pub(crate) fn declare(&mut self, name: &str, ty: Type, mutable: bool) -> Slot {
+    self.declare_over(name, ty, mutable).0
+  }
+
+  /// Declares a slot, with the slot its name reached before.
+  fn declare_over(&mut self, name: &str, ty: Type, mutable: bool) -> (Slot, Option<usize>) {
     let slot = Slot {
       index: self.slots.len(),
       ty,
       mutable,
     };
-    self.index.insert(name.to_string(), slot.index);
+    let before = self.index.insert(name.to_string(), slot.index);
     self.slots.push((name.to_string(), slot));
-    slot
+    (slot, before)
   }
 
   /// The type a slot was declared with.
@@ -101,21 +106,21 @@ impl FrameLayout {
     slot
   }
 
-  /// The names visible now, for restoring at the end of a block.
-  pub(crate) fn visible(&self) -> HashMap<String, usize> {
-    self.index.clone()
-  }
-
-  /// Ends a block: names declared inside it stop being visible (their slots
-  /// stay in the frame). Frontend temporaries (`%` names) stay visible,
-  /// since lowering reads a hoisted value after the SubFlow computing it.
-  pub(crate) fn restore_visible(&mut self, mut saved: HashMap<String, usize>) {
-    for (name, index) in &self.index {
-      if name.starts_with('%') {
-        saved.insert(name.clone(), *index);
+  /// Undoes a declaration made in a block that ends ([`Scopes::close`]):
+  /// its name reaches the slot it did before, or none. Frontend temporaries
+  /// (`%` names) stay visible, since lowering reads a hoisted value after
+  /// the SubFlow computing it.
+  fn undeclare(&mut self, slot: usize, before: Option<usize>) {
+    let name = &self.slots[slot].0;
+    if name.starts_with('%') {
+      return;
+    }
+    match before {
+      Some(before) => *self.index.get_mut(name).expect("declared in the block") = before,
+      None => {
+        self.index.remove(name);
       }
     }
-    self.index = saved;
   }
 
   /// Visible variable names, sorted (for suggestions).
@@ -741,6 +746,97 @@ pub(crate) enum Child {
   Wire(String),
 }
 
+/// The declarations made in open blocks (`ComposeCtx::blocks`), undone
+/// when each ends: a block's end costs what it declared, not every visible
+/// name. Kept by compose, not in the [`FrameLayout`] that compiled code
+/// keeps.
+#[derive(Default)]
+pub(crate) struct Scopes {
+  /// Each declaration's slot, with the slot its name reached before.
+  declared: Vec<(usize, Option<usize>)>,
+}
+
+impl Scopes {
+  fn declare(
+    &mut self,
+    layout: &mut FrameLayout,
+    in_block: bool,
+    name: &str,
+    ty: Type,
+    mutable: bool,
+  ) -> Slot {
+    let (slot, before) = layout.declare_over(name, ty, mutable);
+    if in_block {
+      self.declared.push((slot.index, before));
+    }
+    slot
+  }
+
+  /// Where a block starts; [`Scopes::close`] ends it there.
+  fn mark(&self) -> usize {
+    self.declared.len()
+  }
+
+  /// Ends a block: names declared inside it stop being visible (their slots
+  /// stay in the frame), and the names they shadowed reach their slots
+  /// again.
+  fn close(&mut self, layout: &mut FrameLayout, mark: usize) {
+    // Latest first: a name declared twice in the block ends where it was
+    // before the first.
+    for (slot, before) in self.declared.drain(mark..).rev() {
+      layout.undeclare(slot, before);
+    }
+  }
+}
+
+/// Definite initialization of each local slot, with what the open regions
+/// that might not run changed, so ending one costs what it assigned and
+/// declared, not every slot.
+#[derive(Default)]
+pub(crate) struct Initialized {
+  slots: Vec<bool>,
+  /// Slots that existed uninitialized and were assigned, latest last
+  /// (outside every region, only temporaries assigned after a branch).
+  assigned: Vec<usize>,
+}
+
+/// Where a region began: how many slots existed and had been assigned.
+pub(crate) struct Region {
+  slots: usize,
+  assigned: usize,
+}
+
+impl Initialized {
+  /// A new slot: its declaring shard assigns it.
+  fn declare(&mut self) {
+    self.slots.push(true);
+  }
+
+  fn assign(&mut self, slot: usize) {
+    if !self.slots[slot] {
+      self.slots[slot] = true;
+      self.assigned.push(slot);
+    }
+  }
+
+  /// Starts a region that might not run.
+  fn open(&self) -> Region {
+    Region {
+      slots: self.slots.len(),
+      assigned: self.assigned.len(),
+    }
+  }
+
+  /// Ends a region: nothing it declared or assigned is definitely
+  /// initialized after it.
+  fn close(&mut self, region: Region) {
+    for slot in self.assigned.drain(region.assigned..) {
+      self.slots[slot] = false;
+    }
+    self.slots[region.slots..].fill(false);
+  }
+}
+
 /// The context a shard's `compose` receives.
 pub struct ComposeCtx<'a> {
   analysis: Analysis,
@@ -756,8 +852,12 @@ pub struct ComposeCtx<'a> {
   diagnostic_path: Vec<PathStep>,
   local_paths: Vec<Vec<PathStep>>,
   current_args: Option<Arc<Args>>,
+  /// Declarations in the open blocks, to undo when each ends.
+  scopes: Scopes,
+  /// `current_args`' flow index, once built (`None`: not built yet).
+  flow_index: Option<Option<crate::args::FlowIndex>>,
   /// Definite initialization of each local slot at the current compose point.
-  initialized: Vec<bool>,
+  initialized: Initialized,
   /// The child flow or wire the last error came out of.
   failed_child: Option<Child>,
   /// How many flows enclose the one being composed, counting wires
@@ -810,7 +910,7 @@ impl ComposeCtx<'_> {
         binding: Binding::Local(slot.index),
         ty: slot.ty,
         mutable: slot.mutable,
-        initialized: self.initialized[slot.index],
+        initialized: self.initialized.slots[slot.index],
       });
     }
     match &self.owner {
@@ -1012,8 +1112,11 @@ impl ComposeCtx<'_> {
   /// Declares a new local variable in the wire's frame. The declaring shard
   /// assigns it, so it is initialized from this point on.
   pub fn declare_local(&mut self, name: &str, ty: Type, mutable: bool) -> VarInfo {
-    let slot = self.locals.declare(name, ty, mutable);
-    self.initialized.push(true);
+    let in_block = self.blocks > 0;
+    let slot = self
+      .scopes
+      .declare(&mut self.locals, in_block, name, ty, mutable);
+    self.initialized.declare();
     self.local_paths.push(self.diagnostic_path.clone());
     VarInfo {
       binding: Binding::Local(slot.index),
@@ -1027,7 +1130,7 @@ impl ComposeCtx<'_> {
   /// saved input, a loop counter). Cleared like any ordinary local.
   fn declare_hidden(&mut self, ty: Type) -> usize {
     let slot = self.locals.declare_hidden(ty);
-    self.initialized.push(true);
+    self.initialized.declare();
     self.local_paths.push(self.diagnostic_path.clone());
     slot.index
   }
@@ -1244,7 +1347,7 @@ impl ComposeCtx<'_> {
       self.analysis.access(name, slot.ty, true);
     }
     if let Binding::Local(i) = binding {
-      self.initialized[i] = true;
+      self.initialized.assign(i);
     }
     Ok(())
   }
@@ -1273,11 +1376,9 @@ impl ComposeCtx<'_> {
     flow: &[ShardDef],
     input: Type,
   ) -> Result<CompiledFlow> {
-    let before = self.initialized.clone();
+    let region = self.initialized.open();
     let result = self.compose_flow(flow, input);
-    for (i, init) in self.initialized.iter_mut().enumerate() {
-      *init = before.get(i).copied().unwrap_or(false);
-    }
+    self.initialized.close(region);
     result
   }
 
@@ -1285,20 +1386,21 @@ impl ComposeCtx<'_> {
   /// assignments are seen by what follows (Repeat's Until, then its
   /// Action); after it, nothing it assigned is definitely assigned.
   pub fn conditional_region<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
-    let before = self.initialized.clone();
+    let region = self.initialized.open();
     let result = f(self);
-    for (i, init) in self.initialized.iter_mut().enumerate() {
-      *init = before.get(i).copied().unwrap_or(false);
-    }
+    self.initialized.close(region);
     result
   }
 
   /// The parameter holding a nested flow or wire (and the item, for a case
   /// or a variadic argument): the decoded arguments of the shard being
   /// composed, or the call whose block this is.
-  fn held(&self, child: &Child) -> Option<(std::borrow::Cow<'static, str>, Option<usize>)> {
-    if let Some((param, item)) = self.current_args.as_ref().and_then(|a| a.param_of(child)) {
-      return Some((param.into(), item));
+  fn held(&mut self, child: &Child) -> Option<(std::borrow::Cow<'static, str>, Option<usize>)> {
+    if let Some(args) = &self.current_args {
+      let index = self.flow_index.get_or_insert_with(|| args.flow_index());
+      if let Some((param, item)) = args.param_in(child, index.as_ref()) {
+        return Some((param.into(), item));
+      }
     }
     match (child, &self.block_param) {
       (Child::Flow(ptr), Some((block, name))) if std::ptr::eq(*ptr, *block) => {
@@ -1308,7 +1410,7 @@ impl ComposeCtx<'_> {
     }
   }
 
-  fn child_prefix(&self, child: &Child) -> Vec<PathStep> {
+  fn child_prefix(&mut self, child: &Child) -> Vec<PathStep> {
     let mut path = Vec::new();
     if let Some((param, item)) = self.held(child) {
       path.push(PathStep::Param(param.into()));
@@ -1327,11 +1429,11 @@ impl ComposeCtx<'_> {
   /// not visible after it (golden-path.md §3.2).
   pub fn compose_flow(&mut self, flow: &[ShardDef], input: Type) -> Result<CompiledFlow> {
     let child = Child::Flow(flow.as_ptr());
-    let visible = self.locals.visible();
+    let block = self.scopes.mark();
     self.blocks += 1;
     let result = self.compose_flow_unscoped(flow, input);
     self.blocks -= 1;
-    self.locals.restore_visible(visible);
+    self.scopes.close(&mut self.locals, block);
     if let Ok(flow) = &result {
       let prefix = self.child_prefix(&child);
       self.analysis.include(&flow.analysis, &prefix);
@@ -1450,6 +1552,7 @@ impl ComposeCtx<'_> {
           check_input(def.ty, self.input)?;
           let args = Arc::new(args);
           let parent_args = self.current_args.replace(args.clone());
+          let parent_index = self.flow_index.take();
           let result = def.ty.compose_node(&args, self).map_err(|err| {
             // An error from a nested flow or wire: name the parameter
             // holding it.
@@ -1465,6 +1568,7 @@ impl ComposeCtx<'_> {
             }
           });
           self.current_args = parent_args;
+          self.flow_index = parent_index;
           result
         }),
       };
@@ -1586,10 +1690,8 @@ impl ComposeCtx<'_> {
           self.failed_child = Some(Child::Wire(name.to_string()));
         }
       })?;
-    self.analysis.include(
-      &wire.flow.analysis,
-      &self.child_prefix(&Child::Wire(name.into())),
-    );
+    let prefix = self.child_prefix(&Child::Wire(name.into()));
+    self.analysis.include(&wire.flow.analysis, &prefix);
     self.deps.extend(wire.deps.iter().cloned());
     self.restart_deps.extend(wire.deps.iter().cloned());
     self
@@ -2417,7 +2519,9 @@ impl ComposeCache {
         diagnostic_path: vec![PathStep::Wire(def.name.clone())],
         local_paths: Vec::new(),
         current_args: None,
-        initialized: Vec::new(),
+        flow_index: None,
+        scopes: Scopes::default(),
+        initialized: Initialized::default(),
         failed_child: None,
         depth,
         blocks: 0,
@@ -2519,7 +2623,9 @@ impl ComposeCache {
         diagnostic_path: vec![PathStep::Function(def.name.clone())],
         local_paths: Vec::new(),
         current_args: None,
-        initialized: Vec::new(),
+        flow_index: None,
+        scopes: Scopes::default(),
+        initialized: Initialized::default(),
         failed_child: None,
         depth,
         blocks: 0,

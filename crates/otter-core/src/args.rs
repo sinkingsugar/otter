@@ -53,6 +53,27 @@ enum Inner {
   },
 }
 
+/// Up to this many nested flows, [`Args::param_in`] scans the arguments;
+/// past it, compose keeps a [`FlowIndex`] to binary-search, so composing a
+/// shard with many flow arguments (`All`, `Cond`, a long `Match`) stays
+/// linear in their number.
+const FLOW_SCAN: usize = 16;
+
+/// The nested flows of decoded arguments, sorted by address
+/// ([`Args::flow_index`]).
+pub(crate) struct FlowIndex(Box<[FlowEntry]>);
+
+/// A nested flow in a [`FlowIndex`]: the flow's address, then where it is
+/// (ordered by address, ties in argument order).
+#[derive(Clone, Copy)]
+struct FlowEntry {
+  addr: usize,
+  /// The declared parameter; `decls.len()` for the variadic arguments.
+  param: u32,
+  /// The case or variadic argument's index; `u32::MAX` for a flow argument.
+  item: u32,
+}
+
 impl Args {
   /// The positional arguments of a shard that does not declare its
   /// parameters yet. Panics for a described shard, which must use the
@@ -173,6 +194,16 @@ impl Args {
     &self,
     child: &crate::compose::Child,
   ) -> Option<(&'static str, Option<usize>)> {
+    self.param_in(child, None)
+  }
+
+  /// [`Args::param_of`], through this shard's [`Args::flow_index`] when it
+  /// has one.
+  pub(crate) fn param_in(
+    &self,
+    child: &crate::compose::Child,
+    index: Option<&FlowIndex>,
+  ) -> Option<(&'static str, Option<usize>)> {
     let Inner::Decoded {
       decls,
       values,
@@ -181,6 +212,28 @@ impl Args {
     else {
       return None;
     };
+    if let crate::compose::Child::Flow(ptr) = child
+      && let Some(FlowIndex(index)) = index
+    {
+      let addr = *ptr as usize;
+      let entry = index.get(index.partition_point(|e| e.addr < addr))?;
+      if entry.addr != addr {
+        return None;
+      }
+      let name = match decls.get(entry.param as usize) {
+        Some(decl) => decl.name,
+        None => {
+          decls
+            .iter()
+            .find(|d| d.requirement == Requirement::Variadic)?
+            .name
+        }
+      };
+      return Some((
+        name,
+        (entry.item != u32::MAX).then_some(entry.item as usize),
+      ));
+    }
     let matches = |value: &ParamValue| -> Option<Option<usize>> {
       match (child, value) {
         (crate::compose::Child::Flow(ptr), ParamValue::Flow(flow)) => {
@@ -459,4 +512,74 @@ pub fn decode(desc: &ShardDesc, args: &[Arg]) -> Result<Args> {
       rest,
     },
   })
+}
+
+impl Args {
+  /// An index of the nested flows for [`Args::param_in`], when there are
+  /// more than [`FLOW_SCAN`] of them.
+  pub(crate) fn flow_index(&self) -> Option<FlowIndex> {
+    let Inner::Decoded {
+      decls,
+      values,
+      rest,
+    } = &self.inner
+    else {
+      return None;
+    };
+    let count = values
+      .iter()
+      .map(|value| match value {
+        Some(ParamValue::Flow(_)) => 1,
+        Some(ParamValue::Cases(cases)) => cases.len(),
+        _ => 0,
+      })
+      .sum::<usize>()
+      + rest.len();
+    (count > FLOW_SCAN).then(|| FlowIndex(flow_index(decls, values, rest)))
+  }
+}
+
+/// The nested flows of decoded arguments, sorted by address. A stable sort
+/// keeps flows at the same address (empty ones) in argument order, so the
+/// first one wins, as in [`Args::param_in`]'s scan.
+fn flow_index(
+  decls: &[ParamDecl],
+  values: &[Option<ParamValue>],
+  rest: &[ParamValue],
+) -> Box<[FlowEntry]> {
+  let index32 = |i: usize| u32::try_from(i).expect("argument index fits u32");
+  let mut index = Vec::new();
+  for (param, value) in values.iter().enumerate() {
+    match value {
+      Some(ParamValue::Flow(flow)) => index.push(FlowEntry {
+        addr: flow.as_ptr() as usize,
+        param: index32(param),
+        item: u32::MAX,
+      }),
+      Some(ParamValue::Cases(cases)) => {
+        index.extend(cases.iter().enumerate().map(|(i, (_, flow))| FlowEntry {
+          addr: flow.as_ptr() as usize,
+          param: index32(param),
+          item: index32(i),
+        }))
+      }
+      _ => {}
+    }
+  }
+  // A variadic argument's flows (a flow, or the flows of cases) carry the
+  // argument's index.
+  for (i, value) in rest.iter().enumerate() {
+    let entry = |flow: &Vec<ShardDef>| FlowEntry {
+      addr: flow.as_ptr() as usize,
+      param: index32(decls.len()),
+      item: index32(i),
+    };
+    match value {
+      ParamValue::Flow(flow) => index.push(entry(flow)),
+      ParamValue::Cases(cases) => index.extend(cases.iter().map(|(_, flow)| entry(flow))),
+      _ => {}
+    }
+  }
+  index.sort_by_key(|e| e.addr);
+  index.into_boxed_slice()
 }
