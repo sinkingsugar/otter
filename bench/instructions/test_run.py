@@ -44,7 +44,8 @@ class Check(unittest.TestCase):
 
 class Baseline(unittest.TestCase):
     def test_round_trip(self):
-        env = {"rustc": "rustc 1.98.1", "valgrind": "valgrind-3.22.0"}
+        # Every key the environment records, a hyphenated one included.
+        env = {"rustc": "rustc 1.98.1", "codegen-units": "1", "valgrind": "valgrind-3.22.0"}
         results = {"vm/add-int/8": dict(ROW), "reload": dict(ROW, ir=358589.1)}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "baseline.txt"

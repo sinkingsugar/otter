@@ -201,7 +201,7 @@ def write_baseline(path, results, env):
 def read_baseline(path):
     env, rows = {}, {}
     for line in path.read_text().splitlines():
-        if m := re.match(r"# (\w+): (.*)$", line):
+        if m := re.match(r"# ([\w-]+): (.*)$", line):
             env[m.group(1)] = m.group(2)
         elif line and not line.startswith("#"):
             name, *values = line.split()
