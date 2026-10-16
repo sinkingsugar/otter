@@ -103,7 +103,7 @@
         parts | Take(1) | String.Split("', data:") | Take(1) | String.Split(", sideChannel") | Take(0) = text
         text | FromJson | SeqOr | Count | When({IsMore(3)} {text | Update(payload)})
       })
-    } {Log("google-flights: request failed")})
+    } {= reason  f"google-flights: request failed: {reason}" | Log} error: true silent: true)
   } until: {Any({payload | IsNot("")} {attempt | IsMoreEqual(tries)})})
   payload | If({Is("")} {none} {payload | FromJson})
 })

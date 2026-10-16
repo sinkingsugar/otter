@@ -344,7 +344,9 @@ pub static MAYBE_PARAMS: &[ParamDecl] = &[
   ),
   decl(
     "else",
-    crate::shard_doc!("The flow to run, with Maybe's input, if `action` fails."),
+    crate::shard_doc!(
+      "The flow to run if `action` fails: with Maybe's input, or with the error's message when `error` is set."
+    ),
     FLOW,
     NONE_TYPES,
     Requirement::Optional,
@@ -352,6 +354,13 @@ pub static MAYBE_PARAMS: &[ParamDecl] = &[
   decl(
     "silent",
     crate::shard_doc!("Do not log the error that `action` failed with."),
+    Forms::LITERAL,
+    &[TypeName::Bool],
+    Requirement::Default(DefaultValue::Bool(false)),
+  ),
+  decl(
+    "error",
+    crate::shard_doc!("Give `else` the error's message (a String) as its input."),
     Forms::LITERAL,
     &[TypeName::Bool],
     Requirement::Default(DefaultValue::Bool(false)),
@@ -380,6 +389,8 @@ pub const MAYBE_DESC: ShardDesc = ShardDesc {
 pub struct MaybeCompiled {
   flows: Vec<CompiledFlow>,
   silent: bool,
+  /// Else's input is the error's message.
+  error: bool,
 }
 
 impl ControlFlows for MaybeCompiled {
@@ -395,8 +406,12 @@ pub(crate) fn compose_maybe(
   let input = ctx.input();
   // Action may stop partway, so what it assigns is not definitely assigned.
   let action = ctx.compose_flow_conditional(args.flow("action").expect("decoded"), input)?;
+  let error = args.bool("error").unwrap_or(false);
   let els = match args.flow("else") {
-    Some(flow) => Some(ctx.compose_flow_conditional(flow, input)?),
+    Some(flow) => {
+      let else_input = if error { Type::string() } else { input };
+      Some(ctx.compose_flow_conditional(flow, else_input)?)
+    }
     None => None,
   };
   // Without Else, the input passes through (1.x).
@@ -410,20 +425,26 @@ pub(crate) fn compose_maybe(
     compiled: MaybeCompiled {
       flows,
       silent: args.bool("silent").unwrap_or(false),
+      error,
     },
     output,
   })
 }
 
-/// What Maybe does with an error from action: `None` to propagate it.
-fn maybe_caught(silent: bool, err: Error) -> std::result::Result<(), Error> {
+/// What Maybe does with an error from action: `Err` to propagate it,
+/// otherwise its message (an activation error's without the wrapper's
+/// prefix).
+fn maybe_caught(silent: bool, err: Error) -> std::result::Result<String, Error> {
   match err {
     Error::Cancelled => Err(Error::Cancelled),
     other => {
       if !silent {
         crate::log::emit(format!("Maybe: {other}"));
       }
-      Ok(())
+      Ok(match other {
+        Error::Activation(message) => message,
+        other => other.to_string(),
+      })
     }
   }
 }
@@ -475,10 +496,15 @@ impl crate::ControlShard for Maybe {
         value
       })),
       (MaybeState::Action, Some(Err(err))) => {
-        maybe_caught(compiled.silent, err)?;
+        let message = maybe_caught(compiled.silent, err)?;
         if compiled.flows.len() > 1 {
           *state = MaybeState::Else;
-          Ok(Enter(1, input.clone()))
+          let else_input = if compiled.error {
+            Var::string(&message)
+          } else {
+            input.clone()
+          };
+          Ok(Enter(1, else_input))
         } else {
           Ok(Complete(input.clone()))
         }

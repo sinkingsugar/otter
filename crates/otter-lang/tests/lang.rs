@@ -1677,6 +1677,22 @@ fn maybe_without_else_passes_its_input_through() {
 }
 
 #[test]
+fn maybe_gives_else_the_error_when_asked() {
+  let v = root_value(
+    r#"
+5 | Maybe({"no luck" | Fail} {= msg  f"caught: {msg}"} error: true silent: true) = caught
+5 | Maybe({Add(1) | ToString} {"never"} error: true) = fine
+5 | Maybe({"x" | Fail} {Add(1) | ToString} silent: true) = passed
+[caught fine passed]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"["caught: no luck" "6" "6"]"#);
+  // With `error`, else's input is the message, a String.
+  let d = load_or_compose_errors("5 | Maybe({Add(1)} {Add(1)} error: true)");
+  assert_eq!(d[0].code, "input-type-mismatch", "{:?}", d[0]);
+}
+
+#[test]
 fn entry_outcomes_survive_retirement_of_finished_records() {
   // Many one-shot entries finish on the first tick; a looped entry keeps
   // the mesh running. Finished records are drained from the mesh every
