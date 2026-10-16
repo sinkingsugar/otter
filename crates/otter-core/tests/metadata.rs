@@ -607,6 +607,16 @@ fn catalog_index_detail_and_search() {
     Catalog::new(&[CATALOG, CATALOG]).is_err(),
     "duplicates are rejected"
   );
+  // `get` resolves every name and alias through the sorted index.
+  for &ty in CATALOG {
+    for name in std::iter::once(ty.name()).chain(ty.desc.aliases.iter().copied()) {
+      assert!(
+        catalog.get(name).is_some_and(|t| std::ptr::eq(t, ty)),
+        "{name}"
+      );
+    }
+  }
+  assert!(catalog.get("Math.Nope").is_none() && catalog.get("").is_none());
 
   let index = catalog.index_json();
   assert!(index.starts_with("{\"schema\":\"otter-catalog/1\""));

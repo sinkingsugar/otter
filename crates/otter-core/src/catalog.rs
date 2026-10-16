@@ -15,6 +15,9 @@ pub const SCHEMA: &str = "otter-catalog/1";
 
 pub struct Catalog {
   shards: Vec<&'static ShardType>,
+  /// Every name and alias with its shard, sorted by name: `get` is a binary
+  /// search, not a scan that grows with the catalog.
+  index: Vec<(&'static str, &'static ShardType)>,
   /// Object types scripts can name in signatures (docs/host-requirements.md H1).
   objects: Vec<&'static ObjectType>,
 }
@@ -26,17 +29,10 @@ impl Catalog {
   /// lowercase label (golden-path.md D3: uppercase is a shard).
   pub fn new(lists: &[&[&'static ShardType]]) -> Result<Catalog, String> {
     let mut shards: Vec<&'static ShardType> = Vec::new();
-    let names = |s: &ShardType| {
-      std::iter::once(s.name())
-        .chain(s.desc.aliases.iter().copied())
-        .collect::<Vec<_>>()
-    };
-    for ty in lists.iter().flat_map(|list| list.iter()) {
-      for name in names(ty) {
-        if shards.iter().any(|s| names(s).contains(&name)) {
-          return Err(format!("duplicate shard name in catalog: {name}"));
-        }
-      }
+    let mut index = Vec::new();
+    for &ty in lists.iter().flat_map(|list| list.iter()) {
+      index.push((ty.name(), ty));
+      index.extend(ty.desc.aliases.iter().map(|&alias| (alias, ty)));
       if let crate::describe::Params::Declared(params) = ty.desc.params
         && let Some(p) = params.iter().find(|p| !is_label(p.name))
       {
@@ -49,9 +45,14 @@ impl Catalog {
       }
       shards.push(ty);
     }
+    index.sort_unstable_by_key(|&(name, _)| name);
+    if let Some(pair) = index.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+      return Err(format!("duplicate shard name in catalog: {}", pair[0].0));
+    }
     shards.sort_by_key(|s| s.name());
     Ok(Catalog {
       shards,
+      index,
       objects: Vec::new(),
     })
   }
@@ -100,11 +101,8 @@ impl Catalog {
 
   /// The shard with this name or alias.
   pub fn get(&self, name: &str) -> Option<&'static ShardType> {
-    self
-      .shards
-      .iter()
-      .copied()
-      .find(|s| s.name() == name || s.desc.aliases.contains(&name))
+    let i = self.index.binary_search_by(|&(n, _)| n.cmp(name)).ok()?;
+    Some(self.index[i].1)
   }
 
   /// Every name the catalog resolves: canonical names and aliases.
