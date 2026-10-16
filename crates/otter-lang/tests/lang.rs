@@ -4462,3 +4462,205 @@ t | Add(86400) | Date.Format(format: "%Y-%m-%d") = next
   let d = load_or_compose_errors(r#"0 | Date.Format(format: "%A")"#);
   assert_eq!(d[0].code, "invalid-argument-value");
 }
+
+mod tools {
+  use super::*;
+  use otter_lang::{CallOptions, MemoryFiles, Tool, ToolError, ToolInput};
+  use std::sync::Arc;
+  use std::sync::atomic::AtomicBool;
+
+  const ECHO: &str = r#"
+@fn(Echo input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input = args
+  args.name | If({IsString} {ExpectString} {"nobody"}) = name
+  input.env.greeting | If({IsString} {ExpectString} {"Hello"}) = greeting
+  args.fail | When({Is(true)} {"asked to fail" | Fail})
+  args.wait | When({Is(true)} {Repeat({Pause} forever: true)})
+  f"{greeting}, {name}!" | Log
+  f"{greeting}, {name}! (in {input.working-dir})"
+})
+{definition: {name: "echo" description: "Greets." parameters: {type: "object" properties: {name: {type: "string"}}}} use: "Echo"}
+"#;
+
+  fn load(text: &str) -> Result<Tool, ToolError> {
+    Tool::load_with(
+      Source::new("tool.shs", text),
+      &catalog(),
+      &no_defines(),
+      &MemoryFiles::default(),
+    )
+  }
+
+  #[test]
+  fn a_tool_describes_itself_and_runs_with_its_input() {
+    let tool = load(ECHO).unwrap();
+    let d = tool.definition();
+    assert_eq!(
+      (d.name.as_str(), d.description.as_str()),
+      ("echo", "Greets.")
+    );
+    assert_eq!(
+      d.parameters_json(),
+      r#"{"properties":{"name":{"type":"string"}},"type":"object"}"#
+    );
+    assert_eq!(tool.entry(), "Echo");
+    let input = ToolInput::from_json(r#"{"name": "Ann"}"#)
+      .unwrap()
+      .with_env(Var::table([("greeting", Var::string("Hi"))]))
+      .with_working_dir("/w");
+    let out = tool.call(&input).unwrap();
+    assert_eq!(out.text, "Hi, Ann! (in /w)");
+    assert_eq!(out.log, ["Hi, Ann!"]);
+    assert_eq!(
+      tool.call(&ToolInput::from_json("").unwrap()).unwrap().text,
+      "Hello, nobody! (in )"
+    );
+  }
+
+  /// Calls are independent and can run on several threads at once.
+  #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+  #[test]
+  fn tool_calls_run_concurrently_on_threads() {
+    let tool = load(ECHO).unwrap();
+    let threads: Vec<_> = (0..3)
+      .map(|_| {
+        let tool = tool.clone();
+        std::thread::spawn(move || tool.call(&ToolInput::from_json("").unwrap()).unwrap().text)
+      })
+      .collect();
+    for t in threads {
+      assert_eq!(t.join().unwrap(), "Hello, nobody! (in )");
+    }
+  }
+
+  #[test]
+  fn tool_failures_are_reported_not_panicked() {
+    let tool = load(ECHO).unwrap();
+    match tool.call(&ToolInput::from_json(r#"{"fail": true}"#).unwrap()) {
+      Err(ToolError::Failed { message, .. }) => assert_eq!(message, "asked to fail"),
+      other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+      ToolInput::from_json("[1]"),
+      Err(ToolError::Input(_))
+    ));
+    let wait = ToolInput::from_json(r#"{"wait": true}"#).unwrap();
+    let timeout = CallOptions {
+      timeout: Some(std::time::Duration::from_millis(30)),
+      ..CallOptions::default()
+    };
+    assert!(matches!(
+      tool.call_with(&wait, &timeout),
+      Err(ToolError::TimedOut(_))
+    ));
+    let cancel = Arc::new(AtomicBool::new(true));
+    let cancelled = CallOptions {
+      cancel: Some(cancel),
+      ..CallOptions::default()
+    };
+    assert!(matches!(
+      tool.call_with(&wait, &cancelled),
+      Err(ToolError::Cancelled)
+    ));
+  }
+
+  #[test]
+  fn scripts_that_are_not_tools_are_rejected_at_load() {
+    let compile = load(
+      "@fn(F input: Int output: String params: {} { Math.Add(1) })\n{definition: {name: \"f\"} use: \"F\"}",
+    );
+    match compile {
+      Err(ToolError::Compile {
+        diagnostics,
+        rendered,
+      }) => {
+        assert!(!diagnostics.is_empty());
+        assert!(rendered.contains("tool.shs:1:"), "{rendered}");
+      }
+      Err(other) => panic!("{other}"),
+      Ok(_) => panic!("loaded"),
+    }
+    let cases = [
+      (
+        "@fn(F input: Int output: Int params: {} { Math.Add(1) })",
+        "no top-level code",
+      ),
+      ("{definition: {name: \"f\"}}", "`use`"),
+      (
+        "{definition: {description: \"d\"} use: \"F\"}",
+        "definition.name",
+      ),
+      (
+        "\"x\" | Log  {definition: {name: \"f\"} use: \"F\"}",
+        "no I/O",
+      ),
+    ];
+    for (text, expected) in cases {
+      match load(text) {
+        Err(ToolError::Definition(m)) => assert!(m.contains(expected), "{m}"),
+        Err(other) => panic!("{text}: {other}"),
+        Ok(_) => panic!("{text}: loaded"),
+      }
+    }
+    // The function must accept the call table.
+    let wrong = load(
+      "@fn(F input: Int output: Int params: {} { Math.Add(1) })\n{definition: {name: \"f\"} use: \"F\"}",
+    );
+    assert!(
+      matches!(wrong, Err(ToolError::Compile { .. })),
+      "{:?}",
+      wrong.err()
+    );
+    let missing = load("{definition: {name: \"f\"} use: \"Nope\"}");
+    assert!(
+      matches!(missing, Err(ToolError::Compile { .. })),
+      "{:?}",
+      missing.err()
+    );
+  }
+
+  #[test]
+  fn a_tool_can_include_its_library() {
+    let mut files = MemoryFiles::default();
+    files.insert(
+      "lib.shs",
+      "@fn(Twice input: String output: String params: {} { = s  f\"{s}{s}\" })",
+    );
+    let tool = Tool::load_with(
+      Source::new("tool.shs", "@include(\"lib.shs\")\n@fn(T input: {input: {} env: {} working-dir: String} output: String params: {} { \"ab\" | Twice })\n{definition: {name: \"t\"} use: \"T\"}"),
+      &catalog(),
+      &no_defines(),
+      &files,
+    )
+    .unwrap();
+    assert_eq!(tool.files(), ["lib.shs"]);
+    assert_eq!(
+      tool
+        .call(&ToolInput::from_json("{}").unwrap())
+        .unwrap()
+        .text,
+      "abab"
+    );
+  }
+}
+
+#[test]
+fn a_tool_reports_the_effects_of_its_calls() {
+  use otter_lang::{MemoryFiles, Tool};
+  let load = |body: &str| {
+    Tool::load_with(
+      Source::new("t.shs", format!("@fn(T input: {{input: {{}} env: {{}} working-dir: String}} output: String params: {{}} {{ {body} }})\n{{definition: {{name: \"t\"}} use: \"T\"}}")),
+      &catalog(),
+      &no_defines(),
+      &MemoryFiles::default(),
+    )
+    .unwrap()
+  };
+  assert_eq!(
+    load("\"x\"").effects(),
+    otter_core::signature::Effects::NONE
+  );
+  let waits = load("Pause \"x\"").effects();
+  assert!(waits.suspends && waits.time, "{waits:?}");
+  assert!(load("\"x\" | Log").effects().io);
+}

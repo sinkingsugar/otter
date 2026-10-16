@@ -207,3 +207,55 @@ fn watch_reloads_atomic_saves_and_keeps_running_after_rejected_edits() {
     assert!(child.0.wait().unwrap().success());
   }
 }
+
+const GREET_TOOL: &str = r#"
+@fn(Greet input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input.name | If({IsString} {ExpectString} {"" | Fail}) = name
+  name | When({Is("boom")} {"no booms" | Fail})
+  f"greeting {name}" | Log
+  f"Hello, {name}!"
+})
+{
+  definition: {
+    name: "greet"
+    description: "Greets someone."
+    parameters: {type: "object" properties: {name: {type: "string"}} required: ["name"]}
+  }
+  use: "Greet"
+}
+"#;
+
+#[test]
+fn tool_prints_its_definition_and_runs_with_json_arguments() {
+  let file = script("greet.shs", GREET_TOOL);
+  let (code, out, err) = otter(&["tool", &file]);
+  assert_eq!(code, 0, "{err}");
+  assert_eq!(
+    out.trim_end(),
+    r#"{"name":"greet","description":"Greets someone.","parameters":{"properties":{"name":{"type":"string"}},"required":["name"],"type":"object"}}"#
+  );
+
+  // The output on stdout, the log on stderr.
+  let (code, out, err) = otter(&["tool", &file, r#"{"name": "Ann"}"#]);
+  assert_eq!(code, 0, "{err}");
+  assert_eq!(out, "Hello, Ann!\n");
+  assert!(err.contains("greeting Ann"), "{err}");
+
+  let (code, out, err) = otter(&["tool", &file, r#"{"name": "boom"}"#]);
+  assert_eq!(code, 1);
+  assert_eq!(out, "");
+  assert!(err.contains("greet: failed: no booms"), "{err}");
+
+  let (code, _, err) = otter(&["tool", &file, "[1]"]);
+  assert_eq!(code, 2);
+  assert!(err.contains("must be a JSON object"), "{err}");
+  let (code, _, err) = otter(&["tool", &file, "{"]);
+  assert_eq!(code, 2);
+  assert!(err.contains("invalid JSON"), "{err}");
+
+  // A script that is not a tool is reported at load, with its location.
+  let bad = script("not-a-tool.shs", "\"a\" | Add(1)\n");
+  let (code, _, err) = otter(&["tool", &bad]);
+  assert_eq!(code, 1);
+  assert!(err.contains("not-a-tool.shs:1:"), "{err}");
+}
