@@ -46,19 +46,47 @@ impl Shard for Spawn {
 
 // --- shards that suspend, or run nested flows: they keep a resume point ---
 
-/// Suspends for one tick, or until at least `seconds` have passed. The resume
-/// point is when it started waiting.
+/// `Pause()`: suspends for one tick. The resume point is whether it has.
+/// A plain yield, so its activation never touches the context: `Pause` with
+/// a time composes to [`TimedPause`] instead (`compose_pause_node`).
 pub struct Pause;
 
-/// A pause in progress: since when, for a timed pause; a plain yield reads
-/// no clock.
-pub struct Waiting {
-  since: Option<Instant>,
+impl Shard for Pause {
+  type Compiled = ();
+  type State = bool;
+  const NAME: &'static str = PAUSE_DESC.name;
+  const VERSION: u32 = PAUSE_DESC.version;
+
+  fn compose(args: &Args, ctx: Ctx) -> Result<Composed<()>> {
+    compose_pause(args, ctx).map(|c| Composed {
+      compiled: (),
+      output: c.output,
+    })
+  }
+
+  fn instantiate(_: &(), _: &mut InstanceCtx) -> Result<bool> {
+    Ok(false)
+  }
+
+  fn activate(_: &(), paused: &mut bool, _: &mut ActivationCtx<'_>, input: &Var) -> Result<Step> {
+    if *paused {
+      *paused = false;
+      Ok(Step::Next(input.clone()))
+    } else {
+      *paused = true;
+      Ok(Step::Suspend)
+    }
+  }
 }
 
-impl Shard for Pause {
+/// `Pause(seconds)`: suspends until at least `seconds` have passed, at
+/// least once. The resume point is when it started waiting. Each suspension
+/// tells the scheduler when it is due (`ActivationCtx::resume_at`).
+pub struct TimedPause;
+
+impl Shard for TimedPause {
   type Compiled = Duration;
-  type State = Option<Waiting>;
+  type State = Option<Instant>;
   const NAME: &'static str = PAUSE_DESC.name;
   const VERSION: u32 = PAUSE_DESC.version;
 
@@ -66,29 +94,41 @@ impl Shard for Pause {
     compose_pause(args, ctx)
   }
 
-  fn instantiate(_: &Duration, _: &mut InstanceCtx) -> Result<Option<Waiting>> {
+  fn instantiate(_: &Duration, _: &mut InstanceCtx) -> Result<Option<Instant>> {
     Ok(None)
   }
 
   fn activate(
     duration: &Duration,
-    waiting: &mut Option<Waiting>,
-    _: &mut ActivationCtx<'_>,
+    since: &mut Option<Instant>,
+    ctx: &mut ActivationCtx<'_>,
     input: &Var,
   ) -> Result<Step> {
-    match waiting {
+    match *since {
       None => {
-        *waiting = Some(Waiting {
-          since: (!duration.is_zero()).then(Instant::now),
-        });
+        let start = Instant::now();
+        *since = Some(start);
+        wake_after(ctx, start, *duration);
         Ok(Step::Suspend)
       }
-      Some(Waiting { since: Some(start) }) if start.elapsed() < *duration => Ok(Step::Suspend),
+      Some(start) if start.elapsed() < *duration => {
+        wake_after(ctx, start, *duration);
+        Ok(Step::Suspend)
+      }
       Some(_) => {
-        *waiting = None;
+        *since = None;
         Ok(Step::Next(input.clone()))
       }
     }
+  }
+}
+
+/// Tells the scheduler when a timed pause is due. A pause too long for the
+/// clock to reach never is: nothing wakes it, like a waker that never fires.
+fn wake_after(ctx: &mut ActivationCtx<'_>, start: Instant, duration: Duration) {
+  match start.checked_add(duration) {
+    Some(at) => ctx.resume_at(at),
+    None => ctx.set_waiting(),
   }
 }
 

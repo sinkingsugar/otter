@@ -244,6 +244,135 @@ fn completing_nested_frames_dispatches_each_parent_once() {
   }
 }
 
+/// `Mesh::wait` blocks the host thread until a tick can make progress:
+/// it wakes for a waker fired on another thread, a due pause, its own time
+/// limit or a cancellation, and returns at once when an instance is ready.
+#[cfg(not(any(target_family = "wasm", target_os = "espidf")))]
+mod wait {
+  use super::*;
+  use otter_core::CancelToken;
+  use std::time::{Duration, Instant};
+
+  /// Ticks and waits until `id` finishes; returns how many waits it took.
+  fn run(mesh: &mut Mesh, id: otter_core::InstanceId) -> usize {
+    let mut waits = 0;
+    mesh.tick();
+    while mesh.outcome(id).is_none() {
+      mesh.wait(Some(Instant::now() + Duration::from_secs(10)), None);
+      waits += 1;
+      mesh.tick();
+    }
+    waits
+  }
+
+  #[test]
+  fn it_sleeps_until_a_waker_fires_on_another_thread() {
+    for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+      let gate = gate();
+      let mut mesh = Mesh::new();
+      mesh.set_wake_mode(mode);
+      mesh.add_wire(wire(vec![ShardDef::new(&WAIT, vec![])], false));
+      let code = mesh.compile("root", Type::none()).unwrap();
+      let id = mesh.spawn(&code, Var::None).unwrap();
+      let waker = {
+        let gate = gate.clone();
+        std::thread::spawn(move || {
+          std::thread::sleep(Duration::from_millis(100));
+          gate.ready.store(true, Ordering::Relaxed);
+          for waker in gate.wakes.lock().unwrap().iter() {
+            waker.wake_by_ref();
+          }
+        })
+      };
+      let started = Instant::now();
+      let waits = run(&mut mesh, id);
+      waker.join().unwrap();
+      assert!(started.elapsed() >= Duration::from_millis(100), "{mode:?}");
+      // Woken by the waker, not by `run`'s 10 s limit.
+      assert!(started.elapsed() < Duration::from_secs(5), "{mode:?}");
+      // Woken once (a spurious wake may add one), not polled.
+      assert!(waits <= 2, "{mode:?}: {waits} waits");
+      assert_eq!(mesh.outcome(id), Some(&Outcome::Completed(Var::Int(42))));
+    }
+  }
+
+  #[test]
+  fn it_sleeps_until_a_timed_pause_is_due() {
+    let mut mesh = Mesh::new();
+    mesh.add_wire(wire(vec![pause_secs(0.1), konst(Var::Int(1))], false));
+    let code = mesh.compile("root", Type::none()).unwrap();
+    let id = mesh.spawn(&code, Var::None).unwrap();
+    let started = Instant::now();
+    let waits = run(&mut mesh, id);
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(waits <= 2, "{waits} waits");
+    assert_eq!(mesh.outcome(id), Some(&Outcome::Completed(Var::Int(1))));
+  }
+
+  #[test]
+  fn it_stops_at_its_limit_or_a_cancellation() {
+    let _gate = gate();
+    let mut mesh = Mesh::new();
+    mesh.add_wire(wire(vec![ShardDef::new(&WAIT, vec![])], false));
+    let code = mesh.compile("root", Type::none()).unwrap();
+    mesh.spawn(&code, Var::None).unwrap();
+    mesh.tick();
+    let started = Instant::now();
+    mesh.wait(Some(started + Duration::from_millis(50)), None);
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    let token = CancelToken::new();
+    let canceller = {
+      let token = token.clone();
+      std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        token.cancel();
+      })
+    };
+    let started = Instant::now();
+    mesh.wait(Some(started + Duration::from_secs(10)), Some(&token));
+    canceller.join().unwrap();
+    assert!(token.is_cancelled());
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // Already cancelled: no wait.
+    let started = Instant::now();
+    mesh.wait(None, Some(&token));
+    assert!(started.elapsed() < Duration::from_secs(1));
+  }
+
+  #[test]
+  fn it_returns_at_once_when_a_tick_has_work() {
+    let mut mesh = Mesh::new();
+    // Nothing running.
+    let started = Instant::now();
+    mesh.wait(None, None);
+    // Not started yet, then yielded (`Pause` with no time).
+    mesh.add_wire(wire(vec![pause(), pause(), konst(Var::Int(1))], false));
+    let code = mesh.compile("root", Type::none()).unwrap();
+    let id = mesh.spawn(&code, Var::None).unwrap();
+    mesh.wait(None, None);
+    assert_eq!(run(&mut mesh, id), 2);
+    assert!(started.elapsed() < Duration::from_secs(1));
+  }
+
+  #[test]
+  fn a_pause_the_clock_cannot_reach_never_wakes() {
+    let mut mesh = Mesh::new();
+    mesh.add_wire(wire(vec![pause_secs(1e18)], false));
+    let code = mesh.compile("root", Type::none()).unwrap();
+    let id = mesh.spawn(&code, Var::None).unwrap();
+    mesh.tick();
+    let started = Instant::now();
+    mesh.wait(Some(started + Duration::from_millis(50)), None);
+    assert!(started.elapsed() >= Duration::from_millis(50));
+    mesh.tick();
+    assert!(mesh.outcome(id).is_none());
+  }
+}
+
 #[cfg(not(target_os = "espidf"))]
 mod allocations {
   use std::alloc::{GlobalAlloc, Layout, System};

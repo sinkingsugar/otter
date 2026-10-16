@@ -6,12 +6,15 @@ use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::task::Waker;
+use std::time::Instant;
 
 use super::Engine;
 use crate::compose::{CacheStats, CompiledWire, ComposeCache, ComposeEnv, FrameLayout, WireDef};
 use crate::error::{Error, Result, panic_message};
 use crate::function::{CompiledFunction, FunctionDef};
-use crate::instance::{InstanceCtx, InstanceId, InstanceMemory, Outcome, WakeFlag, WakeMode};
+use crate::instance::{
+  InstanceCtx, InstanceId, InstanceMemory, Outcome, Wait, Waiting, WakeFlag, WakeMode,
+};
 use crate::reload::{FunctionKey, FunctionRegistry, ReloadReport, ResetPolicy, Revisions};
 use crate::shard::{ActivationCtx, Step};
 use crate::types::Type;
@@ -28,8 +31,9 @@ struct Instance {
   started: bool,
   memory: InstanceMemory,
   outcome: Option<Outcome>,
-  /// Waiting on its waker (set by `ActivationCtx::set_waiting`).
-  waiting: bool,
+  /// What it waits for since its last activation (`ActivationCtx::set_waiting`,
+  /// `ActivationCtx::resume_at`).
+  waiting: Waiting,
   wake: Arc<WakeFlag>,
   waker: Waker,
   /// The loop iteration ([`crate::instance::LeafCtx::iteration`]).
@@ -61,6 +65,10 @@ pub struct Mesh {
   wake_mode: WakeMode,
   max_call_depth: usize,
   eval_limits: crate::compose_time::EvalLimits,
+  /// What the instances' wakers fire, for [`Mesh::wait`]; made on the
+  /// first spawn, so a mesh that runs nothing (a reload's candidate)
+  /// allocates none.
+  signal: Option<Arc<crate::wait::Signal>>,
 }
 
 impl Default for Mesh {
@@ -92,6 +100,7 @@ impl Mesh {
       wake_mode: WakeMode::default(),
       max_call_depth: if cfg!(target_os = "espidf") { 32 } else { 256 },
       eval_limits: crate::compose_time::EvalLimits::default(),
+      signal: None,
     }
   }
 
@@ -526,9 +535,10 @@ impl Mesh {
   fn start(&mut self, wire: Arc<CompiledWire>, input: Var) -> InstanceId {
     let id = self.next_id;
     self.next_id += 1;
-    let wake = Arc::new(WakeFlag::default());
+    let signal = self.signal.get_or_insert_with(Arc::default).clone();
+    let wake = Arc::new(WakeFlag::new(signal));
     self.instances.push(Instance {
-      waiting: false,
+      waiting: Waiting::default(),
       waker: Waker::from(wake.clone()),
       wake,
       iteration: 0,
@@ -564,10 +574,10 @@ impl Mesh {
         continue;
       }
       let woken = instance.wake.take();
-      if notify_only && instance.waiting && !woken {
+      if notify_only && instance.waiting.wait == Wait::Waker && !woken {
         continue;
       }
-      instance.waiting = false;
+      instance.waiting.wait = Wait::Ready;
       step(
         instance,
         frame,
@@ -605,10 +615,10 @@ impl Mesh {
         continue;
       }
       let woken = instance.wake.take();
-      if notify_only && instance.waiting && !woken {
+      if notify_only && instance.waiting.wait == Wait::Waker && !woken {
         continue;
       }
-      instance.waiting = false;
+      instance.waiting.wait = Wait::Ready;
       step_with(
         instance,
         frame,
@@ -623,6 +633,57 @@ impl Mesh {
       self.start(wire, input);
     }
     self.running()
+  }
+
+  /// Blocks the calling thread until a tick can make progress, instead of
+  /// ticking in a loop: until an instance is ready to run (it yielded, or
+  /// has not started), a waiting instance's waker fires (from any thread,
+  /// such as I/O completing on `otter-io`'s runtime), a timed pause is due,
+  /// `until` passes, or `cancel` is cancelled. Returns at once when nothing
+  /// is running. It may return early; tick and wait again.
+  ///
+  /// On a target without threads (wasm) nothing can wake it but time: with
+  /// no pause due and no `until`, it returns at once.
+  pub fn wait(&self, until: Option<Instant>, cancel: Option<&crate::CancelToken>) {
+    // No signal: nothing ever ran here.
+    let Some(signal) = &self.signal else {
+      return;
+    };
+    let _watch = cancel.map(|c| c.watch(signal));
+    signal.hold(|mut held| {
+      loop {
+        if cancel.is_some_and(|c| c.is_cancelled()) || held.take_woken() {
+          return;
+        }
+        let mut due = until;
+        let mut running = false;
+        for instance in self.instances.iter().filter(|i| i.outcome.is_none()) {
+          running = true;
+          match instance.waiting.wait {
+            Wait::Ready => return,
+            Wait::Waker if instance.wake.is_set() => return,
+            Wait::Waker => {}
+            Wait::Timed => {
+              if let Some(at) = instance.waiting.at {
+                due = Some(due.map_or(at, |d| d.min(at)));
+              }
+            }
+          }
+        }
+        if !running {
+          return;
+        }
+        let limit = match due {
+          Some(at) => match at.checked_duration_since(Instant::now()) {
+            Some(limit) if !limit.is_zero() => Some(limit),
+            _ => return,
+          },
+          None if cfg!(target_family = "wasm") => return,
+          None => None,
+        };
+        held.sleep(limit);
+      }
+    })
   }
 
   /// Cancels a running instance: its state is cleaned up exactly once, and it

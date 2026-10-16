@@ -4603,8 +4603,6 @@ t | Add(86400) | Date.Format(format: "%Y-%m-%d") = next
 mod tools {
   use super::*;
   use otter_lang::{CallOptions, MemoryFiles, Tool, ToolError, ToolInput};
-  use std::sync::Arc;
-  use std::sync::atomic::AtomicBool;
 
   const ECHO: &str = r#"
 @fn(Echo input: {input: {} env: {} working-dir: String} output: String params: {} {
@@ -4693,7 +4691,8 @@ mod tools {
       Err(ToolError::TimedOut { log, .. }) => assert_eq!(log, ["waiting"]),
       other => panic!("{other:?}"),
     }
-    let cancel = Arc::new(AtomicBool::new(true));
+    let cancel = otter_core::CancelToken::new();
+    cancel.cancel();
     let cancelled = CallOptions {
       cancel: Some(cancel),
       ..CallOptions::default()
@@ -4706,6 +4705,52 @@ mod tools {
       Err(ToolError::Stopped { log }) => assert_eq!(log, ["stopping"]),
       other => panic!("{other:?}"),
     }
+  }
+
+  /// A call that waits sleeps until something can progress: a timed
+  /// pause ends on time, and a cancellation from another thread ends a
+  /// call blocked on a wait that would never end.
+  #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+  #[test]
+  fn a_waiting_call_sleeps_and_wakes_for_its_pause_or_a_cancellation() {
+    let napping = load(
+      "@fn(Nap input: {input: {} env: {} working-dir: String} output: String params: {} {\n  Pause(0.1)  \"rested\"\n})\n{definition: {name: \"nap\"} use: \"Nap\"}",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let rested = napping
+      .call(&ToolInput::from_json("{}").unwrap())
+      .unwrap()
+      .text;
+    assert_eq!(rested, "rested");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+    let long = load(
+      "@fn(Long input: {input: {} env: {} working-dir: String} output: String params: {} {\n  \"waiting\" | Log  Pause(3600.0)  \"rested\"\n})\n{definition: {name: \"long\"} use: \"Long\"}",
+    )
+    .unwrap();
+    let cancel = otter_core::CancelToken::new();
+    let setter = {
+      let cancel = cancel.clone();
+      std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel.cancel();
+      })
+    };
+    // The limit only keeps a lost cancellation from hanging the test.
+    let options = CallOptions {
+      cancel: Some(cancel),
+      timeout: Some(std::time::Duration::from_secs(10)),
+      ..CallOptions::default()
+    };
+    let started = std::time::Instant::now();
+    match long.call_with(&ToolInput::from_json("{}").unwrap(), &options) {
+      Err(ToolError::Cancelled { log }) => assert_eq!(log, ["waiting"]),
+      other => panic!("{other:?}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    setter.join().unwrap();
   }
 
   #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
@@ -4733,12 +4778,12 @@ mod tools {
       other => panic!("{other:?}"),
     }
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = otter_core::CancelToken::new();
     let setter = {
       let cancel = cancel.clone();
       std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        cancel.store(true, std::sync::atomic::Ordering::Release);
+        cancel.cancel();
       })
     };
     let cancelled = CallOptions {

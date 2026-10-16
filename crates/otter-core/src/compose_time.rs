@@ -21,8 +21,6 @@
 //! charged by size); `Mesh::tick` never meters and is unchanged by it.
 
 use std::cell::Cell;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::diagnostic::{Diagnostic, Phase};
@@ -45,7 +43,7 @@ pub struct Budget {
   /// Engine dispatches and VM instructions, plus what native shards charge
   /// (a unit per byte they allocate).
   pub fuel: Option<u64>,
-  pub cancel: Option<Arc<AtomicBool>>,
+  pub cancel: Option<crate::CancelToken>,
   pub deadline: Option<Instant>,
 }
 
@@ -71,7 +69,7 @@ impl RunBudget {
 }
 
 struct Interrupt {
-  cancel: Option<Arc<AtomicBool>>,
+  cancel: Option<crate::CancelToken>,
   deadline: Option<Instant>,
 }
 
@@ -278,10 +276,7 @@ impl Meter {
       .stop
       .set(used.saturating_add(INTERRUPT_EVERY).min(self.limits.fuel));
     if let Some(interrupt) = &self.interrupt
-      && (interrupt
-        .cancel
-        .as_ref()
-        .is_some_and(|c| c.load(Ordering::Acquire))
+      && (interrupt.cancel.as_ref().is_some_and(|c| c.is_cancelled())
         || interrupt.deadline.is_some_and(|d| Instant::now() >= d))
     {
       return Err(Error::Cancelled);

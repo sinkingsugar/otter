@@ -78,16 +78,55 @@ pub enum WakeMode {
   OnNotify,
 }
 
+/// What a suspended instance waits for, as its last activation said
+/// (`ActivationCtx`): what [`crate::Mesh::wait`] blocks on. A tick still
+/// activates the instance as before; this only says when it can progress.
+/// One byte, like the flag it replaced: a tick tests and resets it for
+/// every instance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Wait {
+  /// Nothing: it runs again on the next tick (a yield, or it never ran).
+  #[default]
+  Ready,
+  /// Its waker (`ActivationCtx::set_waiting`).
+  Waker,
+  /// A time, kept beside it (`ActivationCtx::resume_at`).
+  Timed,
+}
+
+/// An instance's [`Wait`], with the time of a `Wait::Timed` one.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Waiting {
+  pub(crate) wait: Wait,
+  /// When it is due, while `wait` is `Wait::Timed`.
+  pub(crate) at: Option<std::time::Instant>,
+}
+
 /// Per-instance wake flag behind the instance's [`std::task::Waker`]. A wake
 /// after the instance has finished is harmless: the scheduler never resumes
-/// a finished instance.
-#[derive(Default)]
-pub(crate) struct WakeFlag(std::sync::atomic::AtomicBool);
+/// a finished instance. A wake also wakes a thread blocked in
+/// [`crate::Mesh::wait`].
+pub(crate) struct WakeFlag {
+  woken: std::sync::atomic::AtomicBool,
+  signal: std::sync::Arc<crate::wait::Signal>,
+}
 
 impl WakeFlag {
+  pub(crate) fn new(signal: std::sync::Arc<crate::wait::Signal>) -> WakeFlag {
+    WakeFlag {
+      woken: std::sync::atomic::AtomicBool::new(false),
+      signal,
+    }
+  }
+
   /// Returns whether the waker fired since the last call, and clears it.
   pub(crate) fn take(&self) -> bool {
-    self.0.swap(false, std::sync::atomic::Ordering::AcqRel)
+    self.woken.swap(false, std::sync::atomic::Ordering::AcqRel)
+  }
+
+  /// Whether the waker fired since the last [`WakeFlag::take`].
+  pub(crate) fn is_set(&self) -> bool {
+    self.woken.load(std::sync::atomic::Ordering::SeqCst)
   }
 }
 
@@ -97,6 +136,8 @@ impl std::task::Wake for WakeFlag {
   }
 
   fn wake_by_ref(self: &std::sync::Arc<Self>) {
-    self.0.store(true, std::sync::atomic::Ordering::Release);
+    // Before the signal's check of a waiting thread (see `Signal::notify`).
+    self.woken.store(true, std::sync::atomic::Ordering::SeqCst);
+    self.signal.notify();
   }
 }

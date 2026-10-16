@@ -46,7 +46,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use otter_core::diagnostic::{Diagnostic, PathStep};
@@ -54,7 +53,7 @@ use otter_core::fs_access::FsAccess;
 use otter_core::service::Services;
 use otter_core::shard::ShardDef;
 use otter_core::signature::Effects;
-use otter_core::{Catalog, CompiledWire, Mesh, Outcome, Type, Var, WireDef};
+use otter_core::{CancelToken, Catalog, CompiledWire, Mesh, Outcome, Type, Var, WireDef};
 
 use crate::files::{Files, FsFiles};
 use crate::problem::render;
@@ -171,7 +170,7 @@ pub fn call_type() -> Type {
   ])
 }
 
-/// How a call runs: services for the script's shards, a cancellation flag,
+/// How a call runs: services for the script's shards, a cancellation token,
 /// a time limit and a fuel budget. With any of the last three the call runs
 /// metered (`otter_core::Budget`): they are checked every few thousand
 /// instructions, inside loops that never suspend too, and the call runs the
@@ -181,9 +180,9 @@ pub fn call_type() -> Type {
 pub struct CallOptions {
   /// Inserted into the call's mesh (docs/embedding.md, services).
   pub services: Services,
-  /// Set it (from any thread) to cancel the call: it ends with
-  /// [`ToolError::Cancelled`].
-  pub cancel: Option<Arc<AtomicBool>>,
+  /// Cancel it (from any thread) to cancel the call: it ends with
+  /// [`ToolError::Cancelled`], at once even while the call waits.
+  pub cancel: Option<CancelToken>,
   /// The longest the call may run; then it ends with
   /// [`ToolError::TimedOut`].
   pub timeout: Option<Duration>,
@@ -368,9 +367,11 @@ impl Tool {
   }
 
   /// Calls the tool: a fresh mesh on this thread, ticked until the
-  /// function finishes, sleeping briefly while it waits (on I/O, which
-  /// runs on `otter-io`'s runtime, or a `Pause`). Blocks until it
-  /// finishes, fails, is cancelled or times out.
+  /// function finishes. While it waits (on I/O, which runs on `otter-io`'s
+  /// runtime, or a `Pause`) the thread sleeps until the I/O completes, the
+  /// pause is due, the time limit passes or the call is cancelled
+  /// (`Mesh::wait`). Blocks until it finishes, fails, is cancelled or times
+  /// out.
   pub fn call_with(
     &self,
     input: &ToolInput,
@@ -418,10 +419,6 @@ impl Tool {
       Some(limit) if started.elapsed() >= limit => RunError::TimedOut(limit),
       _ => RunError::Cancelled,
     };
-    // While the instance waits, sleep between ticks, longer the longer it
-    // waits (I/O takes milliseconds to seconds), at most `MAX_NAP`.
-    const MAX_NAP: Duration = Duration::from_millis(8);
-    let mut nap = Duration::ZERO;
     loop {
       // `tick` counts every running instance, including wires the call
       // spawned: the call is done when its own instance is. Dropping the
@@ -433,11 +430,7 @@ impl Tool {
       if running == 0 || mesh.outcome(id).is_some() {
         break;
       }
-      if options
-        .cancel
-        .as_ref()
-        .is_some_and(|c| c.load(Ordering::Acquire))
-      {
+      if options.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
         mesh.cancel(id);
         return Err(RunError::Cancelled);
       }
@@ -447,8 +440,7 @@ impl Tool {
         mesh.cancel(id);
         return Err(RunError::TimedOut(limit));
       }
-      nap = (nap * 2).clamp(Duration::from_micros(250), MAX_NAP);
-      std::thread::sleep(nap);
+      mesh.wait(deadline, options.cancel.as_ref());
     }
     match mesh.take_outcome(id) {
       Some(Outcome::Completed(value)) => Ok(value),
