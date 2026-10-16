@@ -20,10 +20,10 @@ Requests go one at a time. Concurrent requests multiplexed over one HTTP/2 conne
 
 ## Running them
 
-The `otter` binary needs a TLS backend for `https`:
+The `otter` binary has TLS (rustls) by default:
 
 ```sh
-cargo build --release -p otter-cli --features otter-io/rustls-ring
+cargo build --release -p otter-cli
 otter tool examples/tools/flights/search-flights.shs        # the definition, as JSON
 otter tool examples/tools/flights/search-flights.shs '{"from": "KIX", "to": "NRT", "date": "2026-11-20", "max-stops": 0}'
 otter tool examples/tools/flights/cheap-dates.shs '{"from": "KIX", "to": "NRT", "from-date": "2026-11-20", "to-date": "2026-11-27"}'
@@ -34,7 +34,7 @@ otter tool examples/tools/flights/cheap-dates.shs '{"from": "KIX", "to": "NRT", 
 `crates/otter-cli/tests/cli.rs` (`mod flights`) loads both tools and checks their definitions and argument checks offline. The live searches are ignored by default, since they need the network and Google may throttle:
 
 ```sh
-cargo test -p otter-cli --features otter-io/rustls-ring --test cli -- --ignored --test-threads 1 flights
+cargo test -p otter-cli --test cli -- --ignored --test-threads 1 flights
 ```
 
 The page layout is Google's and changes without notice; when the live tests fail with no rows, compare a saved page's `ds:1` block against the positions `search-flights.shs` reads.
