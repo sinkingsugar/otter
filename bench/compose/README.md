@@ -55,12 +55,12 @@ The scaling workloads, added 2026-10-16 (same machine):
 
 | Workload | ms | Allocations | Bytes |
 |---|---:|---:|---:|
-| flow-args | 24.0 | 1,065,263 | 114,876,861 |
-| flow-args-flat | 24.9 | 1,138,883 | 116,797,223 |
-| match-cases | 20.2 | 966,988 | 98,935,097 |
-| match-cases-flat | 23.3 | 1,123,523 | 107,826,983 |
-| bound-flows | 28.1 | 1,245,471 | 131,347,385 |
-| bound-flows-flat | 21.9 | 983,253 | 113,571,623 |
+| flow-args | 24.8 | 1,065,262 | 114,483,573 |
+| flow-args-flat | 25.5 | 1,138,882 | 116,354,831 |
+| match-cases | 21.1 | 966,987 | 98,541,785 |
+| match-cases-flat | 23.8 | 1,123,522 | 107,360,015 |
+| bound-flows | 27.9 | 1,245,470 | 130,560,929 |
+| bound-flows-flat | 21.3 | 983,252 | 112,981,775 |
 
 At 30677d3, before the fixes:
 - `shared-table-reads` took 6.2 s, with 192 million allocations and 5.9 GB in total (1,812× its twin);
