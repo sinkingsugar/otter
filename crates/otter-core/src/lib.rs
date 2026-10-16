@@ -21,6 +21,7 @@ pub mod hash;
 #[doc(hidden)]
 pub mod inline;
 pub mod instance;
+pub mod json;
 mod lifecycle;
 pub mod log;
 pub mod object;

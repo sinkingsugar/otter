@@ -46,7 +46,7 @@ pub static EXPECT_FLOAT2: ShardType = leaf_type::<Pure<Expect<ExpectFloat2K>>>()
 pub static EXPECT_FLOAT3: ShardType = leaf_type::<Pure<Expect<ExpectFloat3K>>>();
 pub static EXPECT_FLOAT4: ShardType = leaf_type::<Pure<Expect<ExpectFloat4K>>>();
 
-fn mismatch(name: &str, input: Type, expected: &[TypeName]) -> Error {
+pub(crate) fn mismatch(name: &str, input: Type, expected: &[TypeName]) -> Error {
   let names: Vec<&str> = expected.iter().map(|t| t.name()).collect();
   Error::Diagnostic(Box::new(
     Diagnostic::new(
@@ -630,7 +630,7 @@ impl<P: PureOp> LeafShard for Pure<P> {
   }
 }
 
-const fn pure_desc(
+pub(crate) const fn pure_desc(
   name: &'static str,
   summary: &'static str,
   help: &'static str,
@@ -653,7 +653,7 @@ const fn pure_desc(
 }
 
 /// `Ok(out)` when `input` is one of `accepted`.
-fn one_of(
+pub(crate) fn one_of(
   input: Type,
   accepted: &'static [TypeName],
   out: Type,
@@ -665,7 +665,7 @@ fn one_of(
   }
 }
 
-fn fail(name: &str, what: &str) -> Error {
+pub(crate) fn fail(name: &str, what: &str) -> Error {
   Error::Activation(format!("{name}: {what}"))
 }
 

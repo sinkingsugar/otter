@@ -12,9 +12,11 @@
 pub mod async_shard;
 pub mod control;
 pub mod data;
+pub mod date;
 pub mod leaf;
 pub mod math;
 pub mod sim;
+pub mod text;
 pub mod values;
 
 use std::cell::RefCell;
@@ -102,6 +104,9 @@ pub static CATALOG: &[&ShardType] = &[
   &math::FLOOR,
   &math::CEIL,
   &math::LENGTH,
+  &math::MOD,
+  &math::MAX,
+  &math::MIN,
   &values::LOG,
   &values::STOP,
   &values::IS,
@@ -134,6 +139,36 @@ pub static CATALOG: &[&ShardType] = &[
   &values::EXPECT_FLOAT2,
   &values::EXPECT_FLOAT3,
   &values::EXPECT_FLOAT4,
+  &text::STRING_JOIN,
+  &text::STRING_SPLIT,
+  &text::STRING_REPLACE,
+  &text::STRING_CONTAINS,
+  &text::STRING_STARTS,
+  &text::STRING_ENDS,
+  &text::STRING_TRIM,
+  &text::STRING_TO_UPPER,
+  &text::STRING_TO_LOWER,
+  &text::STRING_ENCODE_URI,
+  &text::STRING_DECODE_URI,
+  &text::SLICE,
+  &text::BYTES_JOIN,
+  &text::TO_BASE64,
+  &text::FROM_BASE64,
+  &text::TO_LEB128,
+  &text::FROM_LEB128,
+  &text::TO_JSON,
+  &text::FROM_JSON,
+  &text::IS_INT,
+  &text::IS_FLOAT,
+  &text::IS_BOOL,
+  &text::IS_STRING,
+  &text::IS_BYTES,
+  &text::IS_SEQ,
+  &text::IS_TABLE,
+  &text::FAIL,
+  &text::SORT,
+  &date::DATE_PARSE,
+  &date::DATE_FORMAT,
   &REPEAT,
   &WHILE,
   &PAUSE,

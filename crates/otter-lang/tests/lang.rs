@@ -4293,3 +4293,172 @@ fn a_guard_in_control_state_is_released_on_every_exit() {
     "released on cancellation"
   );
 }
+
+/// The value a top-level program completes with.
+fn root_value(text: &str) -> Var {
+  completed(&run(text, &no_defines()), "root")
+}
+
+/// The activation error a top-level program fails with.
+fn root_failure(text: &str) -> String {
+  match run(text, &no_defines()).outcomes.into_iter().next() {
+    Some((_, Some(Outcome::Failed(e)))) => e.to_string(),
+    other => panic!("expected a failure, got {other:?}"),
+  }
+}
+
+#[test]
+fn string_shards_split_join_replace_and_test() {
+  let v = root_value(
+    r#"
+"a,,b" | String.Split(",") = parts
+parts | String.Join("+") = joined
+"a-b-a" | String.Replace(find: "a" replacement: "xy") = replaced
+"x=1;y=2" | String.Split(";" keep-separator: true) = kept
+"" | String.Split(",") = empty
+" hi\n" | String.Trim = trimmed
+"Straße" | String.ToUpper = upper
+"ÀB" | String.ToLower = lower
+"hello" | String.Contains("ell") = c
+"hello" | String.Starts("he") = s
+"hello" | String.Ends("xo") = e
+"," = sep
+["p" "q"] | String.Join(sep) = by-var
+[parts joined replaced kept empty trimmed upper lower c s e by-var]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[["a" "" "b"] "a++b" "xy-b-xy" ["x=1;" "y=2"] [""] "hi" "STRASSE" "àb" true true false "p,q"]"#
+  );
+  assert!(root_failure(r#"["a" 1] | String.Join"#).contains("element 1 is Int"));
+  let d = load_or_compose_errors(r#""a" | String.Split("")"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
+}
+
+/// Load or compose errors of a source that must not compile.
+fn load_or_compose_errors(text: &str) -> Vec<Diagnostic> {
+  let report = check(text);
+  assert!(!report.ok(), "expected errors");
+  report.diagnostics
+}
+
+#[test]
+fn slice_takes_characters_elements_and_bytes() {
+  let v = root_value(
+    r#"
+"héllo" | Slice(from: 1 to: 3) = a
+"héllo" | Slice(from: -2) = b
+[1 2 3 4] | Slice(to: -1) = c
+[1 2 3] | Slice(from: 5) = d
+"abc" | StringToBytes | Slice(from: 1) | BytesToString = e
+1 = from
+"abc" | Slice(from: from) = f
+[a b c d e f]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"["él" "lo" [1 2 3] [] "bc" "bc"]"#);
+}
+
+#[test]
+fn encodings_round_trip() {
+  let v = root_value(
+    r#"
+"hello" | ToBase64 = b64
+b64 | FromBase64 | BytesToString = back
+300 | ToLEB128 | ToHex = leb
+-65 | ToLEB128(signed: true) | FromLEB128(signed: true) = signed
+[(1 | ToLEB128) ("ab" | StringToBytes)] | Bytes.Join | ToHex = joined
+"a b/é" | String.EncodeURI = uri
+uri | String.DecodeURI = decoded
+[b64 back leb signed joined uri decoded]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"["aGVsbG8=" "hello" "ac02" -65 "016162" "a%20b%2F%C3%A9" "a b/é"]"#
+  );
+  assert!(root_failure("-1 | ToLEB128").contains("negative"));
+  assert!(root_failure(r#""@@" | FromBase64"#).contains("FromBase64"));
+}
+
+#[test]
+fn json_reads_and_writes_with_ints_and_floats_apart() {
+  let v = root_value(
+    r#"
+"{\"b\": [1, 2.5, null, true], \"a\": \"x\"}" | FromJson = parsed
+parsed | ExpectTable | Take("b") | ExpectSeq | Take(0) = first
+first | IsInt = is-int
+parsed | ToJson = text
+{n: 2.0 s: [1 "q"]} | ToJson(indent: 1) = pretty
+[is-int text pretty]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[true "{\"a\":\"x\",\"b\":[1,2.5,null,true]}" "{\n \"n\": 2.0,\n \"s\": [\n  1,\n  \"q\"\n ]\n}"]"#
+  );
+  assert!(root_failure(r#""{" | FromJson"#).contains("invalid JSON at byte 1"));
+  assert!(root_failure(r#""x" | StringToBytes | ToJson"#).contains("no JSON form"));
+}
+
+#[test]
+fn type_tests_fail_sort_and_scalar_math() {
+  let v = root_value(
+    r#"
+"[1, \"a\", [], {}]" | FromJson | ExpectSeq = xs
+[(xs | Take(0) | IsInt) (xs | Take(1) | IsString) (xs | Take(2) | IsSeq) (xs | Take(3) | IsTable) (xs | Take(0) | IsFloat)] = tests
+[[3 1] [1 2] [3 0]] | Sort = pairs
+[2.5 1 -3] | Sort(desc: true) = numbers
+[(-7 | Mod(3)) (7.5 | Mod(2)) (3 | Max(9)) (3 | Min(2.5))] = math
+// Vectors mix with numbers and same-size vectors per component, as Add does.
+[4 2 3] | ToFloat3 = f3
+[([5.5 -3] | ToFloat2 | Mod(2)) ([1 5 3] | ToFloat3 | Max(f3)) ([1 5] | ToFloat2 | Min(2))] = vectors
+// Constant work, so they evaluate at compose time.
+#( 17 | Mod(5) | Max(1) | Min(10) ) = folded
+[tests pairs numbers math vectors folded]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    "[[true true true true false] [[1 2] [3 0] [3 1]] [2.5 1 -3] [-1 1.5 9 2.5] [@f2(1.5 -1.0) @f3(4.0 5.0 3.0) @f2(1.0 2.0)] 2]"
+  );
+  let d = load_or_compose_errors(r#""a" | Max(1)"#);
+  assert_eq!(d[0].code, "input-type-mismatch");
+  let d = load_or_compose_errors("[1 2 3] | ToFloat3 = v\n[1 2] | ToFloat2 | Min(v)");
+  assert!(
+    d[0]
+      .message
+      .starts_with("Math.Min cannot take Float2 with Float3"),
+    "{}",
+    d[0].message
+  );
+  assert_eq!(
+    root_failure(r#"Maybe({"inner" | Fail} {"caught"} silent: true) | Log  "out" | Fail"#),
+    "activation error: out"
+  );
+  assert!(root_failure(r#"[1 "a"] | Sort"#).contains("cannot order"));
+  assert_eq!(
+    root_failure("1 | Mod(0)"),
+    "activation error: Math.Mod: division by zero"
+  );
+}
+
+#[test]
+fn dates_parse_and_format_in_utc() {
+  let v = root_value(
+    r#"
+"2026-11-16" | Date.Parse(format: "%Y-%m-%d") = t
+t | Add(86400) | Date.Format(format: "%Y-%m-%d") = next
+0 | Date.Format = epoch
+[t next epoch]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[1794787200 "2026-11-17" "1970-01-01 00:00:00"]"#
+  );
+  assert!(root_failure(r#""2026-02-30" | Date.Parse(format: "%Y-%m-%d")"#).contains("not a date"));
+  let d = load_or_compose_errors(r#"0 | Date.Format(format: "%A")"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
+}
