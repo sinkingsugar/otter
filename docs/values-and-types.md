@@ -119,6 +119,8 @@ The process-wide registry stays (scoped registries are deferred), with two chang
 
 A lock-free read path is a later option if compose profiling shows the read lock.
 
+**Freeing (planned, 2026-10-16).** The registry is bounded by the distinct types a process loads; it grows without end only for a host that keeps compiling new code. The fix counts compiled programs, not values: each program (a wire set, a tool, a session revision) owns a scope listing the entries it interned; an entry counts the live scopes using it and returns to a free list at zero, its slot reused under a new generation (a few handle bits, so a debug build catches a stale handle). Counting happens at compose and program drop only: handles stay 32-bit and compare as one integer, and the VM, the engine and table values are unchanged (counting per value would put an atomic operation in every table built in the VM). The open part is values that outlive their program, since a struct table carries its shape: tools are covered by construction (input arrives as map tables from JSON, output leaves as text); for meshes and sessions, struct tables crossing to the host (outcomes, `get_var`, services) either become map tables at the boundary or pin their program's scope. Needed before script-side runtime compilation (`Code.Compile`) or long-running generated code on devices.
+
 ## 6. Numbers mix
 
 Agreed 2026-10-05. 1.x refused `Int` with `Float` in arithmetic and comparisons, which forced workarounds like `Math.Add(0.0)` and `IsMore(0.0)` against `IsMore(0)` in real scripts. In 2.0:
