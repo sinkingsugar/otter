@@ -2,7 +2,8 @@
 //! seconds, in UTC only (there is no time zone database on every target).
 //!
 //! Formats use a `strftime` subset: `%Y` (four or more digits; parsing
-//! reads an optional sign and digits), `%m`, `%d`, `%H`, `%M`, `%S` (two
+//! reads an optional sign and up to 12 digits, four when another number
+//! follows directly, so every formatted date reads back), `%m`, `%d`, `%H`, `%M`, `%S` (two
 //! digits), `%%`; every other character must match itself. 1.x's
 //! `Date.Format` took any `strftime` format from the C library; formats
 //! outside the subset are compose errors here.
@@ -122,10 +123,12 @@ fn parse_date(parts: &[Part], text: &str) -> std::result::Result<i64, String> {
         if negative {
           at += 1;
         }
-        // Up to 9 digits when text ends the year; four when a number
-        // follows directly (`%Y%m%d`).
+        // Up to 12 digits when text ends the year, every year an Int of
+        // seconds reaches (about 292 billion either way), so whatever
+        // `Date.Format` writes reads back; four when a number follows
+        // directly (`%Y%m%d`).
         let max = match parts.get(k + 1) {
-          None | Some(Part::Char(_)) => 9,
+          None | Some(Part::Char(_)) => 12,
           Some(_) => 4,
         };
         let v = number(&mut at, 1, max)?;
@@ -155,7 +158,10 @@ fn parse_date(parts: &[Part], text: &str) -> std::result::Result<i64, String> {
   if h > 23 || mi > 59 || s > 60 {
     return Err(format!("{h:02}:{mi:02}:{s:02} is not a time"));
   }
-  Ok(days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + s)
+  // In i128: the earliest second's day times 86,400 is below i64::MIN
+  // before its time of day is added.
+  let seconds = i128::from(days_from_civil(y, mo, d)) * 86_400 + i128::from(h * 3600 + mi * 60 + s);
+  i64::try_from(seconds).map_err(|_| format!("{y}-{mo:02}-{d:02} is out of range"))
 }
 
 fn format_date(parts: &[Part], seconds: i64) -> String {
@@ -316,6 +322,12 @@ mod tests {
     }
     let day = parse_format("%Y-%m-%d").unwrap();
     assert!(parse_date(&day, "2026-02-29").is_err());
+    // Every Int of seconds formats to text that reads back; a year past
+    // them is an error, not an overflow.
+    for seconds in [i64::MIN, i64::MIN + 1, -1, i64::MAX - 1, i64::MAX] {
+      assert_eq!(parse_date(&f, &format_date(&f, seconds)).unwrap(), seconds);
+    }
+    assert!(parse_date(&day, "999999999999-01-01").is_err());
     assert!(parse_date(&day, "2026-2-1").is_err());
     assert!(parse_date(&day, "2026-02-01x").is_err());
     assert!(parse_format("%Q").is_err());
