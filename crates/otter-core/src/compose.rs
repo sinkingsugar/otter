@@ -270,44 +270,44 @@ fn call_site(c: &CallCompiled) -> CallSite {
   }
 }
 
-/// Lowers branch `k` of a chain of branches (`If`, `Cond`:
-/// [`crate::shards::control::IfCompiled`]) and those after it: the
-/// predicate, a jump past the branch when it is false, the branch, and a
-/// jump to the end, retargeted once the rest is lowered; after the last
-/// branch, `else` or the input. Recursive, so a chain needs no list of
-/// jumps (the depth is the number of branches). One branch is `If`'s code.
+/// Lowers an `If` or `Cond` chain ([`crate::shards::control::IfCompiled`]):
+/// for each branch, the predicate, a jump past the branch when it is false,
+/// the branch, and a jump to the end; after the last branch, `else` or the
+/// input; then every jump to the end is retargeted there. A loop, not a
+/// recursion per branch: a `Cond` with thousands of branches must not take
+/// the stack with it. One branch is `If`'s code.
 fn flat_branches(
   flat: &mut Flat,
   chain: &crate::shards::control::IfCompiled,
-  k: usize,
   saved: Binding,
   input: Type,
 ) {
   use crate::inline::Op;
-  if k == chain.branches {
-    flat.op(Op::get(saved), input);
-    if let Some(otherwise) = chain.otherwise() {
-      flat.append(otherwise);
-      if chain.passthrough {
-        flat.op(Op::get(saved), input);
-      }
+  let mut to_end = Vec::with_capacity(chain.branches);
+  for k in 0..chain.branches {
+    if k > 0 {
+      flat.op(Op::get(saved), input);
     }
-    return;
-  }
-  if k > 0 {
+    flat.append(&chain.flows[2 * k]);
+    let skip = flat.op(Op::JumpIfNot(0), Type::any());
     flat.op(Op::get(saved), input);
+    flat.append(&chain.flows[2 * k + 1]);
+    if chain.passthrough {
+      flat.op(Op::get(saved), input);
+    }
+    to_end.push(flat.op(Op::Jump(0), Type::any()));
+    flat.target(skip);
   }
-  flat.append(&chain.flows[2 * k]);
-  let skip = flat.op(Op::JumpIfNot(0), Type::any());
   flat.op(Op::get(saved), input);
-  flat.append(&chain.flows[2 * k + 1]);
-  if chain.passthrough {
-    flat.op(Op::get(saved), input);
+  if let Some(otherwise) = chain.otherwise() {
+    flat.append(otherwise);
+    if chain.passthrough {
+      flat.op(Op::get(saved), input);
+    }
   }
-  let to_end = flat.op(Op::Jump(0), Type::any());
-  flat.target(skip);
-  flat_branches(flat, chain, k + 1, saved, input);
-  flat.target(to_end);
+  for jump in to_end {
+    flat.target(jump);
+  }
 }
 
 /// A flow's code under construction: nodes, instructions and the node each
@@ -1209,7 +1209,7 @@ impl ComposeCtx<'_> {
       Control::If(i) => {
         let saved = Binding::Local(self.declare_hidden(input));
         flat.op(Op::Set(saved), input);
-        flat_branches(flat, i, 0, saved, input);
+        flat_branches(flat, i, saved, input);
         flat.release(saved, input);
       }
       _ => return false,

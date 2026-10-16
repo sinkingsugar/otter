@@ -449,10 +449,12 @@ impl<const POP: bool> LeafShard for Front<POP> {
     },
     if POP {
       crate::shard_doc!(
-        "Ignores its input. The output has the sequence's element type. An empty sequence is an activation error."
+        "Ignores its input. The output has the sequence's element type. An empty sequence is an activation error. It moves every other element, so draining a long sequence one at a time is quadratic; iterate it instead."
       )
     } else {
-      crate::shard_doc!("An empty sequence stays empty. Passes its input through.")
+      crate::shard_doc!(
+        "An empty sequence stays empty. Passes its input through. It moves every other element, so draining a long sequence one at a time is quadratic."
+      )
     },
     FRONT_PARAMS,
     if POP {
@@ -787,6 +789,8 @@ impl crate::ControlShard for Remove {
         };
       }
       Some(result) => {
+        // A failing predicate ends Remove: release the snapshot now.
+        let result = result.inspect_err(|_| *state = RemoveState::default());
         let selected = matches!(result?, Var::Bool(true));
         if !selected {
           let items = state.items.as_ref().expect("started");

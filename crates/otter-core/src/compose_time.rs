@@ -17,8 +17,8 @@
 //! A mesh can be driven under the same meter at run time ([`Budget`],
 //! `Mesh::tick_budgeted`): fuel, and a cancellation flag and deadline
 //! checked every [`INTERRUPT_EVERY`] units, so even a loop that never
-//! suspends can be stopped. It charges as an evaluation does, with no
-//! value limit; `Mesh::tick` never meters and is unchanged by it.
+//! suspends can be stopped. It counts work only (no value limits, nothing
+//! charged by size); `Mesh::tick` never meters and is unchanged by it.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -184,7 +184,8 @@ impl Meter {
     }
   }
 
-  /// A run-time meter for a budgeted mesh: fuel and interruption only.
+  /// A run-time meter for a budgeted mesh: fuel and interruption only (its
+  /// `interrupt` is what marks it: value accounting is off).
   pub(crate) fn runtime(budget: &Budget) -> Meter {
     Meter {
       interrupt: Some(Interrupt {
@@ -265,6 +266,9 @@ impl Meter {
   #[inline(never)]
   fn stopped(&self, used: u64) -> Result<()> {
     if used > self.limits.fuel {
+      if self.interrupt.is_some() {
+        return Err(out_of_fuel(self.limits.fuel));
+      }
       return Err(budget(format!(
         "the evaluation ran out of fuel (limit {})",
         self.limits.fuel
@@ -288,6 +292,11 @@ impl Meter {
   /// `bytes` are about to be allocated for a value: they must be within the
   /// value limit, and the allocation is charged a unit per byte.
   pub fn allocate(&self, bytes: usize) -> Result<()> {
+    // A run-time budget (it has an interrupt) counts work, not values: no
+    // value limits, nothing walked or charged by size.
+    if self.interrupt.is_some() {
+      return Ok(());
+    }
     self.admit(bytes)?;
     self.charge(bytes as u64)
   }
@@ -295,6 +304,9 @@ impl Meter {
   /// A value grows to `bytes` in place (amortized, nothing copied): only
   /// the value limit applies. The caller charges the work it does.
   pub fn admit(&self, bytes: usize) -> Result<()> {
+    if self.interrupt.is_some() {
+      return Ok(());
+    }
     if bytes > self.limits.value_bytes {
       return Err(budget(format!(
         "a value would grow past the value limit of {} bytes",
@@ -309,6 +321,9 @@ impl Meter {
   /// with an early exit, it must be within the value limit, and the read is
   /// charged by its size. Returns the size.
   pub fn traverse(&self, value: &Var) -> Result<usize> {
+    if self.interrupt.is_some() {
+      return Ok(0);
+    }
     let Some(bytes) = text_size(value, self.limits.value_bytes) else {
       return Err(budget(format!(
         "a value to compare or print is larger than the value limit of {} bytes",
@@ -323,6 +338,9 @@ impl Meter {
   /// table: it must nest less than [`VALUE_DEPTH`] levels. Measured with an
   /// early exit at that depth, and charged a unit per element read.
   pub fn nest(&self, value: &Var) -> Result<()> {
+    if self.interrupt.is_some() {
+      return Ok(());
+    }
     // A widely shared value can hold far more elements than memory: the
     // walk stops when it has read as many as the fuel left pays for.
     let left = self.limits.fuel.saturating_sub(self.fuel.get());
@@ -357,6 +375,17 @@ impl Meter {
       output_bytes,
     }
   }
+}
+
+/// A run-time budget's fuel spent: an `out-of-fuel` activation diagnostic.
+#[cold]
+fn out_of_fuel(fuel: u64) -> Error {
+  Error::Diagnostic(Box::new(Diagnostic::new(
+    Phase::Activate,
+    "activation-error",
+    "out-of-fuel",
+    format!("the run ran out of fuel (budget {fuel})"),
+  )))
 }
 
 /// An `expansion-budget` diagnostic (located by the caller at the `#( )`).

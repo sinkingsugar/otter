@@ -1676,6 +1676,22 @@ fn maybe_without_else_passes_its_input_through() {
   );
 }
 
+/// Cond lowers its branches in a loop: thousands of them compose on a small
+/// stack (the recursion it replaced took about 140 bytes per branch).
+#[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+#[test]
+fn a_cond_with_thousands_of_branches_composes_on_a_small_stack() {
+  let branches = "{false} {2} ".repeat(4_000);
+  let text = format!("1 | Cond({branches}{{true}} {{3}} passthrough: false)");
+  let value = std::thread::Builder::new()
+    .stack_size(128 * 1024)
+    .spawn(move || root_value(&text).to_string())
+    .unwrap()
+    .join()
+    .unwrap();
+  assert_eq!(value, "3");
+}
+
 #[test]
 fn maybe_gives_else_the_error_when_asked() {
   let v = root_value(
@@ -4632,6 +4648,14 @@ mod tools {
     }
   }
 
+  #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+  fn timeout_long() -> CallOptions {
+    CallOptions {
+      timeout: Some(std::time::Duration::from_secs(60)),
+      ..CallOptions::default()
+    }
+  }
+
   /// A loop that never suspends runs inside one tick: with a time limit,
   /// a cancellation flag or fuel the call runs metered, and each stops it.
   #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
@@ -4677,6 +4701,21 @@ mod tools {
       }
       other => panic!("{other:?}"),
     }
+    // A budget counts work only: values nested deeper than compose-time
+    // evaluation allows, or large shared values pushed, are as without one.
+    let deep = load(
+      "@fn(Deep input: {input: {} env: {} working-dir: String} output: String params: {} {\n  none | ToAny | Var(v)\n  Repeat({[v] | ToAny | Update(v)} times: 70)\n  [] | Var(big)  Repeat({1 | Push(big)} times: 20000)\n  [] | Var(into)  Repeat({big | Push(into)} times: 200)\n  \"done\"\n})\n{definition: {name: \"deep\"} use: \"Deep\"}",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+      deep
+        .call_with(&ToolInput::from_json("{}").unwrap(), &timeout_long())
+        .unwrap()
+        .text,
+      "done"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
     // Fuel is counted from each call's start, and a budgeted call that
     // finishes in it returns as usual.
     let out = tool

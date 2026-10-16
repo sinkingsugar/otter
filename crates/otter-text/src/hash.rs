@@ -8,9 +8,8 @@
 //! (what `ToHex` prints is what `sha256sum`, `b3sum` and the like print).
 //! XXH3 is not cryptographic: its 64-bit hash is an Int (the hash's bits,
 //! so it may be negative; `ToHex` prints its digits, without `xxhsum`'s
-//! leading zeros), and its
-//! 128-bit hash is 16 bytes in the canonical, big-endian order `xxhsum`
-//! prints. SHA-1 and MD5 are broken for security; they are here to match
+//! leading zeros), and its 128-bit hash is 16 bytes in the canonical,
+//! big-endian order `xxhsum` prints. SHA-1 and MD5 are broken for security; they are here to match
 //! checksums other systems publish.
 
 use otter_core::compose::ComposeCtx;

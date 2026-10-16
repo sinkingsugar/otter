@@ -451,8 +451,11 @@ impl Tool {
     match mesh.take_outcome(id) {
       Some(Outcome::Completed(value)) => Ok(value),
       Some(Outcome::Failed(otter_core::Error::Cancelled)) => Err(interrupted()),
-      // The meter's own words are a compose-time evaluation's.
-      Some(Outcome::Failed(otter_core::Error::Diagnostic(d))) if d.code == "expansion-budget" => {
+      // Fuel spent: in the engine's step (`out-of-fuel`), or in a charge
+      // shared with compose-time evaluation, worded as one.
+      Some(Outcome::Failed(otter_core::Error::Diagnostic(d)))
+        if d.code == "out-of-fuel" || d.code == "expansion-budget" =>
+      {
         Err(RunError::Failed(format!(
           "the call ran out of fuel (budget {})",
           options.fuel.unwrap_or(u64::MAX)
