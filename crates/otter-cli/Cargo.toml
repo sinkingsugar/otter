@@ -17,12 +17,12 @@ path = "src/main.rs"
 # The command ships with TLS (rustls on ring): tools fetch https. A build
 # without it: `--no-default-features --features docs`.
 default = ["docs", "tls"]
-docs = ["otter-io/docs"]
+docs = ["otter-io/docs", "otter-text/docs"]
 tls = ["otter-io/rustls-ring"]
 
 [dependencies]
 otter-core = { path = "../otter-core" }
 otter-io = { path = "../otter-io", default-features = false }
 otter-lang = { path = "../otter-lang" }
-otter-text = { path = "../otter-text" }
+otter-text = { path = "../otter-text", default-features = false }
 tokio = { version = "1", features = ["signal"] }
