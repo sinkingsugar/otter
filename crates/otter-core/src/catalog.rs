@@ -13,11 +13,53 @@ use crate::shard::ShardType;
 /// The JSON schema identifier of catalog documents.
 pub const SCHEMA: &str = "otter-catalog/1";
 
+/// The catalog index's hasher: a word at a time (FxHash's multiply and
+/// rotate), a few instructions per eight bytes of a shard name, where
+/// SipHash costs about what the binary search it replaced did. Fixed, so
+/// lookups execute the same instructions in every run (`crate::hash`).
+/// The keys are the catalog's own names, not input.
+type NameHash = std::hash::BuildHasherDefault<NameHasher>;
+
+#[derive(Default)]
+struct NameHasher(u64);
+
+impl NameHasher {
+  #[inline(always)]
+  fn add(&mut self, word: u64) {
+    self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+  }
+}
+
+impl std::hash::Hasher for NameHasher {
+  #[inline]
+  fn write(&mut self, bytes: &[u8]) {
+    let (words, rest) = bytes.as_chunks::<8>();
+    for word in words {
+      self.add(u64::from_le_bytes(*word));
+    }
+    if !rest.is_empty() {
+      let mut word = [0u8; 8];
+      word[..rest.len()].copy_from_slice(rest);
+      self.add(u64::from_le_bytes(word));
+    }
+  }
+
+  #[inline]
+  fn write_u8(&mut self, byte: u8) {
+    self.add(u64::from(byte));
+  }
+
+  #[inline]
+  fn finish(&self) -> u64 {
+    self.0
+  }
+}
+
 pub struct Catalog {
   shards: Vec<&'static ShardType>,
-  /// Every name and alias with its shard, sorted by name: `get` is a binary
-  /// search, not a scan that grows with the catalog.
-  index: Vec<(&'static str, &'static ShardType)>,
+  /// Every name and alias with its shard: `get` costs the same however
+  /// large the catalog grows (a scan, then a binary search, grew with it).
+  index: std::collections::HashMap<&'static str, &'static ShardType, NameHash>,
   /// Object types scripts can name in signatures (docs/host-requirements.md H1).
   objects: Vec<&'static ObjectType>,
 }
@@ -29,10 +71,13 @@ impl Catalog {
   /// lowercase label (golden-path.md D3: uppercase is a shard).
   pub fn new(lists: &[&[&'static ShardType]]) -> Result<Catalog, String> {
     let mut shards: Vec<&'static ShardType> = Vec::new();
-    let mut index = Vec::new();
+    let mut index = std::collections::HashMap::with_hasher(NameHash::default());
     for &ty in lists.iter().flat_map(|list| list.iter()) {
-      index.push((ty.name(), ty));
-      index.extend(ty.desc.aliases.iter().map(|&alias| (alias, ty)));
+      for name in std::iter::once(ty.name()).chain(ty.desc.aliases.iter().copied()) {
+        if index.insert(name, ty).is_some() {
+          return Err(format!("duplicate shard name in catalog: {name}"));
+        }
+      }
       if let crate::describe::Params::Declared(params) = ty.desc.params
         && let Some(p) = params.iter().find(|p| !is_label(p.name))
       {
@@ -44,10 +89,6 @@ impl Catalog {
         ));
       }
       shards.push(ty);
-    }
-    index.sort_unstable_by_key(|&(name, _)| name);
-    if let Some(pair) = index.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-      return Err(format!("duplicate shard name in catalog: {}", pair[0].0));
     }
     shards.sort_by_key(|s| s.name());
     Ok(Catalog {
@@ -101,8 +142,7 @@ impl Catalog {
 
   /// The shard with this name or alias.
   pub fn get(&self, name: &str) -> Option<&'static ShardType> {
-    let i = self.index.binary_search_by(|&(n, _)| n.cmp(name)).ok()?;
-    Some(self.index[i].1)
+    self.index.get(name).copied()
   }
 
   /// Every name the catalog resolves: canonical names and aliases.
