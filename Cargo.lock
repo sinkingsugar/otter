@@ -743,6 +743,7 @@ name = "otter-io"
 version = "0.1.0"
 dependencies = [
  "otter-core",
+ "otter-lang",
  "reqwest",
  "ring",
  "rustls",

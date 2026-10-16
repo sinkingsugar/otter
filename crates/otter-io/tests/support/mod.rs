@@ -12,10 +12,20 @@
 //!   then waits until released before sending the rest (`world`).
 //! - `/echo-headers`: 200 with the request's `x-` and `user-agent` header
 //!   lines as the body, names lowercased, sorted, one `name: value` per line.
+//! - `/binary`: 200 with the 3-byte body `ff 00 01` (not UTF-8);
+//! - `/twice`: 200 `hello` with the header `x-twice` sent twice (`a`, `b`);
+//! - `/drop`: closes the connection without responding (a transport error);
+//! - `/flaky`: like `/drop` for the first two requests, then 200 `recovered`;
+//! - `/busy`: 503 `busy` for the first request, then 200 `recovered`.
+//!
+//! [`TestServer::received`] counts the requests a path received.
 //!
 //! Events: `received <path>`, `partial-sent <path>`, `completed <path>`,
 //! `client-closed <path>` (the client closed the connection while the server
 //! was waiting to respond).
+
+// Each test binary uses a part of it.
+#![allow(dead_code)]
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -33,6 +43,17 @@ struct State {
 impl State {
   fn record(&self, event: String) {
     self.events.lock().unwrap().push(event);
+  }
+
+  fn received(&self, path: &str) -> usize {
+    let event = format!("received {path}");
+    self
+      .events
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|e| **e == event)
+      .count()
   }
 }
 
@@ -68,6 +89,11 @@ impl TestServer {
 
   pub fn events(&self) -> Vec<String> {
     self.state.events.lock().unwrap().clone()
+  }
+
+  /// How many requests `path` received so far.
+  pub fn received(&self, path: &str) -> usize {
+    self.state.received(path)
   }
 
   /// Waits until `event` has been recorded, up to `timeout`.
@@ -135,11 +161,22 @@ fn wait_release_or_close(stream: &mut TcpStream, state: &State) -> bool {
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+  respond_with(stream, status, "", body.as_bytes())
+}
+
+/// A response with extra header lines (each ending in `\r\n`).
+fn respond_with(
+  stream: &mut TcpStream,
+  status: &str,
+  headers: &str,
+  body: &[u8],
+) -> std::io::Result<()> {
   write!(
     stream,
-    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n",
     body.len()
   )?;
+  stream.write_all(body)?;
   stream.flush()
 }
 
@@ -151,6 +188,28 @@ fn handle(mut stream: TcpStream, state: &State) {
   let done = match path.as_str() {
     "/ok" => respond(&mut stream, "200 OK", "hello").is_ok(),
     "/missing" => respond(&mut stream, "404 Not Found", "nope").is_ok(),
+    "/binary" => respond_with(&mut stream, "200 OK", "", &[0xff, 0x00, 0x01]).is_ok(),
+    "/twice" => respond_with(
+      &mut stream,
+      "200 OK",
+      "X-Twice: a\r\nX-Twice: b\r\n",
+      b"hello",
+    )
+    .is_ok(),
+    "/drop" => return,
+    "/flaky" => {
+      if state.received(&path) <= 2 {
+        return;
+      }
+      respond(&mut stream, "200 OK", "recovered").is_ok()
+    }
+    "/busy" => {
+      if state.received(&path) <= 1 {
+        respond(&mut stream, "503 Service Unavailable", "busy").is_ok()
+      } else {
+        respond(&mut stream, "200 OK", "recovered").is_ok()
+      }
+    }
     "/echo-headers" => {
       let mut echoed: Vec<String> = headers
         .iter()

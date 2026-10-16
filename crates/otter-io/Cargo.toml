@@ -1,6 +1,6 @@
 [package]
 name = "otter-io"
-description = "Otter I/O shards (HTTP), on a shared Tokio runtime"
+description = "Otter I/O shards (HTTP, filesystem), on a shared Tokio runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -26,3 +26,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
 ring = { version = "0.17", optional = true }
+
+[dev-dependencies]
+otter-lang = { path = "../otter-lang", default-features = false }

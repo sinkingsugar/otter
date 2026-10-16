@@ -1,16 +1,34 @@
-//! Otter I/O shards. Native only for now: browser integration (fetch
-//! instead of sockets, the browser event loop instead of Tokio) is separate
-//! work.
+//! Otter I/O shards: HTTP ([`http`]) and the filesystem ([`fs`]). Native
+//! only for now: browser integration (fetch instead of sockets, the browser
+//! event loop instead of Tokio) is separate work.
 //!
 //! [`runtime`] owns the integration with the async runtime, outside any
 //! shard: shards spawn their I/O there and poll the returned [`IoTask`] from
 //! the mesh thread, through the shared `AsyncShard` adapter, so they work on
 //! both schedulers and never block.
 
+pub mod fs;
 pub mod http;
 pub mod runtime;
 
 pub use runtime::{CancellationToken, IoTask};
 
 /// Every shard type in this crate, for building a `otter_core::Catalog`.
-pub static CATALOG: &[&otter_core::ShardType] = &[&http::GET];
+pub static CATALOG: &[&otter_core::ShardType] = &[
+  &http::GET,
+  &fs::READ,
+  &fs::WRITE,
+  &fs::EXISTS,
+  &fs::IS_FILE,
+  &fs::IS_DIRECTORY,
+  &fs::ITERATE,
+  &fs::CREATE_DIRECTORIES,
+  &fs::REMOVE,
+  &fs::REMOVE_ALL,
+  &fs::COPY,
+  &fs::RENAME,
+  &fs::path::JOIN,
+  &fs::path::EXTENSION,
+  &fs::path::FILENAME,
+  &fs::path::PARENT,
+];
