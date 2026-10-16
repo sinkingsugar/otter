@@ -97,6 +97,8 @@ The surveys' working files are not part of this repository; the numbers above ar
 - **Script side:** `Code.Compile(source)` (async, outputs a definition handle or fails with diagnostics) and `Spawn` on that handle, with the same restrictions and compose-time budgets (`EvalLimits`).
 - **Memory:** a long-running application compiling generated code cannot keep a type registry and compose cache that never free. Scoped registries (types and shapes owned by a compilation unit and freed with it) and a bounded compose cache become prerequisites. Both are already listed as open in `current-state.md`.
 
+**Status (2026-10-16): the host side, minimal, is done** as `otter_lang::Tool` ([embedding.md §6](embedding.md#6-tools)): load a script with a catalog (the catalog is the forbidden list), get its definition (name, description, JSON Schema parameters) and inferred effects, call it with JSON arguments, host settings, a working directory, services, a cancellation flag and a time limit, on a fresh mesh per call; `otter tool` drives it from the command line. Each tool owns its program and compiled call wire, but compiles into the process-wide type registry, so the memory item above still stands, as do compiling into an already running mesh, the script-side `Code.Compile`, and the soak gate in §7.
+
 ### H9. Platform and configuration branching
 
 **Need.** Scripts select code by platform and build configuration (`@if` 99, `@platform` 28, `@env` 18), including code that uses shards which do not exist on other platforms. One script calls a host shard inside `#( )` to compute a path, which 2.0's compose-time rules correctly refuse.
@@ -171,6 +173,8 @@ No design decisions, mostly volume. The core shards real scripts use and 2.0 lac
 - **Parameter parity on existing names:** `Get(default:)`, `Http.Get`'s headers, bytes, retry and full-response options, the `Match` and `Once` options the scripts use.
 - **JSON** (`ToJson`, `FromJson`). **Decision:** the mapping of ints against floats, bytes, none and non-string keys.
 
+**Done (2026-10-16), the text-tool subset:** `String.Join`, `String.Split`, `String.Trim`, `String.Contains`, `String.Starts`, `String.Ends`, `String.Replace`, `String.ToLower`/`String.ToUpper`, `String.EncodeURI`/`String.DecodeURI`; `Slice` (strings by character, sequences, bytes), `Sort`, `Bytes.Join`; `IsString`, `IsTable`, `IsSeq`, `IsInt`, `IsFloat`, `IsBool`, `IsBytes`; `Fail`; `ToBase64`/`FromBase64`, `ToLEB128`/`FromLEB128`; `Date.Parse`/`Date.Format` (UTC, a `strftime` subset); `Math.Mod`, `Math.Max`, `Math.Min`; `Http.Get`'s `headers`; `ToJson`/`FromJson`. **JSON decided:** `null` is none; a number without a fraction or exponent that fits in 64 bits is an Int, any other a Float, and a Float is always written with a fraction or exponent (`2.0`), so text reads back as the same value; numbers out of the f64 range, NaN and infinities are errors; objects are tables (string keys, as JSON's; key order not kept, a repeated key keeps its last value); float vectors are written as arrays; byte strings and objects have no JSON form (encode bytes with `ToBase64`); nesting is limited (128, 32 on ESP-IDF). The codec is hand-written in `otter-core` (`json.rs`), not serde_json: the core has no dependencies and runs on ESP-IDF and WASI, the codec reads straight into values with no intermediate tree, and the Int/Float rule and the depth limit would need custom code on serde_json anyway. The rest of each group above is still open.
+
 ## 4. Modules
 
 Each depends on the decisions above (objects, services, cleanup, cancellation). Where modules live is itself a decision; proposal: crates in this workspace (`shards-db`, `shards-llm`, …), native-only by default, each behind its own feature.
@@ -181,7 +185,7 @@ Each depends on the decisions above (objects, services, cleanup, cancellation). 
 | http | Methods, headers, bytes, retry, full response, streaming reads (a stream object, H1) on the shared runtime; a server on hyper, one spawned handler per connection | L |
 | llm | Own `-sys` crate (cmake and bindgen over `llama.h`, `mtmd.h`, and later `whisper.h`, one ggml); models and contexts in a service; load, add-text, add-image, embed and generate as async shards (generation stays one token per activation, as in 1.x, so streaming needs no new mechanism); abort callback for cancellation (H6); Metal on Apple | L (XL with vision, speech and every target) |
 | fs | Async reads and writes, leaf path functions | M |
-| json | Leaf encode and decode on serde_json, mapping per §3 | S–M |
+| json | Done: `ToJson`/`FromJson` in the core, a hand-written codec, mapping per §3 | done |
 | imaging | `Image` object (H2), decode, encode, crop, resize on the `image` crate | M |
 | events, channels | Mesh service with async receive (H5) | M |
 | ssh, local shell | Port the shared session code; sessions as objects; async waits | M |

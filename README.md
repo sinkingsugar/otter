@@ -47,7 +47,7 @@ bench/http-concurrency/run.sh path/to/1.x/shards                              # 
 - `crates/otter-core`: the runtime core: compose, the scheduler (`stackless/`: frame arena, engine, mesh), lifecycle helpers, and the prototype shards (`LeafShard`/`AsyncShard` implementations, plus control flow).
 - `crates/otter-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only; TLS via the `rustls-ring` or `native-tls` feature.
 - `crates/otter-lang`: the language frontend: parser, lowering to wire definitions with a source map, `check`/`run`, and host-driven `Session` execution with state-preserving reload of edited functions.
-- `crates/otter-cli`: the `otter` command: `cargo run -p otter-cli -- check --json file.shs`, `run`, `watch`, `describe`, `search`. File watching and warm host sessions are covered in [the embedding guide](docs/embedding.md#5-warm-sessions-and-hot-reload).
+- `crates/otter-cli`: the `otter` command: `cargo run -p otter-cli -- check --json file.shs`, `run`, `watch`, `describe`, `search`, `tool`. File watching and warm host sessions are covered in [the embedding guide](docs/embedding.md#5-warm-sessions-and-hot-reload), tools a host loads and calls in [its §6](docs/embedding.md#6-tools).
 
 ## Development
 

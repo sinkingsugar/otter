@@ -5,7 +5,7 @@ How a Rust program (the host) adds its own shards and runs Shards scripts on the
 ## 1. Crates
 
 - `otter-core`: values, types, the shard traits, compose, and the scheduler (`Mesh`).
-- `otter-lang`: source to wire definitions, `check` and `run`.
+- `otter-lang`: source to wire definitions, `check` and `run`, sessions with hot reload (§5), and tools (§6).
 - `otter-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work.
 
 Depend on them by path or git. Host shards live in the host's own crate, and nothing in this repository needs to know about them.
@@ -304,3 +304,54 @@ from its own watcher or command channel.
 ### Compose-time evaluation limits (M8)
 
 `#( ... )` runs a pipeline while the mesh composes ([metaprogramming.md §2](metaprogramming.md#2-m8-compose-time-evaluation)). `Mesh::set_eval_limits(EvalLimits { fuel, depth, value_bytes, output_bytes })` sets its budgets; the defaults are small enough for the device (`EvalLimits::default()`), and a preserving revision keeps them. A result cached under larger limits is not accepted under smaller ones. Only the core shards on the audited list in `compose_time.rs` run at compose time: a host shard is never eligible, whatever its effects, and `#( )` reaching one is a `not-compose-time` diagnostic. `LeafCtx::meter()` is `None` at run time; it exists for the listed shards, which charge their work to it.
+
+## 6. Tools
+
+A **tool** is a script a host loads while it runs and calls with a table of arguments, getting text back: what an agent host offers a model as a function to call (`otter_lang::Tool`, the host side of [host-requirements.md H8](host-requirements.md#h8-compiling-code-while-the-program-runs), in its smallest form). The script declares functions and ends with its definition, a table its top-level code outputs:
+
+```shards
+@fn(Greet input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input.name | If({IsString} {ExpectString} {"" | Fail}) = name
+  f"Hello, {name}!"
+})
+
+{
+  definition: {
+    name: "greet"
+    description: "Greets someone."
+    parameters: {type: "object" properties: {name: {type: "string"}} required: ["name"]}
+  }
+  use: "Greet"
+}
+```
+
+`definition` is what the model is told (`parameters` is JSON Schema, passed on as written); `use` names the function a call runs. That function takes the call table: `input` the arguments, `env` the host's settings for the tool (any table the host passes), `working-dir` the directory it works in. It outputs the result: a String as it is, any other value as JSON.
+
+```rust
+use otter_lang::{CallOptions, MemoryFiles, Source, Tool, ToolError, ToolInput};
+
+let catalog = Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG])?;
+// Parses, lowers and composes everything once: problems are located
+// diagnostics (`ToolError::Compile`) before the tool is offered.
+let tool = Tool::load_with(Source::new("greet.shs", text), &catalog, &defines, &MemoryFiles::default())?;
+let d = tool.definition();
+offer(&d.name, &d.description, &d.parameters_json());
+
+// A model asked for a call: its arguments are JSON.
+let input = ToolInput::from_json(r#"{"name": "Ann"}"#)?
+  .with_env(settings)
+  .with_working_dir("/work");
+let options = CallOptions { services, cancel: Some(flag), timeout: Some(Duration::from_secs(60)) };
+match tool.call_with(&input, &options) {
+  Ok(out) => reply(&out.text),                         // `out.log`: what the call logged
+  Err(ToolError::Failed { message, log }) => reply(&message), // `Fail`, an activation error
+  Err(e) => reply(&e.to_string()),                     // cancelled, timed out, bad input
+}
+```
+
+- **Loading:** `Tool::load` reads `@include` and `@read` files from the filesystem; `Tool::load_with` takes defines and any `Files` (§3). `files()` lists what the script read, for a host that reloads tools when they change. The top-level code must only build the definition: no I/O, waiting or clock (`ToolError::Definition` otherwise). The function's declared input must accept the call table, checked at load.
+- **What a tool may use** is the catalog it loads with: a host's list of forbidden shards is a smaller catalog. `effects()` reports what a call may do (I/O, waiting, the clock, randomness, undeclared host effects), inferred through everything the function calls; a tool with `Effects::NONE` only computes. Effects are declared by shards, a trusted contract, not a sandbox.
+- **Calling:** each call runs the function, composed once at load, on a fresh mesh on the calling thread, and blocks until it finishes, fails, is cancelled (`CallOptions::cancel`, an `AtomicBool` set from any thread) or times out; `services` go into the call's mesh (§2). From async code call it on a blocking thread (`tokio::task::spawn_blocking`). A `Tool` is cheap to clone and `Send + Sync`; calls are independent and may run concurrently. While the function waits on I/O the calling thread sleeps between ticks, at most 8 ms.
+- **The command line:** `otter tool <file>` prints the definition as JSON; `otter tool <file> '<json arguments>'` calls it, printing the output on standard output and the log on standard error. The `otter` binary has no TLS backend by default (`otter-io`'s `rustls-ring` or `native-tls` feature adds one), so a tool requesting `https` URLs needs one of those features enabled.
+
+`crates/otter-lang/tests/lang.rs` (`mod tools`) covers loading, definitions, calls, failures, cancellation, time limits and effects; [`examples/tools/flights`](../examples/tools/flights/README.md) holds two real tools.

@@ -36,8 +36,9 @@ This repository should be usable without previous chat history or private agent 
 - `crates/otter-core`: compose (`compose.rs`), the shard contract (`shard.rs`), the scheduler (`stackless/`: frame arena, engine, mesh), shared lifecycle helpers (`lifecycle.rs`), and the prototype shards (`shards/`).
 - `crates/otter-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only.
 - `crates/otter-lang`: the language frontend: hand-written lexer and parser with spans, lowering to `WireDef`/`ShardDef` with a source map, and `check`/`run` (`docs/surface-syntax-review.md`).
-- `crates/otter-cli`: the `otter` command (`check [--json]`, `run`, `watch`, `describe`, `search`, `catalog`).
+- `crates/otter-cli`: the `otter` command (`check [--json]`, `run`, `watch`, `describe`, `search`, `catalog`, `tool`).
 - `bench/`: benchmarks matched with 1.x (`shards-1x/`, `http-concurrency/`), compose costs gated in CI (`compose/`), and the authoring eval (`authoring/`, golden path §8; its README says how to run it).
+- `examples/tools`: tool scripts a host loads at run time (`otter_lang::Tool`, `docs/embedding.md` §6), with their tests in `otter-cli/tests/cli.rs`.
 - `examples/esp32`: ESP-IDF firmware embedding the core and frontend on the stackless scheduler; a separate workspace with its own lockfile (`docs/esp32.md`).
 
 ## Core rules
