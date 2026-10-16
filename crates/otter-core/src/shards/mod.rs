@@ -57,13 +57,14 @@ pub static IF: ShardType = ShardType::new(control::IF_DESC).implemented_by::<sl:
 pub static WHEN_NOT: ShardType =
   ShardType::new(control::WHEN_NOT_DESC).implemented_by::<control::WhenNot>();
 pub static COND: ShardType = ShardType::new(control::COND_DESC).implemented_by::<control::Cond>();
-pub static MATCH: ShardType = ShardType::new(control::MATCH_DESC).implemented_by::<sl::Match>();
+pub static MATCH: ShardType =
+  ShardType::new(control::MATCH_DESC).composed_by(control::compose_match_node);
 pub static MAYBE: ShardType = ShardType::new(control::MAYBE_DESC).controlled_by::<control::Maybe>();
 pub static ALL: ShardType = ShardType::new(control::ALL_DESC).implemented_by::<sl::All>();
 pub static ANY: ShardType = ShardType::new(control::ANY_DESC).implemented_by::<sl::Any>();
 pub static RUN: ShardType = ShardType::new(control::RUN_DESC).implemented_by::<sl::Run>();
 pub static SUB: ShardType = ShardType::new(SUB_DESC).implemented_by::<sl::Sub>();
-pub static ONCE: ShardType = ShardType::new(ONCE_DESC).implemented_by::<sl::Once>();
+pub static ONCE: ShardType = ShardType::new(ONCE_DESC).composed_by(compose_once_node);
 pub static REPEAT: ShardType = ShardType::new(REPEAT_DESC).implemented_by::<sl::Repeat>();
 pub static WHILE: ShardType = ShardType::new(WHILE_DESC).implemented_by::<sl::While>();
 pub static PAUSE: ShardType = ShardType::new(PAUSE_DESC).implemented_by::<sl::Pause>();
@@ -684,39 +685,124 @@ pub(crate) fn compose_update(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Co
   })
 }
 
-pub static GET_PARAMS: &[ParamDecl] = &[decl(
-  "variable",
-  crate::shard_doc!("The variable to read; it must be definitely assigned here."),
-  Forms::VARIABLE,
-  NONE_TYPES,
-  Requirement::Required,
-)];
+pub static GET_PARAMS: &[ParamDecl] = &[
+  decl(
+    "variable",
+    crate::shard_doc!("The variable to read; it must be definitely assigned here."),
+    Forms::VARIABLE,
+    NONE_TYPES,
+    Requirement::Required,
+  ),
+  decl(
+    "key",
+    crate::shard_doc!(
+      "Read this key of the table the variable holds (with `default`): a String literal or variable."
+    ),
+    Forms::LITERAL.or(Forms::VARIABLE),
+    &[TypeName::String],
+    Requirement::Optional,
+  ),
+  decl(
+    "default",
+    crate::shard_doc!(
+      "Output this instead when the key is missing or the value is not of the default's type: a literal or a variable."
+    ),
+    Forms::LITERAL.or(Forms::VARIABLE),
+    NONE_TYPES,
+    Requirement::Optional,
+  ),
+];
 
 pub const GET_DESC: ShardDesc = ShardDesc {
   name: "Get",
   version: 1,
   summary: crate::shard_doc!("Outputs a variable's value."),
   help: crate::shard_doc!(
-    "Ignores its input. Reading a variable that is only assigned in a branch or loop body that might not run is a compose error."
+    "Ignores its input. Reading a variable that is only assigned in a branch or loop body that might not run is a compose error. With `default`, Get outputs the variable's value (or, with `key`, the value at that key of the table it holds) when it is of the default's type, and the default otherwise: when the key is missing, or the value has another type. A variable that may not exist has no default: declare it, or pass an open table. On a fixed table a literal `key` must be one of its keys, as for Take."
   ),
   params: Params::Declared(GET_PARAMS),
   input: InputDesc::Ignored,
-  output: OutputDesc::Dynamic(crate::shard_doc!("the variable's type")),
+  output: OutputDesc::Dynamic(crate::shard_doc!(
+    "the variable's type; the default's type with `default`"
+  )),
   targets: Targets::All,
   aliases: &[],
   effects: crate::signature::Effects::NONE,
   lifetime: crate::signature::Lifetime::Stateless,
 };
 
-pub(crate) fn compose_get(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Binding>> {
+pub(crate) fn compose_get(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+) -> Result<Composed<leaf::GetCode>> {
   let name = variable(args, "variable");
   let info = ctx
     .read_var(name, "Get")
     .map_err(|e| e.with_param("variable", args.param_index("variable")))?;
+  let key = Operand::compose_optional_arg(args, "key", "Get", ctx)?;
+  let Some((default, accept)) = Operand::compose_optional_arg(args, "default", "Get", ctx)? else {
+    if key.is_some() {
+      return Err(get_error(
+        args,
+        "key",
+        "Get with `key` needs `default:`; without one, read the key as `table.key`",
+      ));
+    }
+    // A plain read: the VM's instruction.
+    return Ok(Composed {
+      compiled: leaf::GetCode::Plain(info.binding),
+      output: info.ty,
+    });
+  };
+  let key = match key {
+    None => None,
+    Some((key, _)) => {
+      let TypeDesc::Table(table) = info.ty.desc() else {
+        return Err(get_error(
+          args,
+          "key",
+          &format!("Get with `key` reads a table, but {name} is {}", info.ty),
+        ));
+      };
+      // A fixed table has every key it lists; one it does not is a typo.
+      if let Operand::Const(Var::String(k)) = &key
+        && table.rest.is_none()
+        && table
+          .keys
+          .binary_search_by(|(n, _)| (**n).cmp(&***k))
+          .is_err()
+      {
+        return Err(get_error(
+          args,
+          "key",
+          &format!("{} has no key `{}`", info.ty, &***k),
+        ));
+      }
+      Some(key)
+    }
+  };
   Ok(Composed {
-    compiled: info.binding,
-    output: info.ty,
+    compiled: leaf::GetCode::Default {
+      binding: info.binding,
+      key,
+      default,
+      accept,
+    },
+    output: accept,
   })
+}
+
+fn get_error(args: &Args, param: &'static str, message: &str) -> Error {
+  Error::Diagnostic(Box::new(
+    Diagnostic::new(
+      Phase::Compose,
+      "compose-error",
+      "invalid-argument-value",
+      message.to_string(),
+    )
+    .shard("Get")
+    .param(param, Some(args.param_index(param))),
+  ))
 }
 
 pub static INC_PARAMS: &[ParamDecl] = &[decl(
@@ -1090,22 +1176,33 @@ pub(crate) fn compose_when(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Comp
   compose_predicate_and_body(pred, body, ctx, "When")
 }
 
-pub static ONCE_PARAMS: &[ParamDecl] = &[decl(
-  "action",
-  crate::shard_doc!(
-    "The flow to run on the first activation. Variables it assigns are definitely assigned after Once."
+pub static ONCE_PARAMS: &[ParamDecl] = &[
+  decl(
+    "action",
+    crate::shard_doc!(
+      "The flow to run on the first activation. Variables it assigns are definitely assigned after Once."
+    ),
+    Forms::FLOW,
+    NONE_TYPES,
+    Requirement::Required,
   ),
-  Forms::FLOW,
-  NONE_TYPES,
-  Requirement::Required,
-)];
+  decl(
+    "every",
+    crate::shard_doc!(
+      "Run the action again every this many seconds: on the first activation at or after each scheduled time."
+    ),
+    Forms::LITERAL,
+    &[TypeName::Int, TypeName::Float],
+    Requirement::Optional,
+  ),
+];
 
 pub const ONCE_DESC: ShardDesc = ShardDesc {
   name: "Once",
   version: 1,
   summary: crate::shard_doc!("Runs an `action` flow on the first activation only."),
   help: crate::shard_doc!(
-    "The `action` flow receives Once's input. Once passes its input through. If the `action` flow suspends during the first run, it resumes there; it never runs again after completing. If it fails (an error caught by Maybe), it runs again on the next activation. A Stop, Restart or Return inside the `action` flow propagates."
+    "The `action` flow receives Once's input. Once passes its input through. If the `action` flow suspends during the first run, it resumes there; it never runs again after completing. If it fails (an error caught by Maybe), it runs again on the next activation. With `every`, it runs again on a fixed cadence: on the first activation at or after each scheduled time, the next one `every` seconds after the last (or after this run, when activations fell behind); it reads the clock. A Stop, Restart or Return inside the `action` flow propagates."
   ),
   params: Params::Declared(ONCE_PARAMS),
   input: InputDesc::Any,
@@ -1150,6 +1247,121 @@ pub(crate) fn compose_once(
     compiled: ctx.compose_flow(args.flow("action").expect("decoded Action flow"), input)?,
     output: input,
   })
+}
+
+/// `Once`'s node: the engine's own (`Control::Once`, a flag in the frame),
+/// or with `every` a custom composite that also keeps when to run next.
+fn compose_once_node(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+  lifetime: crate::signature::Lifetime,
+) -> Result<Composed<Arc<dyn crate::shard::CompiledNode>>> {
+  let every = match args.get("every") {
+    None => None,
+    Some(value) => {
+      let seconds = match value {
+        ParamValue::Value(Var::Int(n)) => *n as f64,
+        ParamValue::Value(Var::Float(f)) => *f,
+        _ => f64::NAN,
+      };
+      match Duration::try_from_secs_f64(seconds) {
+        Ok(d) if seconds > 0.0 => Some(d),
+        _ => {
+          return Err(Error::Diagnostic(Box::new(
+            Diagnostic::new(
+              Phase::Compose,
+              "compose-error",
+              "invalid-argument-value",
+              format!("Once's `every` must be a positive number of seconds, got {seconds}"),
+            )
+            .shard("Once")
+            .param("every", Some(args.param_index("every"))),
+          )));
+        }
+      }
+    }
+  };
+  let Some(every) = every else {
+    return crate::shard::compose_erased::<sl::Once>(args, ctx, lifetime);
+  };
+  let composed = compose_once(args, ctx)?;
+  ctx.add_effects(crate::signature::Effects::TIME);
+  Ok(Composed {
+    compiled: crate::shard::custom_node(
+      Box::new(OnceEvery {
+        flows: vec![composed.compiled],
+        every,
+      }),
+      ONCE_DESC.name,
+      lifetime,
+    ),
+    output: composed.output,
+  })
+}
+
+/// `Once(every:)`: its state keeps the time the action may run again
+/// across activations; only the run in progress is reset.
+struct OnceEvery {
+  flows: Vec<CompiledFlow>,
+  every: Duration,
+}
+
+#[derive(Default)]
+struct OnceEveryState {
+  /// When the run in progress started.
+  started: Option<std::time::Instant>,
+  /// When the action is next scheduled, after a successful run.
+  next: Option<std::time::Instant>,
+}
+
+impl crate::shard::CustomControl for OnceEvery {
+  fn flows(&self) -> &[CompiledFlow] {
+    &self.flows
+  }
+
+  fn new_state(&self) -> Box<dyn std::any::Any> {
+    Box::new(OnceEveryState::default())
+  }
+
+  fn reset_state(&self, state: &mut dyn std::any::Any) {
+    // The engine resets on every exit; when to run next stays.
+    if let Some(state) = state.downcast_mut::<OnceEveryState>() {
+      state.started = None;
+    }
+  }
+
+  fn resume(
+    &self,
+    state: &mut dyn std::any::Any,
+    _: &mut crate::shard::ActivationCtx<'_>,
+    input: &Var,
+    completion: Option<Result<Var>>,
+  ) -> Result<crate::ControlStep> {
+    use crate::ControlStep::{Complete, Enter};
+    let state = state.downcast_mut::<OnceEveryState>().expect("Once state");
+    match completion {
+      None => {
+        let now = std::time::Instant::now();
+        if state.next.is_some_and(|next| now < next) {
+          return Ok(Complete(input.clone()));
+        }
+        state.started = Some(now);
+        Ok(Enter(0, input.clone()))
+      }
+      Some(Ok(_)) => {
+        // A fixed cadence, as 1.x: the next run is `every` after the one
+        // scheduled, or after this one when the schedule fell behind.
+        let started = state.started.expect("a run in progress");
+        state.next = Some(match state.next {
+          Some(next) if next + self.every > started => next + self.every,
+          _ => started + self.every,
+        });
+        Ok(Complete(input.clone()))
+      }
+      // It runs again on the next activation, as Once's does.
+      Some(Err(err)) => Err(err),
+    }
+  }
 }
 
 pub static SUBFLOW_PARAMS: &[ParamDecl] = &[decl(

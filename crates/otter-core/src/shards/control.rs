@@ -359,6 +359,13 @@ pub static MATCH_PARAMS: &[ParamDecl] = &[
     NONE_TYPES,
     Requirement::Optional,
   ),
+  decl(
+    "passthrough",
+    crate::shard_doc!("Output the input instead of the matched flow's output."),
+    Forms::LITERAL,
+    &[TypeName::Bool],
+    Requirement::Default(DefaultValue::Bool(false)),
+  ),
 ];
 
 pub const MATCH_DESC: ShardDesc = ShardDesc {
@@ -366,12 +373,12 @@ pub const MATCH_DESC: ShardDesc = ShardDesc {
   version: 1,
   summary: crate::shard_doc!("Runs the flow of the first case equal to the input."),
   help: crate::shard_doc!(
-    "Cases are tried in order and compare as in Is; `none` matches only none. The matched flow receives the input, and Match outputs that flow's output (an empty flow `{}` outputs its input). Match must be exhaustive: either the cases cover every value of the input type (true and false for a Bool, none for None, all of them for a union of those), or `default:` runs when nothing matched."
+    "Cases are tried in order and compare as in Is; `none` matches only none. The matched flow receives the input, and Match outputs that flow's output (an empty flow `{}` outputs its input), or its own input with `passthrough: true`. Match must be exhaustive: either the cases cover every value of the input type (true and false for a Bool, none for None, all of them for a union of those), or `default:` runs when nothing matched."
   ),
   params: Params::Declared(MATCH_PARAMS),
   input: InputDesc::Any,
   output: OutputDesc::Dynamic(crate::shard_doc!(
-    "the union of the case and default outputs"
+    "the union of the case and default outputs; the input with `passthrough`"
   )),
   targets: Targets::All,
   aliases: &[],
@@ -515,6 +522,61 @@ pub(crate) fn compose_match(
     compiled: MatchCompiled { values, flows },
     output,
   })
+}
+
+/// `Match`'s node: the engine's own (`Control::Match`), or with
+/// `passthrough` a custom composite that runs the case and outputs its
+/// input, so the common form's completion tests nothing more.
+pub(crate) fn compose_match_node(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+  lifetime: crate::signature::Lifetime,
+) -> Result<Composed<std::sync::Arc<dyn crate::shard::CompiledNode>>> {
+  if !args.bool("passthrough").unwrap_or(false) {
+    return crate::shard::compose_erased::<crate::stackless::shards::Match>(args, ctx, lifetime);
+  }
+  let input = ctx.input();
+  let composed = compose_match(args, ctx)?;
+  Ok(Composed {
+    compiled: crate::shard::custom_node(
+      Box::new(MatchThrough(composed.compiled)),
+      MATCH_DESC.name,
+      lifetime,
+    ),
+    output: input,
+  })
+}
+
+/// `Match(passthrough: true)`: runs the case Match would, then outputs its
+/// input.
+struct MatchThrough(MatchCompiled);
+
+impl crate::shard::CustomControl for MatchThrough {
+  fn flows(&self) -> &[CompiledFlow] {
+    &self.0.flows
+  }
+
+  fn new_state(&self) -> Box<dyn std::any::Any> {
+    Box::new(())
+  }
+
+  fn reset_state(&self, _: &mut dyn std::any::Any) {}
+
+  fn resume(
+    &self,
+    _: &mut dyn std::any::Any,
+    ctx: &mut crate::shard::ActivationCtx<'_>,
+    input: &Var,
+    completion: Option<Result<Var>>,
+  ) -> Result<crate::ControlStep> {
+    match completion {
+      None => Ok(crate::ControlStep::Enter(
+        self.0.find(input, ctx.meter)?,
+        input.clone(),
+      )),
+      Some(result) => result.map(|_| crate::ControlStep::Complete(input.clone())),
+    }
+  }
 }
 
 // --- Maybe ---

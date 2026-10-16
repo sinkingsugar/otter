@@ -247,6 +247,29 @@ fn a_run_that_does_not_loop_finishes_on_the_body_it_started() {
   assert_eq!(lines, ["a: none", "b: 2"]);
 }
 
+/// `Once(every:)` runs its action again once the interval has passed since
+/// its last run started, and not before.
+#[test]
+fn once_every_runs_again_after_its_interval() {
+  let mut session = otter_lang::Session::new();
+  preserve(
+    &mut session,
+    r#"@wire(main { Once({ Log("run") } every: 0.4) } looped: true)
+@mesh(m) @schedule(m main) @run(m)"#,
+  );
+  let (_, lines) = otter_core::log::capture(|| {
+    for _ in 0..3 {
+      session.tick();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    session.tick();
+    session.tick();
+  });
+  assert_eq!(lines, ["run: none", "run: none"]);
+  let d = load_or_compose_errors(r#"Once({1} every: 0)"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
+}
+
 /// Swapping a body keeps the state of the wire's own nodes and of the
 /// components it calls: a `Once` does not run again, a stateful callee
 /// keeps counting, under the default policy that rejects resets.
@@ -1690,6 +1713,43 @@ fn a_cond_with_thousands_of_branches_composes_on_a_small_stack() {
     .join()
     .unwrap();
   assert_eq!(value, "3");
+}
+
+#[test]
+fn get_with_a_default_and_match_passing_its_input_through() {
+  let v = root_value(
+    r#"
+"{\"a\": 5}" | FromJson | ExpectTable = j
+{a: 1 b: "x"} = t
+none | ToAny | Var(any)
+"" | Var(seen)
+[
+  Get(j key: "a" default: 0)
+  Get(j key: "missing" default: 0)
+  Get(j key: "a" default: "wrong type")
+  Get(t key: "b" default: "")
+  Get(any default: "fallback")
+  (2 | Match([1 {"one" | Update(seen)} 2 {"two" | Update(seen)}] default: {} passthrough: true))
+  seen
+]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[5 0 "wrong type" "x" "fallback" 2 "two"]"#
+  );
+  for (script, expected) in [
+    (r#"{a: 1} = t  Get(t key: "zz" default: 0)"#, "has no key"),
+    (r#"{a: 1} = t  Get(t key: "a")"#, "needs `default:`"),
+    (r#"1 = n  Get(n key: "a" default: 0)"#, "reads a table"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert!(
+      d[0].message.contains(expected),
+      "{script}: {}",
+      d[0].message
+    );
+  }
 }
 
 #[test]
@@ -4722,6 +4782,19 @@ mod tools {
       .call_with(&ToolInput::from_json(r#"{"name": "Ann"}"#).unwrap(), &fuel)
       .unwrap();
     assert_eq!(out.text, "Hello, Ann! (in )");
+  }
+
+  /// `Once(every:)` reads the clock; a plain `Once` does not.
+  #[test]
+  fn once_every_declares_the_clock() {
+    let tool = |once: &str| {
+      load(&format!(
+        "@fn(T stateful: true input: {{input: {{}} env: {{}} working-dir: String}} output: String params: {{}} {{ {once} \"ok\" }})\n{{definition: {{name: \"t\"}} use: \"T\"}}"
+      ))
+      .unwrap()
+    };
+    assert!(tool("Once({1} every: 1.5)").effects().time);
+    assert!(!tool("Once({1})").effects().time);
   }
 
   /// The call ends when its function does, not when every wire it spawned

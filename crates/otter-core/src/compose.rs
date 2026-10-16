@@ -885,6 +885,12 @@ impl ComposeCtx<'_> {
     }
   }
 
+  /// Effects the shard being composed has beyond its description's,
+  /// decided by its arguments (`Once(every:)` reads the clock).
+  pub fn add_effects(&mut self, effects: crate::signature::Effects) {
+    self.analysis.effects = self.analysis.effects.union(effects);
+  }
+
   /// Whether the shard being composed is inside a block passed to a call
   /// (docs/metaprogramming.md §3.1): it runs inside the callee.
   pub fn in_flow_argument(&self) -> bool {

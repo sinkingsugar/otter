@@ -641,7 +641,11 @@ pub(crate) fn leaf<L: LeafShard>(c: &L::Compiled, output: Type) -> Option<Inline
   let op = if id == TypeId::of::<leaf::Const>() {
     Op::Const(c.downcast_ref::<Var>()?.clone())
   } else if id == TypeId::of::<leaf::Get>() {
-    Op::get(*c.downcast_ref::<Binding>()?)
+    // Only a plain read is an instruction; one with a default activates.
+    match c.downcast_ref::<leaf::GetCode>()? {
+      leaf::GetCode::Plain(b) => Op::get(*b),
+      leaf::GetCode::Default { .. } => return None,
+    }
   } else if id == TypeId::of::<leaf::VarDecl>()
     || id == TypeId::of::<leaf::Bind>()
     || id == TypeId::of::<leaf::Update>()
