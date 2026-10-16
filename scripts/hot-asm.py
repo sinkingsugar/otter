@@ -55,7 +55,9 @@ def objdump():
 
 
 def build(root, target_dir):
-    env = dict(os.environ, CARGO_TARGET_DIR=str(target_dir))
+    # One codegen unit, as the instruction gate builds (bench/instructions/
+    # run.py): with sixteen, an edit anywhere moved the step's code.
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target_dir), CARGO_PROFILE_RELEASE_CODEGEN_UNITS="1")
     subprocess.run(["cargo", "build", "--release", "-q", "-p", "otter-cli"], cwd=root, env=env, check=True)
     return target_dir / "release" / "otter"
 
@@ -177,7 +179,7 @@ def main():
     p.add_argument("--fresh", type=Path, help="also write this checkout's summary here (a baseline to commit)")
     args = p.parse_args()
     tool = objdump()
-    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "hot-asm"
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
     current = analyze(build(ROOT, target), args.out, tool)

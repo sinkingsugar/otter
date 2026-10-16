@@ -37,7 +37,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench/vm-execution"))
 from workloads import CASES, dialect, parse_output, script  # noqa: E402
 
-DRIVER = ROOT / "target/release/examples/bench_gate"
+# The gate's builds: one codegen unit, in their own target directory. With
+# rustc's default sixteen, editing one function moved the counts of
+# unedited engine functions by 50 to 500 instructions per iteration (how
+# the crate is cut into units changes what is inlined); one unit measures
+# the source. Its own directory, so gate and ordinary release builds do
+# not rebuild each other.
+GATE_TARGET = ROOT / "target/gate"
+GATE_ENV = {"CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1", "CARGO_TARGET_DIR": str(GATE_TARGET)}
+DRIVER = GATE_TARGET / "release/examples/bench_gate"
 WIDTHS = (8, 64, 256)
 TABLE_CASES = ("const-take-16", "var-key-take-16", "make-take-4", "make-take-16", "rebuild-16", "chain-16")
 # Instructions per iteration may rise by this fraction before the check fails;
@@ -111,7 +119,8 @@ def environment(counter, qemu):
     target = re.search(r"host: (\S+)", capture(["rustc", "-vV"]))
     # ldd names the distribution's package revision, which libc_ver does not.
     libc = capture(["ldd", "--version"]).splitlines()[0] or " ".join(platform.libc_ver())
-    env = {"rustc": capture(["rustc", "-V"]), "target": target.group(1) if target else "unknown", "libc": libc}
+    env = {"rustc": capture(["rustc", "-V"]), "target": target.group(1) if target else "unknown", "libc": libc,
+           "codegen-units": GATE_ENV["CARGO_PROFILE_RELEASE_CODEGEN_UNITS"]}
     if counter == "cachegrind":
         env["valgrind"] = capture(["valgrind", "--version"])
     elif counter == "qemu":
@@ -250,17 +259,18 @@ def main():
         p.error("--write needs the instruction counts; drop --allocations-only")
     if qemu:
         if args.driver == DRIVER:
-            env_vars = dict(os.environ, **{f"CARGO_TARGET_{qemu['target'].upper().replace('-', '_')}_LINKER": qemu["linker"]})
+            env_vars = dict(os.environ, **GATE_ENV,
+                            **{f"CARGO_TARGET_{qemu['target'].upper().replace('-', '_')}_LINKER": qemu["linker"]})
             subprocess.run(["cargo", "build", "--release", "-p", "otter-lang", "--example", "bench_gate",
                             "--target", qemu["target"]], cwd=ROOT, check=True, env=env_vars)
-            args.driver = ROOT / "target" / qemu["target"] / "release/examples/bench_gate"
+            args.driver = GATE_TARGET / qemu["target"] / "release/examples/bench_gate"
         PLUGIN.parent.mkdir(parents=True, exist_ok=True)
         cflags = capture(["pkg-config", "--cflags", "glib-2.0"]).split()
         subprocess.run(["cc", "-shared", "-fPIC", "-O2", *cflags, "-o", str(PLUGIN),
                         str(Path(__file__).with_name("qemu") / "insncount.c")], check=True)
     elif args.driver == DRIVER:
         subprocess.run(["cargo", "build", "--release", "-p", "otter-lang", "--example", "bench_gate"],
-                       cwd=ROOT, check=True)
+                       cwd=ROOT, check=True, env=dict(os.environ, **GATE_ENV))
     env = environment(counter, qemu)
     for mode in ("check", "write"):
         if getattr(args, mode) is HOST:
