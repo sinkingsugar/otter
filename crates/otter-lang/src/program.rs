@@ -432,8 +432,10 @@ impl Program {
   }
 
   /// Runs the program on a fresh mesh: the entry wires, ticked at the
-  /// `@run` rate (as fast as possible without one) until every instance
-  /// finishes or the `iterations` limit is reached.
+  /// `@run` rate until every instance finishes or the `iterations` limit
+  /// is reached. Without a rate it ticks as fast as the instances can
+  /// progress: while every one waits (on I/O or a timed pause) the thread
+  /// sleeps (`Mesh::wait`), and `iterations` counts only ticks that ran.
   pub fn run(&self) -> Result<RunReport, Vec<Diagnostic>> {
     let mut mesh = self.mesh();
     let entries = self.entries();
@@ -489,6 +491,10 @@ impl Program {
         } else {
           next = now;
         }
+      } else {
+        // As fast as it can progress: no empty ticks while every instance
+        // waits (on I/O or a timed pause), and no CPU spent on them.
+        mesh.wait(None, None);
       }
     }
     let outcomes = instances

@@ -1463,6 +1463,17 @@ fn per_iteration_and_kept_sequences() {
   );
 }
 
+/// Without `fps`, a run sleeps while every instance waits instead of
+/// ticking empty: a timed pause takes two ticks, not thousands.
+#[test]
+fn a_run_without_fps_sleeps_through_a_pause() {
+  let started = std::time::Instant::now();
+  let report = run("Pause(0.2) 1", &no_defines());
+  assert_eq!(completed(&report, "root"), Var::Int(1));
+  assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+  assert_eq!(report.ticks, 2);
+}
+
 #[test]
 fn check_composes_every_wire_that_can_run() {
   let report = check("@wire(unused { 1 | Add(\"x\") })\n1");
