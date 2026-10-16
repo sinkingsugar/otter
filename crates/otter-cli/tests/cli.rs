@@ -303,6 +303,12 @@ mod flights {
       err.contains("from, to, from-date and to-date are required"),
       "{err}"
     );
+    // A reversed range fails before any request, rather than scanning one day.
+    let reversed =
+      r#"{"from": "KIX", "to": "NRT", "from-date": "2026-12-10", "to-date": "2026-12-01"}"#;
+    let (code, _, err) = otter(&["tool", &tool("cheap-dates.shs"), reversed]);
+    assert_eq!(code, 1);
+    assert!(err.contains("to-date is before from-date"), "{err}");
   }
 
   /// A date `days` from today, as `YYYY-MM-DD` (UTC).

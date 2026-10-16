@@ -30,8 +30,10 @@
   args.return-date | StringOr(default: "") = return-date
   return-date | IsNot("") = round-trip
   round-trip | If({Is(true)} {1} {2}) = trip-type
-  args.adults | IntOr(default: 1) | Max(1) = adults
-  args.children | IntOr(default: 0) | Max(0) = children
+  // Google takes at most 9 passengers per search.
+  args.adults | IntOr(default: 1) | Max(1) | Min(9) = adults
+  9 | Sub(adults) = seats-left
+  args.children | IntOr(default: 0) | Max(0) | Min(seats-left) = children
   args.currency | StringOr(default: "USD") | String.ToUpper = currency
   args.seat | StringOr(default: "economy") | Match([
     "economy" {1}
@@ -60,7 +62,7 @@
   // A degraded page (no rows) is retried twice, then the call fails.
   url | FetchFlights(tries: 3) = data
   data | When({IsNone} {
-    "Google Flights returned no usable data; it is most likely rate-limiting these requests right now. Try again in a minute or two." | Fail
+    "Google Flights returned no usable data: either the requests failed (the log says so; an `otter` built without TLS cannot fetch https) or Google is rate-limiting them, in which case try again in a minute or two." | Fail
   })
 
   [] | Var(lines)
@@ -157,8 +159,8 @@
         to: {type: "string" description: "Arrival airport IATA code, e.g. NRT. No spaces."}
         date: {type: "string" description: "Departure date in YYYY-MM-DD format."}
         return-date: {type: "string" description: "Optional return date in YYYY-MM-DD format. When set, the search becomes a round trip: prices are round-trip totals and the listed options are the outbound legs."}
-        adults: {type: "integer" description: "Number of adult passengers. Default 1."}
-        children: {type: "integer" description: "Number of child passengers. Default 0."}
+        adults: {type: "integer" description: "Number of adult passengers, 1 to 9. Default 1."}
+        children: {type: "integer" description: "Number of child passengers; adults and children together are at most 9. Default 0."}
         seat: {type: "string" description: "Cabin class: economy, premium-economy, business or first. Default economy."}
         max-stops: {type: "integer" description: "Maximum number of stops: 0 = nonstop only, 1, or 2. Omit for any."}
         sort: {type: "string" description: "Result ordering: best (default, Google's ranking), cheapest, or duration."}

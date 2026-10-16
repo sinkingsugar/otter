@@ -4609,6 +4609,22 @@ mod tools {
     ));
   }
 
+  /// The call ends when its function does, not when every wire it spawned
+  /// does: a looping child must not keep the call waiting.
+  #[test]
+  fn a_call_returns_while_its_spawned_wires_still_run() {
+    let tool = load(
+      "@wire(bg { Pause } looped: true)\n@fn(T input: {input: {} env: {} working-dir: String} output: String params: {} { Spawn(bg) \"done\" })\n{definition: {name: \"t\"} use: \"T\"}",
+    )
+    .unwrap();
+    let options = CallOptions {
+      timeout: Some(std::time::Duration::from_secs(5)),
+      ..CallOptions::default()
+    };
+    let out = tool.call_with(&ToolInput::from_json("{}").unwrap(), &options);
+    assert_eq!(out.unwrap().text, "done");
+  }
+
   #[test]
   fn scripts_that_are_not_tools_are_rejected_at_load() {
     let compile = load(

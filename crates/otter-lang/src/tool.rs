@@ -184,10 +184,12 @@ pub struct CallOptions {
   /// Inserted into the call's mesh (docs/embedding.md, services).
   pub services: Services,
   /// Set it (from any thread) to cancel the call: it ends with
-  /// [`ToolError::Cancelled`] at its next tick.
+  /// [`ToolError::Cancelled`] after the current tick. A tick runs until the
+  /// call suspends (I/O, a `Pause`), so a loop that never suspends is not
+  /// interrupted.
   pub cancel: Option<Arc<AtomicBool>>,
   /// The longest the call may run; then it is cancelled and ends with
-  /// [`ToolError::TimedOut`].
+  /// [`ToolError::TimedOut`]. Checked between ticks, as `cancel` is.
   pub timeout: Option<Duration>,
 }
 
@@ -394,7 +396,10 @@ impl Tool {
     const MAX_NAP: Duration = Duration::from_millis(8);
     let mut nap = Duration::ZERO;
     loop {
-      if mesh.tick() == 0 {
+      // `tick` counts every running instance, including wires the call
+      // spawned: the call is done when its own instance is. Dropping the
+      // mesh cancels what it left running.
+      if mesh.tick() == 0 || mesh.outcome(id).is_some() {
         break;
       }
       if options

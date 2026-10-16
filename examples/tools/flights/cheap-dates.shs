@@ -37,7 +37,8 @@
   All({from | IsNot("")} {to | IsNot("")} {from-date | IsNot("")} {to-date | IsNot("")}) | When({Not} {
     "from, to, from-date and to-date are required" | Fail
   })
-  args.adults | IntOr(default: 1) | Max(1) = adults
+  // Google takes at most 9 passengers per search.
+  args.adults | IntOr(default: 1) | Max(1) | Min(9) = adults
   args.currency | StringOr(default: "USD") | String.ToUpper = currency
   args.seat | StringOr(default: "economy") | Match([
     "economy" {1}
@@ -52,6 +53,7 @@
   from-date | Date.Parse(format: "%Y-%m-%d") = first
   to-date | Date.Parse(format: "%Y-%m-%d") = last
   last | Sub(first) | Div(86400) | Add(1) = span
+  span | When({IsLess(1)} {"to-date is before from-date" | Fail})
   span | Max(1) | Min(@max-days) = days
 
   // The passengers are the same for every date: adults, packed.
@@ -125,7 +127,7 @@
         from-date: {type: "string" description: "Start of the date range to scan, YYYY-MM-DD."}
         to-date: {type: "string" description: "End of the date range to scan, YYYY-MM-DD. At most 45 days after from-date."}
         duration: {type: "integer" description: "Optional trip length in days. When set, prices are round-trip totals for a trip of exactly this many days (return = departure + duration); when omitted, prices are one-way."}
-        adults: {type: "integer" description: "Number of adult passengers. Default 1."}
+        adults: {type: "integer" description: "Number of adult passengers, 1 to 9. Default 1."}
         seat: {type: "string" description: "Cabin class: economy, premium-economy, business or first. Default economy."}
         currency: {type: "string" description: "ISO 4217 currency code for prices, e.g. USD, EUR, JPY. Default USD."}
       }
