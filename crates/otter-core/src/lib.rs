@@ -34,6 +34,7 @@ pub mod signature;
 pub mod stackless;
 pub mod types;
 pub mod var;
+mod wait;
 
 pub use args::{Arg, Args};
 pub use catalog::Catalog;
@@ -52,3 +53,4 @@ pub use shard::{
 pub use stackless::Mesh;
 pub use types::{Shape, Type, TypeDesc};
 pub use var::{Float2, Float3, Float4, Keys, Table, TableBuilder, Values, Var};
+pub use wait::CancelToken;

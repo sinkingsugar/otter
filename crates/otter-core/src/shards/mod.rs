@@ -67,7 +67,7 @@ pub static SUB: ShardType = ShardType::new(SUB_DESC).implemented_by::<sl::Sub>()
 pub static ONCE: ShardType = ShardType::new(ONCE_DESC).composed_by(compose_once_node);
 pub static REPEAT: ShardType = ShardType::new(REPEAT_DESC).implemented_by::<sl::Repeat>();
 pub static WHILE: ShardType = ShardType::new(WHILE_DESC).implemented_by::<sl::While>();
-pub static PAUSE: ShardType = ShardType::new(PAUSE_DESC).implemented_by::<sl::Pause>();
+pub static PAUSE: ShardType = ShardType::new(PAUSE_DESC).composed_by(compose_pause_node);
 pub static SPAWN: ShardType = ShardType::new(SPAWN_DESC).implemented_by::<sl::Spawn>();
 pub static PROBE: ShardType = leaf_type::<leaf::Probe>();
 pub static REQUEST: ShardType = async_shard::async_type::<sim::Request>();
@@ -1588,6 +1588,21 @@ pub(crate) fn compose_pause(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Com
     compiled: duration,
     output: ctx.input(),
   })
+}
+
+/// `Pause` with no time is a plain yield, with a time a timed pause: each
+/// its own node, so a yield's activation stays as small as it was.
+fn compose_pause_node(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+  lifetime: crate::signature::Lifetime,
+) -> Result<Composed<Arc<dyn crate::shard::CompiledNode>>> {
+  // The node's compose checks the value.
+  if matches!(args.literal("seconds"), Some(Var::Float(secs)) if *secs == 0.0) {
+    crate::shard::compose_erased::<sl::Pause>(args, ctx, lifetime)
+  } else {
+    crate::shard::compose_erased::<sl::TimedPause>(args, ctx, lifetime)
+  }
 }
 
 pub static SPAWN_PARAMS: &[ParamDecl] = &[decl(

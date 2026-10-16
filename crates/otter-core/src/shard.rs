@@ -124,7 +124,7 @@ pub struct ActivationCtx<'a> {
   pub(crate) table: &'a Arc<crate::reload::FunctionRegistry>,
   pub(crate) mesh_frame: &'a mut Vec<Var>,
   pub(crate) spawn_queue: &'a mut Vec<(Arc<CompiledWire>, Var)>,
-  pub(crate) waiting: &'a mut bool,
+  pub(crate) waiting: &'a mut crate::instance::Waiting,
   pub(crate) waker: &'a Waker,
   /// The loop iteration ([`LeafCtx::iteration`]).
   pub(crate) iteration: u64,
@@ -179,7 +179,17 @@ impl ActivationCtx<'_> {
   /// `WakeMode::OnNotify` the instance is then resumed only after the waker
   /// fires.
   pub fn set_waiting(&mut self) {
-    *self.waiting = true;
+    self.waiting.wait = crate::instance::Wait::Waker;
+  }
+
+  /// Says the instance, about to return [`Step::Suspend`], has nothing to
+  /// do before `at` (a timed pause). It is still activated on every tick;
+  /// a host blocked in [`crate::Mesh::wait`] sleeps until then.
+  pub fn resume_at(&mut self, at: std::time::Instant) {
+    *self.waiting = crate::instance::Waiting {
+      wait: crate::instance::Wait::Timed,
+      at: Some(at),
+    };
   }
 
   /// The instance's waker. Waking it after the instance finished is harmless.

@@ -290,7 +290,8 @@ fn run(wire: Arc<CompiledWire>, meter: &Meter) -> Result<Var> {
   let table = Arc::new(wire.functions.clone());
   let mut engine = Engine::instantiate(wire, &mut ictx).map_err(|e| failure(e.to_string()))?;
   let revisions = crate::reload::Revisions::default();
-  let (mut mesh_frame, mut spawn_queue, mut waiting) = (Vec::new(), Vec::new(), false);
+  let (mut mesh_frame, mut spawn_queue, mut waiting) =
+    (Vec::new(), Vec::new(), crate::instance::Waiting::default());
   let result = catch_unwind(AssertUnwindSafe(|| {
     let mut ctx = ActivationCtx {
       instance,
