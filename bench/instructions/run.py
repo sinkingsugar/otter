@@ -128,7 +128,11 @@ def measure(driver, workload, n, scratch, counter, qemu):
     command = [str(driver), *workload.argv(n)]
     out = scratch / f"{workload.name.replace('/', '_')}-{n}.cg"
     if counter == "cachegrind":
-        command = ["valgrind", "--tool=cachegrind", "--cache-sim=yes", "--branch-sim=yes", *CACHES,
+        # `--vgdb=no`: Valgrind otherwise maps a file named after the
+        # process id, and the C library reads the process's maps at start
+        # (the main thread's stack bounds), so a pid one digit longer cost
+        # 13 more instructions in some runs.
+        command = ["valgrind", "--tool=cachegrind", "--vgdb=no", "--cache-sim=yes", "--branch-sim=yes", *CACHES,
                    f"--cachegrind-out-file={out}", *command]
     elif counter == "qemu":
         # Without address randomization: the target's malloc, counted here
