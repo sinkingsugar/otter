@@ -139,6 +139,101 @@ fn named_arguments_and_compose_diagnostics() {
 }
 
 #[test]
+fn headers_from_a_literal_or_a_variable_reach_the_server() {
+  use otter_core::{Arg, ParamValue};
+  let server = TestServer::start();
+  let url = Var::string(&server.url("/echo-headers"));
+  let headers = |pairs: &[(&str, Var)]| Var::table(pairs.to_vec());
+  let get = |headers: ParamValue| {
+    http::get_args(vec![
+      Arg::pos(ParamValue::Value(url.clone())),
+      Arg::named("headers", headers),
+    ])
+  };
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire(
+    "literal",
+    false,
+    vec![get(ParamValue::Value(headers(&[
+      ("user-agent", Var::string("otter-test")),
+      ("x-b", Var::string("2")),
+      ("X-A", Var::string("1")),
+    ])))],
+  ));
+  let literal = mesh.compile("literal", Type::none()).unwrap();
+  let id = mesh.spawn(&literal, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  assert_eq!(
+    mesh.outcome(id),
+    Some(&Outcome::Completed(Var::string(
+      "user-agent: otter-test\nx-a: 1\nx-b: 2"
+    )))
+  );
+
+  // A variable is read at activation, so each run sends its current value.
+  mesh.declare_var("h", headers(&[("x-run", Var::string("one"))]), true);
+  mesh.add_wire(wire("bound", false, vec![get(ParamValue::Var("h".into()))]));
+  let bound = mesh.compile("bound", Type::none()).unwrap();
+  let id = mesh.spawn(&bound, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  let body = |mesh: &Mesh, id| match mesh.outcome(id) {
+    Some(Outcome::Completed(v)) => v.as_str().unwrap().to_string(),
+    other => panic!("{other:?}"),
+  };
+  assert!(
+    body(&mesh, id).ends_with("x-run: one"),
+    "{}",
+    body(&mesh, id)
+  );
+
+  // A bound value that is not a valid header fails the request at activation.
+  mesh.set_var("h", headers(&[("x-run", Var::string("a\nb"))]));
+  let id = mesh.spawn(&bound, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  assert!(
+    matches!(mesh.outcome(id), Some(Outcome::Failed(otter_core::Error::Activation(m))) if m == "Http.Get: invalid value for header x-run"),
+    "{:?}",
+    mesh.outcome(id)
+  );
+
+  // Constant headers are checked at compose.
+  for (name, value, message) in [
+    ("x-n", Var::Int(1), "header x-n must be a String, got Int"),
+    (
+      "bad name",
+      Var::string("v"),
+      "invalid header name \"bad name\"",
+    ),
+    ("x-v", Var::string("a\nb"), "invalid value for header x-v"),
+  ] {
+    let wire_name = format!("bad-{name}");
+    mesh.add_wire(wire(
+      &wire_name,
+      false,
+      vec![get(ParamValue::Value(headers(&[(name, value)])))],
+    ));
+    let err = mesh.compile(&wire_name, Type::none()).err().unwrap();
+    let d = err.diagnostic().unwrap();
+    assert_eq!(
+      (d.code, d.param.as_deref(), d.message.as_str()),
+      ("invalid-argument-value", Some("headers"), message)
+    );
+  }
+  // A variable must be a table whose values can be Strings.
+  mesh.declare_var("not-a-table", Var::Int(1), false);
+  mesh.declare_var("ints", headers(&[("x-n", Var::Int(1))]), false);
+  for var in ["not-a-table", "ints"] {
+    mesh.add_wire(wire(var, false, vec![get(ParamValue::Var(var.into()))]));
+    let err = mesh.compile(var, Type::none()).err().unwrap();
+    assert_eq!(
+      err.diagnostic().unwrap().code,
+      "wrong-variable-type",
+      "{var}"
+    );
+  }
+}
+
+#[test]
 fn connection_failure_and_error_status() {
   take_probe_events();
   let mut mesh = Mesh::new();

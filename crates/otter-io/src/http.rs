@@ -10,7 +10,9 @@
 //! - reading the body also races the cancellation token. In 1.x only
 //!   `send()` does, so cancelling midway through a body leaves the task
 //!   reading until the body completes or the request times out.
-//! - only a subset of 1.x's parameters: `url` and `timeout`.
+//! - only a subset of 1.x's parameters: `url`, `timeout` and `headers`
+//!   (a table of String values). Constant headers are checked at compose:
+//!   an invalid name or value is a compose error, not a failed request.
 //!
 //! **What cancellation does:** it stops local polling, and the request
 //! future is dropped on the runtime, which closes the connection (verified by
@@ -32,6 +34,7 @@ use otter_core::shards::async_shard::{AsyncShard, async_type};
 use otter_core::{
   Arg, Args, Composed, Error, ParamValue, Result, ShardDef, ShardType, Type, Var, shard_doc,
 };
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::runtime::{IoTask, spawn};
 
@@ -52,6 +55,7 @@ fn client(config: &ClientConfig) -> std::result::Result<reqwest::Client, String>
   if let Some(client) = clients.get(config) {
     return Ok(client.clone());
   }
+  crate::runtime::install_tls_provider();
   // As in 1.x: keep pooled idle connections below common server/LB keep-alive
   // timeouts (nginx 75s, ALB 60s), so a connection the peer already dropped
   // is never reused.
@@ -78,12 +82,43 @@ pub enum Url {
   Bound(Binding),
 }
 
+/// Request headers: constant (checked at compose), or a table variable
+/// read and checked at activation.
+pub enum Headers {
+  Const(HeaderMap),
+  Bound(Binding),
+}
+
 pub struct GetCompiled {
   url: Url,
   timeout: Duration,
+  headers: Headers,
 }
 
-/// `Http.Get(url [timeout])`: GETs `url` and outputs the body as a String.
+/// A headers table as a header map: every value must be a String, and
+/// names and values valid in HTTP.
+fn header_map(table: &Var) -> std::result::Result<HeaderMap, String> {
+  let Some(table) = table.as_table() else {
+    return Err(format!("headers must be a table, got {}", table.type_of()));
+  };
+  let mut map = HeaderMap::with_capacity(table.len());
+  for (name, value) in table.iter() {
+    let Some(text) = value.as_str() else {
+      return Err(format!(
+        "header {name} must be a String, got {}",
+        value.type_of()
+      ));
+    };
+    let header = HeaderName::from_bytes(name.as_bytes())
+      .map_err(|_| format!("invalid header name {name:?}"))?;
+    let value =
+      HeaderValue::from_str(text).map_err(|_| format!("invalid value for header {name}"))?;
+    map.append(header, value);
+  }
+  Ok(map)
+}
+
+/// `Http.Get(url [timeout] [headers])`: GETs `url` and outputs the body as a String.
 /// Fails on a connection error, a timeout (default 10 s), or a non-success
 /// status (with the body in the error).
 pub struct Get;
@@ -109,6 +144,16 @@ pub static GET_PARAMS: &[ParamDecl] = &[
     forms: Forms::LITERAL,
     types: &[TypeName::Int],
     requirement: Requirement::Default(DefaultValue::Int(10)),
+    ty: None,
+  },
+  ParamDecl {
+    name: "headers",
+    help: shard_doc!(
+      "Request headers, a table of String values by header name (`{user-agent: \"...\"}`): a literal, or a table variable read at activation."
+    ),
+    forms: Forms::LITERAL.or(Forms::VARIABLE),
+    types: &[TypeName::Table],
+    requirement: Requirement::Optional,
     ty: None,
   },
 ];
@@ -180,10 +225,49 @@ impl AsyncShard for Get {
         args.param_index("timeout"),
       ));
     }
+    let headers = match args.get("headers") {
+      None => Headers::Const(HeaderMap::new()),
+      Some(ParamValue::Value(table)) => Headers::Const(header_map(table).map_err(|message| {
+        compose_error(
+          "invalid-argument-value",
+          message,
+          "headers",
+          args.param_index("headers"),
+        )
+      })?),
+      Some(ParamValue::Var(name)) => {
+        let info = ctx
+          .read_var(name, GET_DESC.name)
+          .map_err(|e| e.with_param("headers", args.param_index("headers")))?;
+        // Every value must be able to hold a String; the values themselves
+        // are checked at activation.
+        let strings = info.ty.as_table().is_some_and(|t| {
+          t.keys
+            .iter()
+            .map(|(_, ty)| *ty)
+            .chain(t.rest)
+            .all(|ty| ty.accepts(Type::string()))
+        });
+        if !strings {
+          return Err(compose_error(
+            "wrong-variable-type",
+            format!(
+              "headers variable {name} must be a table of Strings, got {}",
+              info.ty
+            ),
+            "headers",
+            args.param_index("headers"),
+          ));
+        }
+        Headers::Bound(info.binding)
+      }
+      Some(other) => unreachable!("decoder accepted {other:?} for Http.Get headers"),
+    };
     Ok(Composed {
       compiled: GetCompiled {
         url,
         timeout: Duration::from_secs(secs as u64),
+        headers,
       },
       output: Type::string(),
     })
@@ -203,7 +287,13 @@ impl AsyncShard for Get {
       },
     };
     let client = client(&ClientConfig::default()).map_err(Error::Activation)?;
-    let request = client.get(url).timeout(c.timeout);
+    let headers = match &c.headers {
+      Headers::Const(map) => map.clone(),
+      Headers::Bound(binding) => {
+        header_map(&ctx.get(*binding)).map_err(|e| Error::Activation(format!("Http.Get: {e}")))?
+      }
+    };
+    let request = client.get(url).timeout(c.timeout).headers(headers);
 
     Ok(spawn(move |cancel| async move {
       let response = tokio::select! {

@@ -10,6 +10,8 @@
 //!   anything, then 200 `late`;
 //! - `/slow-body`: sends the headers and half of a 10-byte body (`hello`),
 //!   then waits until released before sending the rest (`world`).
+//! - `/echo-headers`: 200 with the request's `x-` and `user-agent` header
+//!   lines as the body, names lowercased, sorted, one `name: value` per line.
 //!
 //! Events: `received <path>`, `partial-sent <path>`, `completed <path>`,
 //! `client-closed <path>` (the client closed the connection while the server
@@ -89,7 +91,8 @@ pub fn closed_port_url() -> String {
   format!("http://{addr}/ok")
 }
 
-fn read_request_path(stream: &mut TcpStream) -> Option<String> {
+/// The request's path and its header lines.
+fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<String>)> {
   stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
   let mut data = Vec::new();
   let mut buf = [0u8; 1024];
@@ -101,7 +104,13 @@ fn read_request_path(stream: &mut TcpStream) -> Option<String> {
     data.extend_from_slice(&buf[..n]);
   }
   let text = String::from_utf8_lossy(&data);
-  text.split_whitespace().nth(1).map(str::to_string)
+  let mut lines = text.split("\r\n");
+  let path = lines.next()?.split_whitespace().nth(1)?.to_string();
+  let headers = lines
+    .take_while(|l| !l.is_empty())
+    .map(str::to_string)
+    .collect();
+  Some((path, headers))
 }
 
 /// Waits until released (true) or until the client closes the connection
@@ -135,13 +144,26 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<
 }
 
 fn handle(mut stream: TcpStream, state: &State) {
-  let Some(path) = read_request_path(&mut stream) else {
+  let Some((path, headers)) = read_request(&mut stream) else {
     return;
   };
   state.record(format!("received {path}"));
   let done = match path.as_str() {
     "/ok" => respond(&mut stream, "200 OK", "hello").is_ok(),
     "/missing" => respond(&mut stream, "404 Not Found", "nope").is_ok(),
+    "/echo-headers" => {
+      let mut echoed: Vec<String> = headers
+        .iter()
+        .filter_map(|line| {
+          let (name, value) = line.split_once(':')?;
+          let name = name.trim().to_ascii_lowercase();
+          (name.starts_with("x-") || name == "user-agent")
+            .then(|| format!("{name}: {}", value.trim()))
+        })
+        .collect();
+      echoed.sort();
+      respond(&mut stream, "200 OK", &echoed.join("\n")).is_ok()
+    }
     "/slow-headers" => {
       if !wait_release_or_close(&mut stream, state) {
         state.record(format!("client-closed {path}"));
