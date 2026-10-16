@@ -247,6 +247,29 @@ fn a_run_that_does_not_loop_finishes_on_the_body_it_started() {
   assert_eq!(lines, ["a: none", "b: 2"]);
 }
 
+/// `Once(every:)` runs its action again once the interval has passed since
+/// its last run started, and not before.
+#[test]
+fn once_every_runs_again_after_its_interval() {
+  let mut session = otter_lang::Session::new();
+  preserve(
+    &mut session,
+    r#"@wire(main { Once({ Log("run") } every: 0.4) } looped: true)
+@mesh(m) @schedule(m main) @run(m)"#,
+  );
+  let (_, lines) = otter_core::log::capture(|| {
+    for _ in 0..3 {
+      session.tick();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    session.tick();
+    session.tick();
+  });
+  assert_eq!(lines, ["run: none", "run: none"]);
+  let d = load_or_compose_errors(r#"Once({1} every: 0)"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
+}
+
 /// Swapping a body keeps the state of the wire's own nodes and of the
 /// components it calls: a `Once` does not run again, a stateful callee
 /// keeps counting, under the default policy that rejects resets.
@@ -1674,6 +1697,75 @@ fn maybe_without_else_passes_its_input_through() {
     completed(&report, "root"),
     Var::from_seq(std::sync::Arc::new(vec![Var::Int(5), Var::Int(5)]))
   );
+}
+
+/// Cond lowers its branches in a loop: thousands of them compose on a small
+/// stack (the recursion it replaced took about 140 bytes per branch).
+#[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+#[test]
+fn a_cond_with_thousands_of_branches_composes_on_a_small_stack() {
+  let branches = "{false} {2} ".repeat(4_000);
+  let text = format!("1 | Cond({branches}{{true}} {{3}} passthrough: false)");
+  let value = std::thread::Builder::new()
+    .stack_size(128 * 1024)
+    .spawn(move || root_value(&text).to_string())
+    .unwrap()
+    .join()
+    .unwrap();
+  assert_eq!(value, "3");
+}
+
+#[test]
+fn get_with_a_default_and_match_passing_its_input_through() {
+  let v = root_value(
+    r#"
+"{\"a\": 5}" | FromJson | ExpectTable = j
+{a: 1 b: "x"} = t
+none | ToAny | Var(any)
+"" | Var(seen)
+[
+  Get(j key: "a" default: 0)
+  Get(j key: "missing" default: 0)
+  Get(j key: "a" default: "wrong type")
+  Get(t key: "b" default: "")
+  Get(any default: "fallback")
+  (2 | Match([1 {"one" | Update(seen)} 2 {"two" | Update(seen)}] default: {} passthrough: true))
+  seen
+]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[5 0 "wrong type" "x" "fallback" 2 "two"]"#
+  );
+  for (script, expected) in [
+    (r#"{a: 1} = t  Get(t key: "zz" default: 0)"#, "has no key"),
+    (r#"{a: 1} = t  Get(t key: "a")"#, "needs `default:`"),
+    (r#"1 = n  Get(n key: "a" default: 0)"#, "reads a table"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert!(
+      d[0].message.contains(expected),
+      "{script}: {}",
+      d[0].message
+    );
+  }
+}
+
+#[test]
+fn maybe_gives_else_the_error_when_asked() {
+  let v = root_value(
+    r#"
+5 | Maybe({"no luck" | Fail} {= msg  f"caught: {msg}"} error: true silent: true) = caught
+5 | Maybe({Add(1) | ToString} {"never"} error: true) = fine
+5 | Maybe({"x" | Fail} {Add(1) | ToString} silent: true) = passed
+[caught fine passed]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"["caught: no luck" "6" "6"]"#);
+  // With `error`, else's input is the message, a String.
+  let d = load_or_compose_errors("5 | Maybe({Add(1)} {Add(1)} error: true)");
+  assert_eq!(d[0].code, "input-type-mismatch", "{:?}", d[0]);
 }
 
 #[test]
@@ -4292,4 +4384,749 @@ fn a_guard_in_control_state_is_released_on_every_exit() {
     (1, 1),
     "released on cancellation"
   );
+}
+
+/// The value a top-level program completes with.
+fn root_value(text: &str) -> Var {
+  completed(&run(text, &no_defines()), "root")
+}
+
+/// The activation error a top-level program fails with.
+fn root_failure(text: &str) -> String {
+  match run(text, &no_defines()).outcomes.into_iter().next() {
+    Some((_, Some(Outcome::Failed(e)))) => e.to_string(),
+    other => panic!("expected a failure, got {other:?}"),
+  }
+}
+
+#[test]
+fn string_shards_split_join_replace_and_test() {
+  let v = root_value(
+    r#"
+"a,,b" | String.Split(",") = parts
+parts | String.Join("+") = joined
+"a-b-a" | String.Replace(find: "a" replacement: "xy") = replaced
+"x=1;y=2" | String.Split(";" keep-separator: true) = kept
+"" | String.Split(",") = empty
+" hi\n" | String.Trim = trimmed
+"Straße" | String.ToUpper = upper
+"ÀB" | String.ToLower = lower
+"hello" | String.Contains("ell") = c
+"hello" | String.Starts("he") = s
+"hello" | String.Ends("xo") = e
+"," = sep
+["p" "q"] | String.Join(sep) = by-var
+[parts joined replaced kept empty trimmed upper lower c s e by-var]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[["a" "" "b"] "a++b" "xy-b-xy" ["x=1;" "y=2"] [""] "hi" "STRASSE" "àb" true true false "p,q"]"#
+  );
+  assert!(root_failure(r#"["a" 1] | String.Join"#).contains("element 1 is Int"));
+  let d = load_or_compose_errors(r#""a" | String.Split("")"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
+}
+
+/// Load or compose errors of a source that must not compile.
+fn load_or_compose_errors(text: &str) -> Vec<Diagnostic> {
+  let report = check(text);
+  assert!(!report.ok(), "expected errors");
+  report.diagnostics
+}
+
+#[test]
+fn slice_takes_characters_elements_and_bytes() {
+  let v = root_value(
+    r#"
+"héllo" | Slice(from: 1 to: 3) = a
+"héllo" | Slice(from: -2) = b
+[1 2 3 4] | Slice(to: -1) = c
+[1 2 3] | Slice(from: 5) = d
+"abc" | StringToBytes | Slice(from: 1) | BytesToString = e
+1 = from
+"abc" | Slice(from: from) = f
+[a b c d e f]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"["él" "lo" [1 2 3] [] "bc" "bc"]"#);
+}
+
+#[test]
+fn encodings_round_trip() {
+  let v = root_value(
+    r#"
+"hello" | ToBase64 = b64
+b64 | FromBase64 | BytesToString = back
+300 | ToLEB128 | ToHex = leb
+-65 | ToLEB128(signed: true) | FromLEB128(signed: true) = signed
+[(1 | ToLEB128) ("ab" | StringToBytes)] | Bytes.Join | ToHex = joined
+"a b/é" | String.EncodeURI = uri
+uri | String.DecodeURI = decoded
+[b64 back leb signed joined uri decoded]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"["aGVsbG8=" "hello" "ac02" -65 "016162" "a%20b%2F%C3%A9" "a b/é"]"#
+  );
+  assert!(root_failure("-1 | ToLEB128").contains("negative"));
+  assert!(root_failure(r#""@@" | FromBase64"#).contains("FromBase64"));
+}
+
+#[test]
+fn json_reads_and_writes_with_ints_and_floats_apart() {
+  let v = root_value(
+    r#"
+"{\"b\": [1, 2.5, null, true], \"a\": \"x\"}" | FromJson = parsed
+parsed | ExpectTable | Take("b") | ExpectSeq | Take(0) = first
+first | IsInt = is-int
+parsed | ToJson = text
+{n: 2.0 s: [1 "q"]} | ToJson(indent: 1) = pretty
+[is-int text pretty]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[true "{\"a\":\"x\",\"b\":[1,2.5,null,true]}" "{\n \"n\": 2.0,\n \"s\": [\n  1,\n  \"q\"\n ]\n}"]"#
+  );
+  assert!(root_failure(r#""{" | FromJson"#).contains("invalid JSON at byte 1"));
+  assert!(root_failure(r#""x" | StringToBytes | ToJson"#).contains("no JSON form"));
+}
+
+#[test]
+fn type_tests_fail_sort_and_scalar_math() {
+  let v = root_value(
+    r#"
+"[1, \"a\", [], {}]" | FromJson | ExpectSeq = xs
+[(xs | Take(0) | IsInt) (xs | Take(1) | IsString) (xs | Take(2) | IsSeq) (xs | Take(3) | IsTable) (xs | Take(0) | IsFloat)] = tests
+[[3 1] [1 2] [3 0]] | Sort = pairs
+[2.5 1 -3] | Sort(desc: true) = numbers
+[(-7 | Mod(3)) (7.5 | Mod(2)) (3 | Max(9)) (3 | Min(2.5))] = math
+// Vectors mix with numbers and same-size vectors per component, as Add does.
+[4 2 3] | ToFloat3 = f3
+[([5.5 -3] | ToFloat2 | Mod(2)) ([1 5 3] | ToFloat3 | Max(f3)) ([1 5] | ToFloat2 | Min(2))] = vectors
+// Constant work, so they evaluate at compose time.
+#( 17 | Mod(5) | Max(1) | Min(10) ) = folded
+[tests pairs numbers math vectors folded]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    "[[true true true true false] [[1 2] [3 0] [3 1]] [2.5 1 -3] [-1 1.5 9 2.5] [@f2(1.5 -1.0) @f3(4.0 5.0 3.0) @f2(1.0 2.0)] 2]"
+  );
+  let d = load_or_compose_errors(r#""a" | Max(1)"#);
+  assert_eq!(d[0].code, "input-type-mismatch");
+  let d = load_or_compose_errors("[1 2 3] | ToFloat3 = v\n[1 2] | ToFloat2 | Min(v)");
+  assert!(
+    d[0]
+      .message
+      .starts_with("Math.Min cannot take Float2 with Float3"),
+    "{}",
+    d[0].message
+  );
+  assert_eq!(
+    root_failure(r#"Maybe({"inner" | Fail} {"caught"} silent: true) | Log  "out" | Fail"#),
+    "activation error: out"
+  );
+  assert!(root_failure(r#"[1 "a"] | Sort"#).contains("cannot order"));
+  assert_eq!(
+    root_failure("1 | Mod(0)"),
+    "activation error: Math.Mod: division by zero"
+  );
+}
+
+/// Review findings on the text shards: malformed input is an error, never
+/// a wrong value or a panic.
+#[test]
+fn text_shards_reject_malformed_input() {
+  // Sort's comparator stays a total order with NaN, so Rust's sort cannot
+  // panic on it; the NaN is still an activation error.
+  let nans = (0..30)
+    .map(|i| match i % 3 {
+      0 => "nan".to_string(),
+      _ => format!("{}.5", (i * 7) % 30),
+    })
+    .collect::<Vec<_>>()
+    .join(" ");
+  let message = root_failure(&format!("0.0 | Div(0.0) = nan\n[{nans}] | Sort"));
+  assert!(message.contains("NaN"), "{message}");
+  // The tenth signed byte may only extend the sign: 2^63 does not fit.
+  assert!(
+    root_failure(r#""gICAgICAgICAAQ==" | FromBase64 | FromLEB128(signed: true)"#)
+      .contains("does not fit")
+  );
+  let v = root_value(
+    r#"
+"gICAgICAgICAfw==" | FromBase64 | FromLEB128(signed: true) = min
+"////////////fw==" | FromBase64 | FromLEB128(signed: true) = minus-one
+-9223372036854775807 | Sub(1) | Mod(-1) = rem
+"20260115" | Date.Parse(format: "%Y%m%d") | Date.Format(format: "%Y-%m-%d") = compact
+[0.1 0.2] | ToFloat2 | ToJson = floats
+[min minus-one rem compact floats]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[-9223372036854775808 -1 0 "2026-01-15" "[0.1,0.2]"]"#
+  );
+  for (script, expected) in [
+    (r#""\"\\u+041\"" | FromJson"#, "hex digits"),
+    (r#""%+F" | String.DecodeURI"#, "invalid escape"),
+    (r#""QUJD=" | FromBase64"#, "padding"),
+    (r#""QR==" | FromBase64"#, "bits set"),
+  ] {
+    let message = root_failure(script);
+    assert!(message.contains(expected), "{script}: {message}");
+  }
+}
+
+#[test]
+fn dates_parse_and_format_in_utc() {
+  let v = root_value(
+    r#"
+"2026-11-16" | Date.Parse(format: "%Y-%m-%d") = t
+t | Add(86400) | Date.Format(format: "%Y-%m-%d") = next
+0 | Date.Format = epoch
+[t next epoch]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[1794787200 "2026-11-17" "1970-01-01 00:00:00"]"#
+  );
+  assert!(root_failure(r#""2026-02-30" | Date.Parse(format: "%Y-%m-%d")"#).contains("not a date"));
+  let d = load_or_compose_errors(r#"0 | Date.Format(format: "%A")"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
+}
+
+mod tools {
+  use super::*;
+  use otter_lang::{CallOptions, MemoryFiles, Tool, ToolError, ToolInput};
+  use std::sync::Arc;
+  use std::sync::atomic::AtomicBool;
+
+  const ECHO: &str = r#"
+@fn(Echo input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input = args
+  args.name | If({IsString} {ExpectString} {"nobody"}) = name
+  input.env.greeting | If({IsString} {ExpectString} {"Hello"}) = greeting
+  args.fail | When({Is(true)} {"asked to fail" | Fail})
+  args.wait | When({Is(true)} {"waiting" | Log  Repeat({Pause} forever: true)})
+  args.stop | When({Is(true)} {"stopping" | Log  Stop})
+  args.spin | When({Is(true)} {"spinning" | Log  0 | Repeat({1} forever: true)})
+  f"{greeting}, {name}!" | Log
+  f"{greeting}, {name}! (in {input.working-dir})"
+})
+{definition: {name: "echo" description: "Greets." parameters: {type: "object" properties: {name: {type: "string"}}}} use: "Echo"}
+"#;
+
+  fn load(text: &str) -> Result<Tool, ToolError> {
+    Tool::load_with(
+      Source::new("tool.shs", text),
+      &catalog(),
+      &no_defines(),
+      &MemoryFiles::default(),
+    )
+  }
+
+  #[test]
+  fn a_tool_describes_itself_and_runs_with_its_input() {
+    let tool = load(ECHO).unwrap();
+    let d = tool.definition();
+    assert_eq!(
+      (d.name.as_str(), d.description.as_str()),
+      ("echo", "Greets.")
+    );
+    assert_eq!(
+      d.parameters,
+      r#"{"properties":{"name":{"type":"string"}},"type":"object"}"#
+    );
+    assert_eq!(tool.entry(), "Echo");
+    let input = ToolInput::from_json(r#"{"name": "Ann"}"#)
+      .unwrap()
+      .with_env(Var::table([("greeting", Var::string("Hi"))]))
+      .with_working_dir("/w");
+    let out = tool.call(&input).unwrap();
+    assert_eq!(out.text, "Hi, Ann! (in /w)");
+    assert_eq!(out.log, ["Hi, Ann!"]);
+    assert_eq!(
+      tool.call(&ToolInput::from_json("").unwrap()).unwrap().text,
+      "Hello, nobody! (in )"
+    );
+  }
+
+  /// Calls are independent and can run on several threads at once.
+  #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+  #[test]
+  fn tool_calls_run_concurrently_on_threads() {
+    let tool = load(ECHO).unwrap();
+    let threads: Vec<_> = (0..3)
+      .map(|_| {
+        let tool = tool.clone();
+        std::thread::spawn(move || tool.call(&ToolInput::from_json("").unwrap()).unwrap().text)
+      })
+      .collect();
+    for t in threads {
+      assert_eq!(t.join().unwrap(), "Hello, nobody! (in )");
+    }
+  }
+
+  #[test]
+  fn tool_failures_are_reported_not_panicked() {
+    let tool = load(ECHO).unwrap();
+    match tool.call(&ToolInput::from_json(r#"{"fail": true}"#).unwrap()) {
+      Err(ToolError::Failed { message, .. }) => assert_eq!(message, "asked to fail"),
+      other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+      ToolInput::from_json("[1]"),
+      Err(ToolError::Input(_))
+    ));
+    let wait = ToolInput::from_json(r#"{"wait": true}"#).unwrap();
+    let timeout = CallOptions {
+      timeout: Some(std::time::Duration::from_millis(30)),
+      ..CallOptions::default()
+    };
+    // The log of a call that did not finish still comes back.
+    match tool.call_with(&wait, &timeout) {
+      Err(ToolError::TimedOut { log, .. }) => assert_eq!(log, ["waiting"]),
+      other => panic!("{other:?}"),
+    }
+    let cancel = Arc::new(AtomicBool::new(true));
+    let cancelled = CallOptions {
+      cancel: Some(cancel),
+      ..CallOptions::default()
+    };
+    match tool.call_with(&wait, &cancelled) {
+      Err(ToolError::Cancelled { log }) => assert_eq!(log, ["waiting"]),
+      other => panic!("{other:?}"),
+    }
+    match tool.call(&ToolInput::from_json(r#"{"stop": true}"#).unwrap()) {
+      Err(ToolError::Stopped { log }) => assert_eq!(log, ["stopping"]),
+      other => panic!("{other:?}"),
+    }
+  }
+
+  #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+  fn timeout_long() -> CallOptions {
+    CallOptions {
+      timeout: Some(std::time::Duration::from_secs(60)),
+      ..CallOptions::default()
+    }
+  }
+
+  /// A loop that never suspends runs inside one tick: with a time limit,
+  /// a cancellation flag or fuel the call runs metered, and each stops it.
+  #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+  #[test]
+  fn a_call_that_never_suspends_still_stops() {
+    let tool = load(ECHO).unwrap();
+    let spin = ToolInput::from_json(r#"{"spin": true}"#).unwrap();
+    let started = std::time::Instant::now();
+    let timeout = CallOptions {
+      timeout: Some(std::time::Duration::from_millis(50)),
+      ..CallOptions::default()
+    };
+    match tool.call_with(&spin, &timeout) {
+      Err(ToolError::TimedOut { log, .. }) => assert_eq!(log, ["spinning"]),
+      other => panic!("{other:?}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let setter = {
+      let cancel = cancel.clone();
+      std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+      })
+    };
+    let cancelled = CallOptions {
+      cancel: Some(cancel),
+      ..CallOptions::default()
+    };
+    match tool.call_with(&spin, &cancelled) {
+      Err(ToolError::Cancelled { log }) => assert_eq!(log, ["spinning"]),
+      other => panic!("{other:?}"),
+    }
+    setter.join().unwrap();
+    let fuel = CallOptions {
+      fuel: Some(100_000),
+      ..CallOptions::default()
+    };
+    match tool.call_with(&spin, &fuel) {
+      Err(ToolError::Failed { message, log }) => {
+        assert!(message.contains("ran out of fuel"), "{message}");
+        assert_eq!(log, ["spinning"]);
+      }
+      other => panic!("{other:?}"),
+    }
+    // A budget counts work only: values nested deeper than compose-time
+    // evaluation allows, or large shared values pushed, are as without one.
+    let deep = load(
+      "@fn(Deep input: {input: {} env: {} working-dir: String} output: String params: {} {\n  none | ToAny | Var(v)\n  Repeat({[v] | ToAny | Update(v)} times: 70)\n  [] | Var(big)  Repeat({1 | Push(big)} times: 20000)\n  [] | Var(into)  Repeat({big | Push(into)} times: 200)\n  \"done\"\n})\n{definition: {name: \"deep\"} use: \"Deep\"}",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+      deep
+        .call_with(&ToolInput::from_json("{}").unwrap(), &timeout_long())
+        .unwrap()
+        .text,
+      "done"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Fuel is counted from each call's start, and a budgeted call that
+    // finishes in it returns as usual.
+    let out = tool
+      .call_with(&ToolInput::from_json(r#"{"name": "Ann"}"#).unwrap(), &fuel)
+      .unwrap();
+    assert_eq!(out.text, "Hello, Ann! (in )");
+  }
+
+  /// `Once(every:)` reads the clock; a plain `Once` does not.
+  #[test]
+  fn once_every_declares_the_clock() {
+    let tool = |once: &str| {
+      load(&format!(
+        "@fn(T stateful: true input: {{input: {{}} env: {{}} working-dir: String}} output: String params: {{}} {{ {once} \"ok\" }})\n{{definition: {{name: \"t\"}} use: \"T\"}}"
+      ))
+      .unwrap()
+    };
+    assert!(tool("Once({1} every: 1.5)").effects().time);
+    assert!(!tool("Once({1})").effects().time);
+  }
+
+  /// The call ends when its function does, not when every wire it spawned
+  /// does: a looping child must not keep the call waiting.
+  #[test]
+  fn a_call_returns_while_its_spawned_wires_still_run() {
+    let tool = load(
+      "@wire(bg { Pause } looped: true)\n@fn(T input: {input: {} env: {} working-dir: String} output: String params: {} { Spawn(bg) \"done\" })\n{definition: {name: \"t\"} use: \"T\"}",
+    )
+    .unwrap();
+    let options = CallOptions {
+      timeout: Some(std::time::Duration::from_secs(5)),
+      ..CallOptions::default()
+    };
+    let out = tool.call_with(&ToolInput::from_json("{}").unwrap(), &options);
+    assert_eq!(out.unwrap().text, "done");
+  }
+
+  #[test]
+  fn scripts_that_are_not_tools_are_rejected_at_load() {
+    let compile = load(
+      "@fn(F input: Int output: String params: {} { Math.Add(1) })\n{definition: {name: \"f\"} use: \"F\"}",
+    );
+    match compile {
+      Err(ToolError::Compile {
+        diagnostics,
+        rendered,
+      }) => {
+        assert!(!diagnostics.is_empty());
+        assert!(rendered.contains("tool.shs:1:"), "{rendered}");
+      }
+      Err(other) => panic!("{other}"),
+      Ok(_) => panic!("loaded"),
+    }
+    let cases = [
+      (
+        "@fn(F input: Int output: Int params: {} { Math.Add(1) })",
+        "no top-level code",
+      ),
+      ("{definition: {name: \"f\"}}", "`use`"),
+      (
+        "{definition: {description: \"d\"} use: \"F\"}",
+        "definition.name",
+      ),
+      (
+        "\"x\" | Log  {definition: {name: \"f\"} use: \"F\"}",
+        "no I/O",
+      ),
+    ];
+    for (text, expected) in cases {
+      match load(text) {
+        Err(ToolError::Definition(m)) => assert!(m.contains(expected), "{m}"),
+        Err(other) => panic!("{text}: {other}"),
+        Ok(_) => panic!("{text}: loaded"),
+      }
+    }
+    // The function must accept the call table.
+    let wrong = load(
+      "@fn(F input: Int output: Int params: {} { Math.Add(1) })\n{definition: {name: \"f\"} use: \"F\"}",
+    );
+    assert!(
+      matches!(wrong, Err(ToolError::Compile { .. })),
+      "{:?}",
+      wrong.err()
+    );
+    let missing = load("{definition: {name: \"f\"} use: \"Nope\"}");
+    assert!(
+      matches!(missing, Err(ToolError::Compile { .. })),
+      "{:?}",
+      missing.err()
+    );
+  }
+
+  #[test]
+  fn a_tool_can_include_its_library() {
+    let mut files = MemoryFiles::default();
+    files.insert(
+      "lib.shs",
+      "@fn(Twice input: String output: String params: {} { = s  f\"{s}{s}\" })",
+    );
+    let tool = Tool::load_with(
+      Source::new("tool.shs", "@include(\"lib.shs\")\n@fn(T input: {input: {} env: {} working-dir: String} output: String params: {} { \"ab\" | Twice })\n{definition: {name: \"t\"} use: \"T\"}"),
+      &catalog(),
+      &no_defines(),
+      &files,
+    )
+    .unwrap();
+    assert_eq!(tool.files(), ["lib.shs"]);
+    assert_eq!(
+      tool
+        .call(&ToolInput::from_json("{}").unwrap())
+        .unwrap()
+        .text,
+      "abab"
+    );
+  }
+}
+
+#[test]
+fn a_tool_reports_the_effects_of_its_calls() {
+  use otter_lang::{MemoryFiles, Tool};
+  let load = |body: &str| {
+    Tool::load_with(
+      Source::new("t.shs", format!("@fn(T input: {{input: {{}} env: {{}} working-dir: String}} output: String params: {{}} {{ {body} }})\n{{definition: {{name: \"t\"}} use: \"T\"}}")),
+      &catalog(),
+      &no_defines(),
+      &MemoryFiles::default(),
+    )
+    .unwrap()
+  };
+  assert_eq!(
+    load("\"x\"").effects(),
+    otter_core::signature::Effects::NONE
+  );
+  let waits = load("Pause \"x\"").effects();
+  assert!(waits.suspends && waits.time, "{waits:?}");
+  assert!(load("\"x\" | Log").effects().io);
+}
+
+// --- the rest of the core catalog (docs/host-requirements.md §3) ---
+
+#[test]
+fn code_points_hex_and_byte_ints() {
+  let v = root_value(
+    r#"
+"hé" | String.CodePoints = cps
+cps | String.FromCodePoints = back
+"c328" | HexToBytes | String.CleanUTF8 = cleaned
+"ok" | String.CleanUTF8 = text
+"0xABC" | FromHex | BytesToInts = ints
+[1 2 255] | IntsToBytes | ToHex = hex
+[cps back cleaned text ints hex]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[[104 233] "hé" "�(" "ok" [10 188] "0102ff"]"#
+  );
+  for (script, expected) in [
+    ("[55296] | String.FromCodePoints", "element 0 (55296)"),
+    ("[1 256] | IntsToBytes", "element 1 (256)"),
+    (r#""0x1g" | HexToBytes"#, "'g' at 1"),
+  ] {
+    let message = root_failure(script);
+    assert!(message.contains(expected), "{script}: {message}");
+  }
+  // `[Any]` is narrowed first.
+  let d = load_or_compose_errors(r#""[1]" | FromJson | ExpectSeq | IntsToBytes"#);
+  assert_eq!(d[0].code, "input-type-mismatch");
+}
+
+#[test]
+fn sequence_variables_change_in_place() {
+  let v = root_value(
+    r#"
+[1 2] | Var(xs)
+3 | AppendTo(xs)
+0 | PrependTo(xs)
+[4 5] | Extend(xs) = extended
+PopFront(xs) = first
+DropFront(xs)
+"b" | Var(s)
+"c" | AppendTo(s)
+"a" | PrependTo(s)
+"01" | HexToBytes | Var(b)
+"02" | HexToBytes | AppendTo(b)
+Remove(xs {IsMore(3)}) = kept
+[] | ExpectIntSeq | Var(empty)
+DropFront(empty)
+{a: 1} | ToAnyTable | Var(t)
+[xs extended first s (b | ToHex) kept empty] = before
+Clear(xs)
+Clear(t)
+[before xs t]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[[[2 3] [4 5] 0 "abc" "0102" [2 3] []] [] {}]"#
+  );
+  assert_eq!(
+    root_failure("[] | ExpectIntSeq | Var(xs)\nPopFront(xs)"),
+    "activation error: PopFront: the sequence is empty"
+  );
+  // A failing predicate leaves the variable as it was.
+  let v = root_value(
+    "[1 2 3] | Var(xs)\nMaybe({Remove(xs {Assert.IsNot(2) | IsMore(1)})} silent: true)\nxs",
+  );
+  assert_eq!(v.to_string(), "[1 2 3]");
+  for (script, code) in [
+    ("[1] = xs\n2 | AppendTo(xs)", "immutable-binding"),
+    (
+      "[1] | Var(xs)\n\"a\" | AppendTo(xs)",
+      "variable-type-mismatch",
+    ),
+    ("1 | Var(n)\n2 | AppendTo(n)", "variable-type-mismatch"),
+    (
+      "[1] | Var(xs)\n[\"a\"] | Extend(xs)",
+      "variable-type-mismatch",
+    ),
+    ("{a: 1} | Var(t)\nClear(t)", "variable-type-mismatch"),
+    ("\"a\" | Var(s)\nPopFront(s)", "variable-type-mismatch"),
+    ("[1] | Var(xs)\nRemove(xs {Add(1)})", "predicate-not-bool"),
+    ("PopFront(nope)", "unknown-variable"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+  }
+}
+
+#[test]
+fn reverse_and_index_of() {
+  let v = root_value(
+    r#"
+[1 2 3] | Reverse = r
+"héllo" | Reverse = s
+"0102" | HexToBytes | Reverse | ToHex = b
+[0 1 1 0 1 1] | IndexOf([1 1]) = run
+[0 1 1 0 1 1] | IndexOf([1 1] all: true) = runs
+[[1] [2]] | IndexOf([2]) = element
+[1 2.5] | IndexOf(2.5) = mixed
+[1 2] | IndexOf(5) = missing
+[r s b run runs element mixed missing]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"[[3 2 1] "olléh" "0201" 1 [1 4] 1 1 -1]"#);
+  for script in [r#"[1 2] | IndexOf("a")"#, "[1 2] | IndexOf([])"] {
+    assert!(!check(script).ok(), "{script}");
+  }
+}
+
+#[test]
+fn checks_assertions_and_type_changes() {
+  let v = root_value(
+    r#"
+[(true | IsTrue) (true | IsFalse) (false | IsFalse)] = bools
+5 | Pass | Assert.Is(5.0) | Assert.IsNot(4) = passed
+none | ToAny | Var(anything)
+"text" | Update(anything)
+{a: 1} | ToAnyTable | Var(t)
+{b: "x"} | Update(t)
+"[[1.5], [\"a\"]]" | FromJson | ExpectSeq = rows
+rows | Take(0) | ExpectFloatSeq = floats
+rows | Take(1) | ExpectStringSeq = strings
+[bools passed (anything | ExpectString) t floats strings]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[[true false true] 5 "text" {b: "x"} [1.5] ["a"]]"#
+  );
+  assert_eq!(
+    root_failure("[1 2] | Assert.Is([1 3])"),
+    "activation error: Assert.Is: expected [1 3], got [1 2]"
+  );
+  assert!(root_failure("1 | Assert.IsNot(1.0)").contains("anything but 1.0"));
+  assert!(
+    root_failure(r#""[1, \"a\"]" | FromJson | ExpectIntSeq"#).contains("element 1 is String")
+  );
+  for (script, code) in [
+    (r#"1 | Assert.Is("a")"#, "input-type-mismatch"),
+    ("1 | ExpectIntSeq", "input-type-mismatch"),
+    ("1 | IsTrue", "input-type-mismatch"),
+    ("1 | ToAnyTable", "input-type-mismatch"),
+    // Any must be narrowed before typed use.
+    ("1 | ToAny | Add(1)", "input-type-mismatch"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+  }
+}
+
+#[test]
+fn cond_runs_the_first_true_branch_and_when_not_the_false_one() {
+  let v = root_value(
+    r#"
+0 | Var(checked)
+5 | Cond({Inc(checked) | false} {"a"} {Inc(checked) | true} {"b"} {Inc(checked) | true} {"c"} passthrough: false) = picked
+-1 | Cond({IsMore(0)} {"positive"} passthrough: false) = unmatched
+5 | Cond({true} {"ignored"}) | Add(1) = passed
+[] | ExpectIntSeq | Var(seen)
+3 | WhenNot({IsMore(4)} {AppendTo(seen)})
+7 | WhenNot({IsMore(4)} {AppendTo(seen)})
+#( 2 | Cond({IsLess(0)} {"neg"} {IsMore(0)} {"pos"} passthrough: false) ) = folded
+[picked checked unmatched passed seen folded]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"["b" 2 -1 6 [3] "pos"]"#);
+  // Without passthrough the output is the actions' and the input's union.
+  let d = load_or_compose_errors(r#"1 | Cond({true} {"a"} passthrough: false) | String.Trim"#);
+  assert_eq!(d[0].code, "input-type-mismatch");
+  for (script, code) in [
+    ("1 | Cond({true})", "cond-pairs"),
+    ("1 | Cond({1} {2})", "predicate-not-bool"),
+    ("1 | WhenNot({1} {Pass})", "predicate-not-bool"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+  }
+  // A problem inside a branch is located there.
+  let d = load_or_compose_errors("1 | Cond({true} {\"a\"} {IsMore(\"x\")} {\"b\"})");
+  assert_eq!((d[0].line, d[0].column), (Some(1), Some(24)));
+}
+
+#[test]
+fn msg_writes_at_a_level_and_epoch_counts_from_1970() {
+  let (report, lines) = otter_core::log::capture(|| {
+    run(
+      r#"
+"in" | Msg("plain") | Msg("careful" level: "warning") | Msg("hidden" level: "debug")
+"x" = text
+Msg(text level: "error")
+[Time.Epoch Time.EpochMs]
+"#,
+      &no_defines(),
+    )
+  });
+  assert_eq!(lines, ["plain", "[warning] careful", "[error] x"]);
+  let v = completed(&report, "root");
+  let (Some(Var::Int(s)), Some(Var::Int(ms))) = (
+    v.as_seq().and_then(|s| s.first()).cloned(),
+    v.as_seq().and_then(|s| s.get(1)).cloned(),
+  ) else {
+    panic!("{v}")
+  };
+  // After 2026-01-01 (a device without a time source counts from 1970),
+  // and the same instant within a second.
+  assert!(
+    s > 1_767_225_600 || (cfg!(target_os = "espidf") && s >= 0),
+    "{s}"
+  );
+  assert!((ms / 1000 - s).abs() <= 1, "{s} {ms}");
+  let d = load_or_compose_errors(r#"Msg("x" level: "loud")"#);
+  assert_eq!(d[0].code, "invalid-argument-value");
 }

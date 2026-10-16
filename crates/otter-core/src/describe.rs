@@ -200,8 +200,10 @@ impl DefaultValue {
 
 /// Whether a parameter must be given. `Optional` (absent when omitted) is
 /// distinct from `Default(DefaultValue::None)`. `Variadic` takes every
-/// remaining positional argument (zero or more); only the last parameter
-/// can be variadic, and it cannot be given by name.
+/// remaining positional argument (zero or more) and cannot be given by
+/// name; one parameter can be variadic, and the parameters after it are
+/// given by name only, so none of them is `Required` (`Cond`'s
+/// `passthrough:` after its branches).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Requirement {
   Required,
@@ -425,7 +427,8 @@ impl DefaultValue {
 
 /// Checks parameter declarations: names are unique, and every default is a
 /// literal the parameter itself accepts (so a default can never bypass the
-/// declared contract), and only the last parameter is variadic. Used at compile time by `ShardType::new`, and by the
+/// declared contract), and at most one parameter is variadic, followed
+/// only by parameters that need not be given. Used at compile time by `ShardType::new`, and by the
 /// decoder for descriptions used directly. Returns the offending
 /// parameter's index.
 pub const fn check_params(decls: &[ParamDecl]) -> Result<(), usize> {
@@ -443,8 +446,19 @@ pub const fn check_params(decls: &[ParamDecl]) -> Result<(), usize> {
     {
       return Err(i);
     }
-    if matches!(decls[i].requirement, Requirement::Variadic) && i + 1 != decls.len() {
-      return Err(i);
+    // Parameters after the variadic one are given by name only, so none
+    // of them may be required (or variadic too).
+    if matches!(decls[i].requirement, Requirement::Variadic) {
+      let mut j = i + 1;
+      while j < decls.len() {
+        if matches!(
+          decls[j].requirement,
+          Requirement::Required | Requirement::Variadic
+        ) {
+          return Err(i);
+        }
+        j += 1;
+      }
     }
     i += 1;
   }

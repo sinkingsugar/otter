@@ -16,6 +16,7 @@ pub mod problem;
 pub mod program;
 pub mod session;
 pub mod source;
+pub mod tool;
 pub mod watch;
 
 pub use files::{Files, FsFiles, MemoryFiles};
@@ -24,5 +25,6 @@ pub use problem::{Problem, render};
 pub use program::{CheckReport, Program, RunReport, check, check_with};
 pub use session::{Finished, Session};
 pub use source::{Source, Span};
+pub use tool::{CallOptions, Tool, ToolDefinition, ToolError, ToolInput, ToolOutput};
 
 pub use watch::{FileWatcher, WatchControl, WatchEvent};

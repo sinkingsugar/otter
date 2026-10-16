@@ -13,13 +13,67 @@
 //! Runtime code never meters: the VM's metered form is a separate
 //! instantiation ([`crate::inline::VmCalls::METERED`]) and the engine checks
 //! one `Option` per step.
+//!
+//! A mesh can be driven under the same meter at run time ([`Budget`],
+//! `Mesh::tick_budgeted`): fuel, and a cancellation flag and deadline
+//! checked every [`INTERRUPT_EVERY`] units, so even a loop that never
+//! suspends can be stopped. It counts work only (no value limits, nothing
+//! charged by size); `Mesh::tick` never meters and is unchanged by it.
 
 use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::diagnostic::{Diagnostic, Phase};
 use crate::error::{Error, Result};
 use crate::shard::ShardType;
 use crate::var::Var;
+
+/// Fuel between two checks of a budgeted run's cancellation flag and
+/// deadline: one unit is an engine dispatch or a VM instruction, so a
+/// check (an atomic load and a clock read) costs well under a percent.
+pub const INTERRUPT_EVERY: u64 = 4096;
+
+/// A run-time budget: the limits of a run driven by `Mesh::tick_budgeted`.
+/// Every activation then runs metered and fails when the fuel is spent,
+/// or ends with `Error::Cancelled` once `cancel` is set or `deadline`
+/// passes, checked every [`INTERRUPT_EVERY`] units of work, inside loops
+/// that never suspend too.
+#[derive(Clone, Debug, Default)]
+pub struct Budget {
+  /// Engine dispatches and VM instructions, plus what native shards charge
+  /// (a unit per byte they allocate).
+  pub fuel: Option<u64>,
+  pub cancel: Option<Arc<AtomicBool>>,
+  pub deadline: Option<Instant>,
+}
+
+impl Budget {
+  /// A run under this budget, its fuel counted from zero.
+  pub fn start(&self) -> RunBudget {
+    RunBudget {
+      meter: Meter::runtime(self),
+    }
+  }
+}
+
+/// A run's meter: pass it to every `Mesh::tick_budgeted` of the run.
+pub struct RunBudget {
+  pub(crate) meter: Meter,
+}
+
+impl RunBudget {
+  /// The fuel the run has spent.
+  pub fn fuel_used(&self) -> u64 {
+    self.meter.fuel_used()
+  }
+}
+
+struct Interrupt {
+  cancel: Option<Arc<AtomicBool>>,
+  deadline: Option<Instant>,
+}
 
 /// The budgets of one compose-time evaluation. Host-configurable
 /// (`Mesh::set_eval_limits`); the defaults are small enough for the device,
@@ -98,6 +152,11 @@ pub struct Meter {
   fuel: Cell<u64>,
   depth: Cell<usize>,
   largest: Cell<usize>,
+  /// A run-time budget's cancellation flag and deadline.
+  interrupt: Option<Interrupt>,
+  /// The fuel past which `step` takes its slow path: the limit, or a
+  /// budgeted run's next interrupt check if that comes first.
+  stop: Cell<u64>,
   /// The evaluation runs again to locate its failure: the activation
   /// records `trace` (`Engine::steps::<true>`).
   pub(crate) locating: bool,
@@ -117,10 +176,35 @@ impl Meter {
       fuel: Cell::new(0),
       depth: Cell::new(0),
       largest: Cell::new(0),
+      interrupt: None,
+      stop: Cell::new(limits.fuel),
       locating: false,
       pc: Cell::new(0),
       trace: Default::default(),
     }
+  }
+
+  /// A run-time meter for a budgeted mesh: fuel and interruption only (its
+  /// `interrupt` is what marks it: value accounting is off).
+  pub(crate) fn runtime(budget: &Budget) -> Meter {
+    Meter {
+      interrupt: Some(Interrupt {
+        cancel: budget.cancel.clone(),
+        deadline: budget.deadline,
+      }),
+      stop: Cell::new(INTERRUPT_EVERY.min(budget.fuel.unwrap_or(u64::MAX))),
+      ..Meter::new(EvalLimits {
+        fuel: budget.fuel.unwrap_or(u64::MAX),
+        depth: usize::MAX,
+        value_bytes: usize::MAX,
+        output_bytes: usize::MAX,
+      })
+    }
+  }
+
+  /// Fuel spent so far.
+  pub(crate) fn fuel_used(&self) -> u64 {
+    self.fuel.get()
   }
 
   /// A meter for running a failed evaluation again to locate the failure.
@@ -160,9 +244,59 @@ impl Meter {
     Ok(())
   }
 
+  /// One engine dispatch or VM instruction of a metered run: a unit of
+  /// fuel and, every [`INTERRUPT_EVERY`] units of a budgeted run, its
+  /// interrupt check. Only the metered instantiations call it; `charge`,
+  /// which shared code inlines, stays as it was.
+  /// As cheap as `charge(1)`: one comparison against `stop`, the fuel
+  /// limit or, in a budgeted run, the next check if that comes first.
+  #[inline(always)]
+  pub(crate) fn step(&self) -> Result<()> {
+    let used = self.fuel.get().saturating_add(1);
+    self.fuel.set(used);
+    if used > self.stop.get() {
+      return self.stopped(used);
+    }
+    Ok(())
+  }
+
+  /// Past `stop`: out of fuel, or a budgeted run's check: cancelled, or
+  /// past its deadline.
+  #[cold]
+  #[inline(never)]
+  fn stopped(&self, used: u64) -> Result<()> {
+    if used > self.limits.fuel {
+      if self.interrupt.is_some() {
+        return Err(out_of_fuel(self.limits.fuel));
+      }
+      return Err(budget(format!(
+        "the evaluation ran out of fuel (limit {})",
+        self.limits.fuel
+      )));
+    }
+    self
+      .stop
+      .set(used.saturating_add(INTERRUPT_EVERY).min(self.limits.fuel));
+    if let Some(interrupt) = &self.interrupt
+      && (interrupt
+        .cancel
+        .as_ref()
+        .is_some_and(|c| c.load(Ordering::Acquire))
+        || interrupt.deadline.is_some_and(|d| Instant::now() >= d))
+    {
+      return Err(Error::Cancelled);
+    }
+    Ok(())
+  }
+
   /// `bytes` are about to be allocated for a value: they must be within the
   /// value limit, and the allocation is charged a unit per byte.
   pub fn allocate(&self, bytes: usize) -> Result<()> {
+    // A run-time budget (it has an interrupt) counts work, not values: no
+    // value limits, nothing walked or charged by size.
+    if self.interrupt.is_some() {
+      return Ok(());
+    }
     self.admit(bytes)?;
     self.charge(bytes as u64)
   }
@@ -170,6 +304,9 @@ impl Meter {
   /// A value grows to `bytes` in place (amortized, nothing copied): only
   /// the value limit applies. The caller charges the work it does.
   pub fn admit(&self, bytes: usize) -> Result<()> {
+    if self.interrupt.is_some() {
+      return Ok(());
+    }
     if bytes > self.limits.value_bytes {
       return Err(budget(format!(
         "a value would grow past the value limit of {} bytes",
@@ -184,6 +321,9 @@ impl Meter {
   /// with an early exit, it must be within the value limit, and the read is
   /// charged by its size. Returns the size.
   pub fn traverse(&self, value: &Var) -> Result<usize> {
+    if self.interrupt.is_some() {
+      return Ok(0);
+    }
     let Some(bytes) = text_size(value, self.limits.value_bytes) else {
       return Err(budget(format!(
         "a value to compare or print is larger than the value limit of {} bytes",
@@ -198,6 +338,9 @@ impl Meter {
   /// table: it must nest less than [`VALUE_DEPTH`] levels. Measured with an
   /// early exit at that depth, and charged a unit per element read.
   pub fn nest(&self, value: &Var) -> Result<()> {
+    if self.interrupt.is_some() {
+      return Ok(());
+    }
     // A widely shared value can hold far more elements than memory: the
     // walk stops when it has read as many as the fuel left pays for.
     let left = self.limits.fuel.saturating_sub(self.fuel.get());
@@ -232,6 +375,17 @@ impl Meter {
       output_bytes,
     }
   }
+}
+
+/// A run-time budget's fuel spent: an `out-of-fuel` activation diagnostic.
+#[cold]
+fn out_of_fuel(fuel: u64) -> Error {
+  Error::Diagnostic(Box::new(Diagnostic::new(
+    Phase::Activate,
+    "activation-error",
+    "out-of-fuel",
+    format!("the run ran out of fuel (budget {fuel})"),
+  )))
 }
 
 /// An `expansion-budget` diagnostic (located by the caller at the `#( )`).
@@ -343,10 +497,12 @@ impl<'a> Walk<'a> {
 /// at the listed version, so a new version is excluded until it is audited
 /// again; host shards are never eligible. Shards with effects or persistent
 /// state are absent (`Keep`, `Once`, `Log`, `Maybe`, which logs what it
-/// catches, `Time.Now`, `Pause`, `Spawn`), as are `Stop` and `Return`,
-/// which have no value to give.
+/// catches, `Msg`, `Time.Now`, `Time.Epoch`, `Pause`, `Spawn`), as are
+/// `Stop` and `Return`, which have no value to give. Not audited yet: the
+/// text-tool shards in `text.rs` before `String.CodePoints`, and `Remove`
+/// (a composite through the public interface).
 static SAFE: &[(&ShardType, u32)] = {
-  use crate::shards::{data, math, values, *};
+  use crate::shards::{checks, data, math, seqs, text, values, *};
   &[
     // Constant work.
     (&CONST, 1),
@@ -365,6 +521,9 @@ static SAFE: &[(&ShardType, u32)] = {
     (&math::FLOOR, 1),
     (&math::CEIL, 1),
     (&math::LENGTH, 1),
+    (&math::MOD, 1),
+    (&math::MAX, 1),
+    (&math::MIN, 1),
     (&IS_LESS, 1),
     (&IS_MORE_EQUAL, 1),
     (&values::IS_MORE, 1),
@@ -376,10 +535,18 @@ static SAFE: &[(&ShardType, u32)] = {
     (&values::TO_FLOAT3, 1),
     (&values::TO_FLOAT4, 1),
     (&data::TAKE, 1),
+    (&checks::IS_TRUE, 1),
+    (&checks::IS_FALSE, 1),
+    (&checks::PASS, 1),
+    (&checks::TO_ANY, 1),
+    (&checks::TO_ANY_TABLE, 1),
+    (&seqs::CLEAR, 1),
     // Composites: the engine and the VM charge their dispatches; `Match`
     // charges each case it compares by size.
     (&WHEN, 1),
+    (&WHEN_NOT, 1),
     (&IF, 1),
+    (&COND, 1),
     (&MATCH, 1),
     (&ALL, 1),
     (&ANY, 1),
@@ -416,6 +583,30 @@ static SAFE: &[(&ShardType, u32)] = {
     (&values::EXPECT_FLOAT2, 1),
     (&values::EXPECT_FLOAT3, 1),
     (&values::EXPECT_FLOAT4, 1),
+    (&checks::EXPECT_INT_SEQ, 1),
+    (&checks::EXPECT_FLOAT_SEQ, 1),
+    (&checks::EXPECT_BOOL_SEQ, 1),
+    (&checks::EXPECT_STRING_SEQ, 1),
+    (&checks::EXPECT_BYTES_SEQ, 1),
+    (&checks::EXPECT_TABLE_SEQ, 1),
+    (&checks::EXPECT_FLOAT2_SEQ, 1),
+    (&checks::EXPECT_FLOAT3_SEQ, 1),
+    (&checks::EXPECT_FLOAT4_SEQ, 1),
+    (&checks::ASSERT_IS, 1),
+    (&checks::ASSERT_IS_NOT, 1),
+    (&text::STRING_CODE_POINTS, 1),
+    (&text::STRING_FROM_CODE_POINTS, 1),
+    (&text::STRING_CLEAN_UTF8, 1),
+    (&text::HEX_TO_BYTES, 1),
+    (&text::BYTES_TO_INTS, 1),
+    (&text::INTS_TO_BYTES, 1),
+    (&seqs::APPEND_TO, 1),
+    (&seqs::PREPEND_TO, 1),
+    (&seqs::EXTEND, 1),
+    (&seqs::POP_FRONT, 1),
+    (&seqs::DROP_FRONT, 1),
+    (&seqs::REVERSE, 1),
+    (&seqs::INDEX_OF, 1),
   ]
 };
 

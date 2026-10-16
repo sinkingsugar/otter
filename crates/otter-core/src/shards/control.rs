@@ -27,7 +27,7 @@ fn compose_error(
 }
 
 /// A predicate flow, which must output Bool.
-fn compose_predicate(
+pub(crate) fn compose_predicate(
   ctx: &mut ComposeCtx<'_>,
   flow: &[ShardDef],
   input: Type,
@@ -113,10 +113,23 @@ pub const IF_DESC: ShardDesc = ShardDesc {
   lifetime: crate::signature::Lifetime::Stateless,
 };
 
-/// `flows`: `[predicate, then]` or `[predicate, then, else]`.
+/// A chain of branches, lowered into the parent flow's code at compose
+/// (`ComposeCtx::flatten`): `flows` holds `branches` pairs of a predicate
+/// and the flow it guards, `[predicate, then, predicate, then, ...]`, then
+/// optionally an `else` flow. The first pair whose predicate is true runs;
+/// with none, `else` runs, or the input is the output. `If` is one pair;
+/// `Cond` is any number without `else`.
 pub struct IfCompiled {
   pub(crate) flows: Vec<CompiledFlow>,
+  pub(crate) branches: usize,
   pub(crate) passthrough: bool,
+}
+
+impl IfCompiled {
+  /// The flow run when no predicate is true, if any.
+  pub(crate) fn otherwise(&self) -> Option<&CompiledFlow> {
+    self.flows.get(2 * self.branches)
+  }
 }
 
 impl ControlFlows for IfCompiled {
@@ -150,9 +163,181 @@ pub(crate) fn compose_if(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Compos
   let mut flows = vec![pred, then];
   flows.extend(els);
   Ok(Composed {
-    compiled: IfCompiled { flows, passthrough },
+    compiled: IfCompiled {
+      flows,
+      branches: 1,
+      passthrough,
+    },
     output,
   })
+}
+
+// --- Cond ---
+
+pub static COND_PARAMS: &[ParamDecl] = &[
+  decl(
+    "branches",
+    crate::shard_doc!(
+      "Pairs of flows, `{predicate} {action}`: each predicate receives the input and outputs a Bool; the action runs when it is the first true one."
+    ),
+    FLOW,
+    NONE_TYPES,
+    Requirement::Variadic,
+  ),
+  decl(
+    "passthrough",
+    crate::shard_doc!("Output the input instead of the action's output."),
+    Forms::LITERAL,
+    &[TypeName::Bool],
+    Requirement::Default(DefaultValue::Bool(true)),
+  ),
+];
+
+pub const COND_DESC: ShardDesc = ShardDesc {
+  name: "Cond",
+  version: 1,
+  summary: crate::shard_doc!("Runs the action of the first predicate that is true."),
+  help: crate::shard_doc!(
+    "`Cond({IsLess(0)} {\"negative\"} {IsMore(0)} {\"positive\"} passthrough: false)`. Predicates are checked in order and stop at the first true one, whose action runs; later predicates do not run. Every flow receives Cond's input. With `passthrough` (the default, as in 1.x) Cond outputs its input; without it, the action's output, or the input when no predicate is true (a union of them). A Stop, Restart or Return inside a flow propagates. It runs as nested `If`s would, lowered into the flow's code."
+  ),
+  params: Params::Declared(COND_PARAMS),
+  input: InputDesc::Any,
+  output: OutputDesc::Dynamic(crate::shard_doc!(
+    "the input, or with `passthrough: false` the actions' outputs and the input"
+  )),
+  targets: Targets::All,
+  aliases: &[],
+  effects: crate::signature::Effects::NONE,
+  lifetime: crate::signature::Lifetime::Stateless,
+};
+
+pub(crate) fn compose_cond(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<IfCompiled>> {
+  let input = ctx.input();
+  let items = args.variadic("branches");
+  if items.is_empty() || !items.len().is_multiple_of(2) {
+    return Err(compose_error(
+      "Cond",
+      "branches",
+      0,
+      "cond-pairs",
+      format!(
+        "Cond takes pairs of flows, `{{predicate}} {{action}}`, but got {} flow{}",
+        items.len(),
+        if items.len() == 1 { "" } else { "s" }
+      ),
+    ));
+  }
+  let mut flows = Vec::with_capacity(items.len());
+  for (i, item) in items.iter().enumerate() {
+    let ParamValue::Flow(flow) = item else {
+      unreachable!("decoder accepted {item:?} for Cond.branches")
+    };
+    flows.push(if i % 2 == 0 {
+      // Only the first predicate always runs.
+      compose_predicate(ctx, flow, input, i > 0, "Cond", "branches", 0)?
+    } else {
+      ctx.compose_flow_conditional(flow, input)?
+    });
+  }
+  let passthrough = args.bool("passthrough").unwrap_or(true);
+  let output = if passthrough {
+    input
+  } else {
+    Type::union(
+      flows
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .map(|f| f.output)
+        .chain([input])
+        .collect::<Vec<_>>(),
+    )
+  };
+  Ok(Composed {
+    compiled: IfCompiled {
+      branches: flows.len() / 2,
+      flows,
+      passthrough,
+    },
+    output,
+  })
+}
+
+/// `Cond`: a chain of branches, lowered like `If`.
+pub struct Cond;
+
+impl crate::Shard for Cond {
+  type Compiled = IfCompiled;
+  type State = ();
+  const NAME: &'static str = COND_DESC.name;
+  const VERSION: u32 = COND_DESC.version;
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<IfCompiled>> {
+    compose_cond(args, ctx)
+  }
+  fn instantiate(_: &IfCompiled, _: &mut crate::instance::InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+  fn control(c: &IfCompiled) -> Option<crate::stackless::Control<'_>> {
+    Some(crate::stackless::Control::If(c))
+  }
+  fn activate(
+    _: &IfCompiled,
+    _: &mut (),
+    _: &mut crate::ActivationCtx<'_>,
+    _: &Var,
+  ) -> Result<crate::Step> {
+    unreachable!("lowered to flat code at compose")
+  }
+}
+
+// --- WhenNot ---
+
+pub const WHEN_NOT_DESC: ShardDesc = ShardDesc {
+  name: "WhenNot",
+  version: 1,
+  summary: crate::shard_doc!("Runs an `action` flow if a predicate flow outputs false."),
+  help: crate::shard_doc!(
+    "`When` with the predicate negated, in the same code (a jump on true instead of on false). Both flows receive WhenNot's input; it passes its input through, whether or not the `action` flow ran. A Stop, Restart or Return inside either flow propagates."
+  ),
+  params: Params::Declared(WHEN_PARAMS),
+  input: InputDesc::Any,
+  output: OutputDesc::Passthrough,
+  targets: Targets::All,
+  aliases: &[],
+  effects: crate::signature::Effects::NONE,
+  lifetime: crate::signature::Lifetime::Stateless,
+};
+
+/// `WhenNot`: `When`'s compiled form with the predicate negated, lowered
+/// by the same code.
+pub struct WhenNot;
+
+impl crate::Shard for WhenNot {
+  type Compiled = Predicated;
+  type State = ();
+  const NAME: &'static str = WHEN_NOT_DESC.name;
+  const VERSION: u32 = WHEN_NOT_DESC.version;
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Predicated>> {
+    let pred = args.flow("predicate").expect("decoded Predicate flow");
+    let body = args.flow("action").expect("decoded Action flow");
+    let mut composed = compose_predicate_and_body(pred, body, ctx, "WhenNot")?;
+    composed.compiled.negate = true;
+    Ok(composed)
+  }
+  fn instantiate(_: &Predicated, _: &mut crate::instance::InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+  fn control(c: &Predicated) -> Option<crate::stackless::Control<'_>> {
+    Some(crate::stackless::Control::When(c))
+  }
+  fn activate(
+    _: &Predicated,
+    _: &mut (),
+    _: &mut crate::ActivationCtx<'_>,
+    _: &Var,
+  ) -> Result<crate::Step> {
+    unreachable!("lowered to flat code at compose")
+  }
 }
 
 // --- Match ---
@@ -174,6 +359,13 @@ pub static MATCH_PARAMS: &[ParamDecl] = &[
     NONE_TYPES,
     Requirement::Optional,
   ),
+  decl(
+    "passthrough",
+    crate::shard_doc!("Output the input instead of the matched flow's output."),
+    Forms::LITERAL,
+    &[TypeName::Bool],
+    Requirement::Default(DefaultValue::Bool(false)),
+  ),
 ];
 
 pub const MATCH_DESC: ShardDesc = ShardDesc {
@@ -181,12 +373,12 @@ pub const MATCH_DESC: ShardDesc = ShardDesc {
   version: 1,
   summary: crate::shard_doc!("Runs the flow of the first case equal to the input."),
   help: crate::shard_doc!(
-    "Cases are tried in order and compare as in Is; `none` matches only none. The matched flow receives the input, and Match outputs that flow's output (an empty flow `{}` outputs its input). Match must be exhaustive: either the cases cover every value of the input type (true and false for a Bool, none for None, all of them for a union of those), or `default:` runs when nothing matched."
+    "Cases are tried in order and compare as in Is; `none` matches only none. The matched flow receives the input, and Match outputs that flow's output (an empty flow `{}` outputs its input), or its own input with `passthrough: true`. Match must be exhaustive: either the cases cover every value of the input type (true and false for a Bool, none for None, all of them for a union of those), or `default:` runs when nothing matched."
   ),
   params: Params::Declared(MATCH_PARAMS),
   input: InputDesc::Any,
   output: OutputDesc::Dynamic(crate::shard_doc!(
-    "the union of the case and default outputs"
+    "the union of the case and default outputs; the input with `passthrough`"
   )),
   targets: Targets::All,
   aliases: &[],
@@ -332,6 +524,61 @@ pub(crate) fn compose_match(
   })
 }
 
+/// `Match`'s node: the engine's own (`Control::Match`), or with
+/// `passthrough` a custom composite that runs the case and outputs its
+/// input, so the common form's completion tests nothing more.
+pub(crate) fn compose_match_node(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+  lifetime: crate::signature::Lifetime,
+) -> Result<Composed<std::sync::Arc<dyn crate::shard::CompiledNode>>> {
+  if !args.bool("passthrough").unwrap_or(false) {
+    return crate::shard::compose_erased::<crate::stackless::shards::Match>(args, ctx, lifetime);
+  }
+  let input = ctx.input();
+  let composed = compose_match(args, ctx)?;
+  Ok(Composed {
+    compiled: crate::shard::custom_node(
+      Box::new(MatchThrough(composed.compiled)),
+      MATCH_DESC.name,
+      lifetime,
+    ),
+    output: input,
+  })
+}
+
+/// `Match(passthrough: true)`: runs the case Match would, then outputs its
+/// input.
+struct MatchThrough(MatchCompiled);
+
+impl crate::shard::CustomControl for MatchThrough {
+  fn flows(&self) -> &[CompiledFlow] {
+    &self.0.flows
+  }
+
+  fn new_state(&self) -> Box<dyn std::any::Any> {
+    Box::new(())
+  }
+
+  fn reset_state(&self, _: &mut dyn std::any::Any) {}
+
+  fn resume(
+    &self,
+    _: &mut dyn std::any::Any,
+    ctx: &mut crate::shard::ActivationCtx<'_>,
+    input: &Var,
+    completion: Option<Result<Var>>,
+  ) -> Result<crate::ControlStep> {
+    match completion {
+      None => Ok(crate::ControlStep::Enter(
+        self.0.find(input, ctx.meter)?,
+        input.clone(),
+      )),
+      Some(result) => result.map(|_| crate::ControlStep::Complete(input.clone())),
+    }
+  }
+}
+
 // --- Maybe ---
 
 pub static MAYBE_PARAMS: &[ParamDecl] = &[
@@ -344,7 +591,9 @@ pub static MAYBE_PARAMS: &[ParamDecl] = &[
   ),
   decl(
     "else",
-    crate::shard_doc!("The flow to run, with Maybe's input, if `action` fails."),
+    crate::shard_doc!(
+      "The flow to run if `action` fails: with Maybe's input, or with the error's message when `error` is set."
+    ),
     FLOW,
     NONE_TYPES,
     Requirement::Optional,
@@ -352,6 +601,13 @@ pub static MAYBE_PARAMS: &[ParamDecl] = &[
   decl(
     "silent",
     crate::shard_doc!("Do not log the error that `action` failed with."),
+    Forms::LITERAL,
+    &[TypeName::Bool],
+    Requirement::Default(DefaultValue::Bool(false)),
+  ),
+  decl(
+    "error",
+    crate::shard_doc!("Give `else` the error's message (a String) as its input."),
     Forms::LITERAL,
     &[TypeName::Bool],
     Requirement::Default(DefaultValue::Bool(false)),
@@ -380,6 +636,8 @@ pub const MAYBE_DESC: ShardDesc = ShardDesc {
 pub struct MaybeCompiled {
   flows: Vec<CompiledFlow>,
   silent: bool,
+  /// Else's input is the error's message.
+  error: bool,
 }
 
 impl ControlFlows for MaybeCompiled {
@@ -395,8 +653,12 @@ pub(crate) fn compose_maybe(
   let input = ctx.input();
   // Action may stop partway, so what it assigns is not definitely assigned.
   let action = ctx.compose_flow_conditional(args.flow("action").expect("decoded"), input)?;
+  let error = args.bool("error").unwrap_or(false);
   let els = match args.flow("else") {
-    Some(flow) => Some(ctx.compose_flow_conditional(flow, input)?),
+    Some(flow) => {
+      let else_input = if error { Type::string() } else { input };
+      Some(ctx.compose_flow_conditional(flow, else_input)?)
+    }
     None => None,
   };
   // Without Else, the input passes through (1.x).
@@ -410,20 +672,26 @@ pub(crate) fn compose_maybe(
     compiled: MaybeCompiled {
       flows,
       silent: args.bool("silent").unwrap_or(false),
+      error,
     },
     output,
   })
 }
 
-/// What Maybe does with an error from action: `None` to propagate it.
-fn maybe_caught(silent: bool, err: Error) -> std::result::Result<(), Error> {
+/// What Maybe does with an error from action: `Err` to propagate it,
+/// otherwise its message (an activation error's without the wrapper's
+/// prefix).
+fn maybe_caught(silent: bool, err: Error) -> std::result::Result<String, Error> {
   match err {
     Error::Cancelled => Err(Error::Cancelled),
     other => {
       if !silent {
         crate::log::emit(format!("Maybe: {other}"));
       }
-      Ok(())
+      Ok(match other {
+        Error::Activation(message) => message,
+        other => other.to_string(),
+      })
     }
   }
 }
@@ -475,10 +743,15 @@ impl crate::ControlShard for Maybe {
         value
       })),
       (MaybeState::Action, Some(Err(err))) => {
-        maybe_caught(compiled.silent, err)?;
+        let message = maybe_caught(compiled.silent, err)?;
         if compiled.flows.len() > 1 {
           *state = MaybeState::Else;
-          Ok(Enter(1, input.clone()))
+          let else_input = if compiled.error {
+            Var::string(&message)
+          } else {
+            input.clone()
+          };
+          Ok(Enter(1, else_input))
         } else {
           Ok(Complete(input.clone()))
         }

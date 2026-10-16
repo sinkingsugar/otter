@@ -232,17 +232,51 @@ impl LeafShard for Update {
 
 pub struct Get;
 
+/// A `Get`: a plain read, which the VM runs as an instruction, or a read
+/// with a default (and maybe a table key), an ordinary activation.
+pub enum GetCode {
+  Plain(Binding),
+  Default {
+    binding: Binding,
+    key: Option<Operand>,
+    default: Operand,
+    /// The default's type: a value it admits is output, else the default.
+    accept: Type,
+  },
+}
+
 impl LeafShard for Get {
-  type Compiled = Binding;
-  no_state!(Binding);
+  type Compiled = GetCode;
+  no_state!(GetCode);
   const DESC: ShardDesc = GET_DESC;
 
-  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Binding>> {
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<GetCode>> {
     compose_get(args, ctx)
   }
 
-  fn activate(b: &Binding, _: &mut (), ctx: &mut impl LeafCtx, _: &Var) -> Result<Flow> {
-    Ok(Flow::Next(ctx.get(*b)))
+  fn activate(code: &GetCode, _: &mut (), ctx: &mut impl LeafCtx, _: &Var) -> Result<Flow> {
+    match code {
+      GetCode::Plain(b) => Ok(Flow::Next(ctx.get(*b))),
+      GetCode::Default {
+        binding,
+        key,
+        default,
+        accept,
+      } => {
+        let value = ctx.get(*binding);
+        let value = match key {
+          None => Some(value),
+          Some(key) => match (&value, &key.get(ctx)) {
+            (Var::Table(table), Var::String(k)) => table.get(k).cloned(),
+            _ => None,
+          },
+        };
+        Ok(Flow::Next(match value {
+          Some(v) if accept.admits(&v) => v,
+          _ => default.get(ctx),
+        }))
+      }
+    }
   }
 }
 

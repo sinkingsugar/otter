@@ -2,7 +2,7 @@
 //! (`Is`, `IsNot`, `IsMore`, `IsLessEqual`, `IsAny`, `IsNone`,
 //! `IsNotNone`), conversions (`ToString`, `ToInt`, `ToFloat`, `ToHex`,
 //! `ToFloat2/3/4`, `ParseInt`, `ParseFloat`), type narrowing (`Expect*`)
-//! and `Time.Now`. All leaf shards.
+//! `Time.Now`, `Time.Epoch`, `Time.EpochMs` and `Msg`. All leaf shards.
 
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -26,6 +26,9 @@ pub static NOT: ShardType = leaf_type::<Pure<NotOp>>();
 pub static IS_NONE: ShardType = leaf_type::<Pure<IsNoneOp>>();
 pub static IS_NOT_NONE: ShardType = leaf_type::<Pure<IsNotNoneOp>>();
 pub static TIME_NOW: ShardType = leaf_type::<Pure<TimeNowOp>>();
+pub static TIME_EPOCH: ShardType = leaf_type::<Pure<EpochOp<false>>>();
+pub static TIME_EPOCH_MS: ShardType = leaf_type::<Pure<EpochOp<true>>>();
+pub static MSG: ShardType = leaf_type::<Msg>();
 pub static TO_STRING: ShardType = leaf_type::<Pure<ToStringOp>>();
 pub static TO_INT: ShardType = leaf_type::<Pure<ToIntOp>>();
 pub static TO_FLOAT: ShardType = leaf_type::<Pure<ToFloatOp>>();
@@ -46,7 +49,7 @@ pub static EXPECT_FLOAT2: ShardType = leaf_type::<Pure<Expect<ExpectFloat2K>>>()
 pub static EXPECT_FLOAT3: ShardType = leaf_type::<Pure<Expect<ExpectFloat3K>>>();
 pub static EXPECT_FLOAT4: ShardType = leaf_type::<Pure<Expect<ExpectFloat4K>>>();
 
-fn mismatch(name: &str, input: Type, expected: &[TypeName]) -> Error {
+pub(crate) fn mismatch(name: &str, input: Type, expected: &[TypeName]) -> Error {
   let names: Vec<&str> = expected.iter().map(|t| t.name()).collect();
   Error::Diagnostic(Box::new(
     Diagnostic::new(
@@ -590,7 +593,7 @@ pub trait PureOp: 'static {
 }
 
 /// A string's bytes, charged as the work of reading it through.
-fn meter_bytes(input: &Var, meter: &Meter) -> Result<()> {
+pub(crate) fn meter_bytes(input: &Var, meter: &Meter) -> Result<()> {
   let len = match input {
     Var::String(s) => s.len(),
     Var::Bytes(b) => b.len(),
@@ -630,7 +633,7 @@ impl<P: PureOp> LeafShard for Pure<P> {
   }
 }
 
-const fn pure_desc(
+pub(crate) const fn pure_desc(
   name: &'static str,
   summary: &'static str,
   help: &'static str,
@@ -653,7 +656,7 @@ const fn pure_desc(
 }
 
 /// `Ok(out)` when `input` is one of `accepted`.
-fn one_of(
+pub(crate) fn one_of(
   input: Type,
   accepted: &'static [TypeName],
   out: Type,
@@ -665,7 +668,7 @@ fn one_of(
   }
 }
 
-fn fail(name: &str, what: &str) -> Error {
+pub(crate) fn fail(name: &str, what: &str) -> Error {
   Error::Activation(format!("{name}: {what}"))
 }
 
@@ -773,6 +776,133 @@ impl PureOp for TimeNowOp {
     Ok(Var::Float(
       START.get_or_init(Instant::now).elapsed().as_secs_f64(),
     ))
+  }
+}
+
+/// `Time.Epoch` (seconds) and `Time.EpochMs` (milliseconds): the wall
+/// clock since the Unix epoch.
+pub struct EpochOp<const MS: bool>;
+impl<const MS: bool> EpochOp<MS> {
+  const NAME: &'static str = if MS { "Time.EpochMs" } else { "Time.Epoch" };
+}
+impl<const MS: bool> PureOp for EpochOp<MS> {
+  const DESC: ShardDesc = ShardDesc {
+    effects: crate::signature::Effects::TIME,
+    ..pure_desc(
+      Self::NAME,
+      if MS {
+        crate::shard_doc!("Outputs the wall-clock time in whole milliseconds since the Unix epoch.")
+      } else {
+        crate::shard_doc!("Outputs the wall-clock time in whole seconds since the Unix epoch.")
+      },
+      crate::shard_doc!(
+        "Ignores its input. UTC, from the system clock, so it can jump when the clock is set: measure durations with `Time.Now`. A clock set before 1970 is an activation error."
+      ),
+      InputDesc::Ignored,
+      OutputDesc::Fixed(TypeName::Int),
+    )
+  };
+  fn output(_: Type) -> std::result::Result<Type, &'static [TypeName]> {
+    Ok(Type::int())
+  }
+  fn apply(_: &Var) -> Result<Var> {
+    let since = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map_err(|_| fail(Self::NAME, "the system clock is set before 1970"))?;
+    let value = if MS {
+      since.as_millis()
+    } else {
+      u128::from(since.as_secs())
+    };
+    i64::try_from(value)
+      .map(Var::Int)
+      .map_err(|_| fail(Self::NAME, "the time does not fit in an Int"))
+  }
+}
+
+// --- Msg ---
+
+pub static MSG_PARAMS: &[ParamDecl] = &[
+  decl(
+    "message",
+    crate::shard_doc!("The text to write: a String literal or variable."),
+    OPERAND,
+    &[TypeName::String],
+    Requirement::Required,
+  ),
+  decl(
+    "level",
+    crate::shard_doc!(
+      "How severe the message is: \"trace\", \"debug\", \"info\", \"warning\" or \"error\"."
+    ),
+    Forms::LITERAL,
+    &[TypeName::String],
+    Requirement::Default(DefaultValue::Str("info")),
+  ),
+];
+
+pub const MSG_DESC: ShardDesc = ShardDesc {
+  name: "Msg",
+  version: 1,
+  summary: crate::shard_doc!(
+    "Writes a message to the log at a level and passes its input through."
+  ),
+  help: crate::shard_doc!(
+    "The input is not written (`Log` writes it). An `info` line is the message as it is; other levels are prefixed with theirs (`[warning] low disk`). Messages less severe than the process's threshold (`otter_core::log::set_level`, `info` by default) are dropped."
+  ),
+  params: Params::Declared(MSG_PARAMS),
+  input: InputDesc::Any,
+  output: OutputDesc::Passthrough,
+  targets: Targets::All,
+  aliases: &[],
+  effects: crate::signature::Effects::IO,
+  lifetime: crate::signature::Lifetime::Stateless,
+};
+
+pub struct MsgCompiled {
+  message: Operand,
+  level: crate::log::Level,
+}
+
+pub struct Msg;
+
+impl LeafShard for Msg {
+  type Compiled = MsgCompiled;
+  type State = ();
+  const DESC: ShardDesc = MSG_DESC;
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<MsgCompiled>> {
+    let (message, _) = Operand::compose_arg(args, "message", "Msg", ctx)?;
+    let name = args.string("level").unwrap_or("info");
+    let Some(level) = crate::log::Level::from_name(name) else {
+      return Err(param_error(
+        args,
+        "Msg",
+        "level",
+        "compose-error",
+        "invalid-argument-value",
+        format!(
+          "unknown level {name:?}; use \"trace\", \"debug\", \"info\", \"warning\" or \"error\""
+        ),
+      ));
+    };
+    Ok(Composed {
+      compiled: MsgCompiled { message, level },
+      output: ctx.input(),
+    })
+  }
+
+  fn instantiate(_: &MsgCompiled, _: &mut InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+
+  fn activate(c: &MsgCompiled, _: &mut (), ctx: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
+    let message = c.message.get(ctx);
+    match message.as_str() {
+      Some(text) => crate::log::emit_at(c.level, text),
+      None => crate::log::emit_at(c.level, &message.text()),
+    }
+    Ok(Flow::Next(input.clone()))
   }
 }
 

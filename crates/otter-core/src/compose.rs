@@ -270,6 +270,46 @@ fn call_site(c: &CallCompiled) -> CallSite {
   }
 }
 
+/// Lowers an `If` or `Cond` chain ([`crate::shards::control::IfCompiled`]):
+/// for each branch, the predicate, a jump past the branch when it is false,
+/// the branch, and a jump to the end; after the last branch, `else` or the
+/// input; then every jump to the end is retargeted there. A loop, not a
+/// recursion per branch: a `Cond` with thousands of branches must not take
+/// the stack with it. One branch is `If`'s code.
+fn flat_branches(
+  flat: &mut Flat,
+  chain: &crate::shards::control::IfCompiled,
+  saved: Binding,
+  input: Type,
+) {
+  use crate::inline::Op;
+  let mut to_end = Vec::with_capacity(chain.branches);
+  for k in 0..chain.branches {
+    if k > 0 {
+      flat.op(Op::get(saved), input);
+    }
+    flat.append(&chain.flows[2 * k]);
+    let skip = flat.op(Op::JumpIfNot(0), Type::any());
+    flat.op(Op::get(saved), input);
+    flat.append(&chain.flows[2 * k + 1]);
+    if chain.passthrough {
+      flat.op(Op::get(saved), input);
+    }
+    to_end.push(flat.op(Op::Jump(0), Type::any()));
+    flat.target(skip);
+  }
+  flat.op(Op::get(saved), input);
+  if let Some(otherwise) = chain.otherwise() {
+    flat.append(otherwise);
+    if chain.passthrough {
+      flat.op(Op::get(saved), input);
+    }
+  }
+  for jump in to_end {
+    flat.target(jump);
+  }
+}
+
 /// A flow's code under construction: nodes, instructions and the node each
 /// instruction stands for (`CompiledFlow::pc_nodes`).
 struct Flat {
@@ -845,6 +885,12 @@ impl ComposeCtx<'_> {
     }
   }
 
+  /// Effects the shard being composed has beyond its description's,
+  /// decided by its arguments (`Once(every:)` reads the clock).
+  pub fn add_effects(&mut self, effects: crate::signature::Effects) {
+    self.analysis.effects = self.analysis.effects.union(effects);
+  }
+
   /// Whether the shard being composed is inside a block passed to a call
   /// (docs/metaprogramming.md §3.1): it runs inside the callee.
   pub fn in_flow_argument(&self) -> bool {
@@ -1010,7 +1056,12 @@ impl ComposeCtx<'_> {
         flat.op(Op::Set(saved), input);
         let top = flat.here();
         flat.append(&p.pred);
-        let exit = flat.op(Op::JumpIfNot(0), Type::any());
+        // `WhenNot` leaves on true.
+        let exit = if p.negate {
+          flat.op(Op::JumpIf(0), Type::any())
+        } else {
+          flat.op(Op::JumpIfNot(0), Type::any())
+        };
         flat.op(Op::get(saved), input);
         flat.append(&p.body);
         if looping {
@@ -1164,23 +1215,7 @@ impl ComposeCtx<'_> {
       Control::If(i) => {
         let saved = Binding::Local(self.declare_hidden(input));
         flat.op(Op::Set(saved), input);
-        flat.append(&i.flows[0]);
-        let to_else = flat.op(Op::JumpIfNot(0), Type::any());
-        flat.op(Op::get(saved), input);
-        flat.append(&i.flows[1]);
-        if i.passthrough {
-          flat.op(Op::get(saved), input);
-        }
-        let to_end = flat.op(Op::Jump(0), Type::any());
-        flat.target(to_else);
-        flat.op(Op::get(saved), input);
-        if let Some(els) = i.flows.get(2) {
-          flat.append(els);
-          if i.passthrough {
-            flat.op(Op::get(saved), input);
-          }
-        }
-        flat.target(to_end);
+        flat_branches(flat, i, saved, input);
         flat.release(saved, input);
       }
       _ => return false,

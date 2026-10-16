@@ -1,4 +1,4 @@
-//! `Http.Get`'s description and catalog entry: available without creating
+//! `Http.Get`'s and the `FS.*` shards' descriptions and catalog entries: available without creating
 //! the runtime, a client or a request. Its own test binary, so no other test
 //! starts the runtime first.
 
@@ -16,12 +16,17 @@ fn http_get_is_described_without_starting_anything() {
   assert!(json.contains("\"required\":true"));
   assert!(json.contains("\"name\":\"timeout\",\"index\":1"));
   assert!(json.contains("\"default\":10"));
-  assert!(
-    json
-      .contains("\"output\":{\"kind\":\"fixed\",\"type\":{\"name\":\"String\",\"basic_type\":52}}")
-  );
+  // The output type depends on `bytes` and `full-response`.
+  assert!(json.contains("\"output\":{\"kind\":\"dynamic\""), "{json}");
+  assert!(json.contains("\"name\":\"full-response\""), "{json}");
   assert!(catalog.index_json().contains("\"name\":\"Http.Get\""));
   assert_eq!(catalog.search("http").len(), 1);
+  // The filesystem shards too.
+  let json = catalog.describe_json("FS.Read").unwrap();
+  assert!(json.contains("\"targets\":\"native-only\""), "{json}");
+  assert!(json.contains("\"io\":true"), "{json}");
+  let json = catalog.describe_json("FS.Join").unwrap();
+  assert!(json.contains("\"io\":false"), "{json}");
   assert!(
     !runtime_started(),
     "describing Http.Get must not start the runtime"

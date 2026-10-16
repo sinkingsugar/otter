@@ -33,12 +33,24 @@ pub fn runtime_started() -> bool {
   RUNTIME.get().is_some()
 }
 
+/// As in 1.x: installs the ring provider once, before any TLS client is
+/// built. Clients are built when a request starts, which can be before the
+/// runtime exists, so building one calls this too.
+pub(crate) fn install_tls_provider() {
+  #[cfg(feature = "rustls-ring")]
+  {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+      // A host that installed a provider of its own keeps it.
+      let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+  }
+}
+
 /// The shared runtime, created on first use.
 pub fn runtime() -> &'static Runtime {
   RUNTIME.get_or_init(|| {
-    // As in 1.x: install the ring provider once, before any TLS client.
-    #[cfg(feature = "rustls-ring")]
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    install_tls_provider();
     tokio::runtime::Builder::new_multi_thread()
       .worker_threads(4)
       .enable_all()

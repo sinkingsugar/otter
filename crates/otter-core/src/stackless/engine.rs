@@ -1439,7 +1439,7 @@ impl Engine {
           // is at this instruction; a run moves it along.
           meter.at(index);
         }
-        meter.charge(1).err()
+        meter.step().err()
       }
       _ => None,
     };

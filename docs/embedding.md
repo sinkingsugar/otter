@@ -5,8 +5,9 @@ How a Rust program (the host) adds its own shards and runs Shards scripts on the
 ## 1. Crates
 
 - `otter-core`: values, types, the shard traits, compose, and the scheduler (`Mesh`).
-- `otter-lang`: source to wire definitions, `check` and `run`.
-- `otter-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work.
+- `otter-lang`: source to wire definitions, `check` and `run`, sessions with hot reload (§5), and tools (§6).
+- `otter-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work, and the `Http.Get` and `FS.*` shards.
+- `otter-text` (native and wasm): regular expressions, hashes, `UUID` and `NanoID`, the text shards that need third-party crates.
 
 Depend on them by path or git. Host shards live in the host's own crate, and nothing in this repository needs to know about them.
 
@@ -41,7 +42,7 @@ A script can also write control flow itself: a function parameter declared `Flow
 
 ### Parameters
 
-Declare parameters with `ParamDecl::new(name, help, forms, types, requirement)`: accepted forms (`Forms::LITERAL`, `VARIABLE`, `FLOW`, ...), types (`TypeName`s) and requirement (`Required`, `Optional`, `Default(...)`, `Variadic`). When a `TypeName` list cannot say the type (`[Int]`, `Float4 | None`, a table with given keys), declare the full type instead: `ParamDecl::new_typed(name, help, forms, requirement, || Type::seq(Type::int()))`. It needs no `TypeName` list; the catalog derives the type code. The decoder enforces forms, requirements and literal types before compose runs.
+Declare parameters with `ParamDecl::new(name, help, forms, types, requirement)`: accepted forms (`Forms::LITERAL`, `VARIABLE`, `FLOW`, ...), types (`TypeName`s) and requirement (`Required`, `Optional`, `Default(...)`, `Variadic`; a variadic parameter takes the remaining positional arguments, and any after it are given by name and not `Required`). When a `TypeName` list cannot say the type (`[Int]`, `Float4 | None`, a table with given keys), declare the full type instead: `ParamDecl::new_typed(name, help, forms, requirement, || Type::seq(Type::int()))`. It needs no `TypeName` list; the catalog derives the type code. The decoder enforces forms, requirements and literal types before compose runs.
 
 For a value that can be a literal or a variable (a `Target: pid` the script sets at runtime), use `Operand::compose_arg` in compose. It resolves the variable, reports unknown or possibly-uninitialized ones, and checks the variable's type against the declaration (the full type, or the type list), all as located errors. Then call `Operand::get(ctx)` at activation. For a parameter declared `Requirement::Optional`, use `Operand::compose_optional_arg`, which returns `None` when the script did not give it; `compose_arg` is for required and defaulted parameters.
 
@@ -84,12 +85,13 @@ Build one catalog from the core list and the host's list:
 Catalog::new(&[otter_core::shards::CATALOG, HOST_CATALOG])
 ```
 
-Add `otter_io::CATALOG` if scripts use `Http.Get`. Then:
+Add `otter_io::CATALOG` if scripts use `Http.Get` or the filesystem, and `otter_text::CATALOG` for `Regex.*`, `Hash.*`, `UUID` and `NanoID` (the `otter` command includes both). Then:
 
 - **Check without running:** `otter_lang::check(Source::new(path, text), &catalog, &defines)`. It returns the 1.x `{ok, file, diagnostics}` JSON envelope (`to_json()`), and `otter_lang::render` prints a diagnostic for humans.
 - **Run:** `Program::load(source, &catalog, &defines)`, then `program.run()`. The report has each entry wire's outcome, plus failures of spawned instances.
 - **Script arguments:** `defines` maps `name` to a string, read as `@name` in scripts.
 - **Files:** `@include("lib.shs")` and `@read("data.txt")` (or `@read("blob.bin" bytes: true)`) read files while the program loads, relative to the file naming them. `Program::load` and `check` read the filesystem (`FsFiles`); `Program::load_with`, `check_with` and `Session::set_files` take any `Files`: `FsFiles { include_paths }` searches more directories after the including file's (the CLI's `-I`), and `MemoryFiles` holds files by name, for a host without a filesystem (a device carrying its scripts in flash) and for tests. A host's own `Files` implements `resolve` (the file a path names, pushing every name it looks at, found or not, to `looked`) and `contents` (a file's bytes now, by that name). `Program::files` and `Session::files_read` list what a program read; `FileWatcher` reloads when any name its last load looked at changes, compared by exact bytes through the session's `Files`: an edit, a file created where a missing include was looked for, or one created earlier in the search order. A file is included once per program however often it is named. Diagnostics name the file they are in.
+- **Files while running:** `otter_io::CATALOG` has the `FS.*` shards: `FS.Read` (`bytes:`), `FS.Write` (`contents:`, `overwrite:`, `append:`), `FS.Exists`, `FS.IsFile`, `FS.IsDirectory`, `FS.Iterate` (`recursive:`), `FS.CreateDirectories`, `FS.Remove`, `FS.RemoveAll`, `FS.Copy` (`destination:`, `overwrite:`), `FS.Rename` (`new-name:`), each taking the path as input and running on the blocking pool, and the leaf path helpers `FS.Join`, `FS.Extension`, `FS.Filename` and `FS.Parent`, which touch no disk. Which paths they may use is the mesh's `otter_io::fs::FsAccess` service, read at activation. Without one, any path, relative paths against the process's working directory (what `otter run` uses). `FsAccess::within(dir)` resolves relative paths against `dir` and denies any path that leaves it, by `..`, an absolute path or a symbolic link (a link's target resolved by the filesystem, and every file a directory copy writes checked), and any change to `dir` itself; `.read_only()` also denies changes, and `FsAccess::denied()` denies all file access. The check resolves the path through the filesystem and the operation then uses the resolved path; it cannot close the race with another process swapping a directory for a link between the two, so a host running untrusted scripts beside untrusted writers needs an OS sandbox too. Failures are activation errors: `FS.Read: notes.txt: No such file or directory (os error 2)`, `FS.Write: ../x: outside the allowed directory`.
 - **Logging:** `Log` writes to standard output; values print as text: whole floats without `.0`, other floats exact (1.x rounded to six digits). A host shard can log with `otter_core::log::emit`. `otter_core::log::capture` collects the lines a run logs, including lines logged by work it started through `otter_io` on other threads, which is useful in host tests.
 
 The language is the 1.x syntax with the changes in [surface-syntax-review.md](surface-syntax-review.md) and the deviations listed in [current-state.md](current-state.md). The ones scripts hit most:
@@ -304,3 +306,55 @@ from its own watcher or command channel.
 ### Compose-time evaluation limits (M8)
 
 `#( ... )` runs a pipeline while the mesh composes ([metaprogramming.md §2](metaprogramming.md#2-m8-compose-time-evaluation)). `Mesh::set_eval_limits(EvalLimits { fuel, depth, value_bytes, output_bytes })` sets its budgets; the defaults are small enough for the device (`EvalLimits::default()`), and a preserving revision keeps them. A result cached under larger limits is not accepted under smaller ones. Only the core shards on the audited list in `compose_time.rs` run at compose time: a host shard is never eligible, whatever its effects, and `#( )` reaching one is a `not-compose-time` diagnostic. `LeafCtx::meter()` is `None` at run time; it exists for the listed shards, which charge their work to it.
+
+## 6. Tools
+
+A **tool** is a script a host loads while it runs and calls with a table of arguments, getting text back: what an agent host offers a model as a function to call (`otter_lang::Tool`, the host side of [host-requirements.md H8](host-requirements.md#h8-compiling-code-while-the-program-runs), in its smallest form). The script declares functions and ends with its definition, a table its top-level code outputs:
+
+```shards
+@fn(Greet input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input.name | If({IsString} {ExpectString} {"" | Fail}) = name
+  f"Hello, {name}!"
+})
+
+{
+  definition: {
+    name: "greet"
+    description: "Greets someone."
+    parameters: {type: "object" properties: {name: {type: "string"}} required: ["name"]}
+  }
+  use: "Greet"
+}
+```
+
+`definition` is what the model is told (`parameters` is JSON Schema, passed on as written); `use` names the function a call runs. That function takes the call table: `input` the arguments, `env` the host's settings for the tool (any table the host passes), `working-dir` the directory it works in. It outputs the result: a String as it is, any other value as JSON.
+
+```rust
+use otter_lang::{CallOptions, MemoryFiles, Source, Tool, ToolError, ToolInput};
+
+let catalog = Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG])?;
+// Parses, lowers and composes everything once: problems are located
+// diagnostics (`ToolError::Compile`) before the tool is offered.
+let tool = Tool::load_with(Source::new("greet.shs", text), &catalog, &defines, &MemoryFiles::default())?;
+let d = tool.definition();
+offer(&d.name, &d.description, &d.parameters);
+
+// A model asked for a call: its arguments are JSON.
+let input = ToolInput::from_json(r#"{"name": "Ann"}"#)?
+  .with_env(settings)
+  .with_working_dir("/work");
+let options = CallOptions { services, cancel: Some(flag), timeout: Some(Duration::from_secs(60)) };
+match tool.call_with(&input, &options) {
+  Ok(out) => reply(&out.text),                         // `out.log`: what the call logged
+  Err(ToolError::Failed { message, log }) => reply(&message), // `Fail`, an activation error
+  Err(e) => reply(&e.to_string()),                     // cancelled, timed out, bad input
+}
+```
+
+- **Loading:** `Tool::load` reads `@include` and `@read` files from the filesystem; `Tool::load_with` takes defines and any `Files` (§3). `files()` lists what the script read, for a host that reloads tools when they change. The top-level code must only build the definition: no I/O, waiting or clock (`ToolError::Definition` otherwise). The function's declared input must accept the call table, checked at load.
+- **What a tool may use** is the catalog it loads with: a host's list of forbidden shards is a smaller catalog. `effects()` reports what a call may do (I/O, waiting, the clock, randomness, undeclared host effects), inferred through everything the function calls; a tool with `Effects::NONE` only computes. Effects are declared by shards, a trusted contract, not a sandbox.
+- **Calling:** each call runs the function, composed once at load, on a fresh mesh on the calling thread, and blocks until it finishes, fails, is cancelled (`CallOptions::cancel`, an `AtomicBool` set from any thread) or times out; `services` go into the call's mesh (§2). With a cancellation flag, a time limit or `fuel` (a bound on the work, in engine dispatches and VM instructions plus a unit per byte native shards allocate), the call runs metered (`otter_core::Budget`, `Mesh::tick_budgeted`): they are checked every 4,096 units, so even a loop that never suspends stops. The metered engine is slower on compute-heavy code (measured +30 to +65 percent on simple VM operations, about three times on constructors), and a call with none of the three runs unmetered; the plain runtime pays nothing for budgets. A call is done when its function is: wires it spawned are cancelled when it returns. From async code call it on a blocking thread (`tokio::task::spawn_blocking`). A `Tool` is cheap to clone and `Send + Sync`; calls are independent and may run concurrently. While the function waits on I/O the calling thread sleeps between ticks, at most 8 ms.
+- **Files:** a call is confined to its `working-dir` by default: unless `CallOptions::services` holds an `FsAccess`, the call gets `FsAccess::within(working_dir)`, or no file access when the working directory is empty or does not exist. Tools are usually written by models, which rarely scope their own files; a host that wants another policy inserts it (`FsAccess::unrestricted()`, `read_only()`, another root). `otter tool` passes the current directory.
+- **The command line:** `otter tool <file>` prints the definition as JSON; `otter tool <file> '<json arguments>'` calls it, printing the output on standard output and the log on standard error. The `otter` binary has TLS by default (its `tls` feature, `otter-io`'s `rustls-ring`); `otter-io` itself has none by default, so an embedding host picks `rustls-ring` or `native-tls`.
+
+`crates/otter-lang/tests/lang.rs` (`mod tools`) covers loading, definitions, calls, failures, cancellation, time limits and effects; [`examples/tools/flights`](../examples/tools/flights/README.md) holds two real tools.

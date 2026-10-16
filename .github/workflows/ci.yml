@@ -27,7 +27,7 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --release --workspace
       # Small builds: shard documentation prose compiled out, contract kept.
-      - run: cargo test -p otter-core -p otter-io --no-default-features --test metadata --test catalog
+      - run: cargo test -p otter-core -p otter-io -p otter-text --no-default-features --test metadata --test catalog
       - run: cargo test -p otter-lang --no-default-features
       # Release builds must run flows nested to the compose limit (compose still recurses).
       - run: cargo test --release -p otter-lang --test lang nesting_up_to_the_limit
@@ -45,11 +45,12 @@ jobs:
         with:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p otter-core -p otter-lang --target wasm32-wasip1 --lib --tests -- -D warnings
+      - run: cargo clippy -p otter-core -p otter-lang -p otter-text --target wasm32-wasip1 --lib --tests -- -D warnings
       - name: Run acceptance, metadata and frontend tests on wasm
         run: |
           cargo test -p otter-core --test prototype --test metadata --test trampoline --test host_contract --test registry --test functions --test values --target wasm32-wasip1 --no-run
           cargo test -p otter-lang --test lang --target wasm32-wasip1 --no-run
+          cargo test -p otter-text --test text --test catalog --target wasm32-wasip1 --no-run
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/prototype-*.wasm | head -1)"
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/metadata-*.wasm | head -1)"
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/trampoline-*.wasm | head -1)"
@@ -58,6 +59,8 @@ jobs:
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/functions-*.wasm | head -1)"
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/values-*.wasm | head -1)"
           node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/lang-*.wasm | head -1)"
+          node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/text-*.wasm | head -1)"
+          node scripts/run-wasi.mjs "$(ls -t target/wasm32-wasip1/debug/deps/catalog-*.wasm | head -1)"
 
   hot-asm:
     # The interpreter loop and the engine step, summarized from the release

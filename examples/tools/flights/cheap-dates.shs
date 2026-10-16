@@ -1,0 +1,138 @@
+// Google Flights "cheapest dates to fly" through the public website's HTML
+// search page: a tool a host loads at run time (otter_lang::Tool).
+//
+// Google's calendar RPC (GetCalendarGraph) is blocked for cookieless
+// callers, and no HTML page embeds the whole price calendar, so this runs
+// one real flight search per date (the `tfs` token, /travel/flights/search,
+// the `ds:1` block) and takes each date's cheapest bookable fare.
+//
+// The requests go one date at a time, never concurrently: concurrent
+// requests multiplexed over one HTTP/2 connection get degraded pages with
+// no rows, which looks like rate limiting but is not. Sequential requests
+// are not throttled (about 0.5 s a date). No API key.
+
+@include("flights.shs")
+
+@const(max-days 45)
+
+// The cheapest price among a page's rows, or `no-price`.
+@fn(Cheapest input: Any output: Int params: {} {
+  At(i: 3) | At(i: 0) | SeqOr = rows
+  @no-price | Var(best)
+  0 | Var(i)
+  Repeat({
+    rows | Take(i) | Price = price
+    Inc(i)
+    price | When({IsLess(best)} {price | Update(best)})
+  } times: (rows | Count))
+  best
+})
+
+@fn(CheapDates input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input = args
+  args.from | StringOr(default: "") | String.ToUpper = from
+  args.to | StringOr(default: "") | String.ToUpper = to
+  args.from-date | StringOr(default: "") = from-date
+  args.to-date | StringOr(default: "") = to-date
+  All({from | IsNot("")} {to | IsNot("")} {from-date | IsNot("")} {to-date | IsNot("")}) | When({Not} {
+    "from, to, from-date and to-date are required" | Fail
+  })
+  // Google takes at most 9 passengers per search.
+  args.adults | IntOr(default: 1) | Max(1) | Min(9) = adults
+  args.currency | StringOr(default: "USD") | String.ToUpper = currency
+  args.seat | StringOr(default: "economy") | Match([
+    "economy" {1}
+    "premium-economy" {2}
+    "business" {3}
+    "first" {4}
+  ] default: {1}) = seat
+  args.duration | IntOr(default: 0) | Max(0) = duration
+  duration | IsMore(0) = round-trip
+  round-trip | If({Is(true)} {1} {2}) = trip-type
+
+  from-date | Date.Parse(format: "%Y-%m-%d") = first
+  to-date | Date.Parse(format: "%Y-%m-%d") = last
+  last | Sub(first) | Div(86400) | Add(1) = span
+  span | When({IsLess(1)} {"to-date is before from-date" | Fail})
+  span | Max(1) | Min(@max-days) = days
+
+  // The passengers are the same for every date: adults, packed.
+  [] | Var(passengers)
+  Repeat({1 | ToLEB128 | Push(passengers)} times: adults)
+  passengers | Bytes.Join = packed
+
+  [] | Var(lines)
+  round-trip | If({Is(true)} {
+    f"{from} -> {to} round-trip prices ({duration}-day trip, totals in {currency}) by departure date:\n"
+  } {
+    f"{from} -> {to} one-way prices (in {currency}) by date:\n"
+  }) | Push(lines)
+
+  @no-price | Var(best-price)
+  "" | Var(best-date)
+  0 | Var(found)
+  0 | Var(i)
+  Repeat({
+    first | Add(i | Mul(86400)) = departs
+    Inc(i)
+    departs | Date.Format(format: "%Y-%m-%d") = date
+    round-trip | If({Is(true)} {
+      departs | Add(duration | Mul(86400)) | Date.Format(format: "%Y-%m-%d")
+    } {""}) = return-date
+
+    [] | Var(info)
+    PbMsg(field: 3 body: PbLeg(date: date from: from to: to)) | Push(info)
+    round-trip | When({Is(true)} {
+      PbMsg(field: 3 body: PbLeg(date: return-date from: to to: from)) | Push(info)
+    })
+    PbMsg(field: 8 body: packed) | Push(info)
+    PbVarint(field: 9 value: seat) | Push(info)
+    PbVarint(field: 19 value: trip-type) | Push(info)
+
+    // One retry on a degraded page, then the date is skipped.
+    info | Bytes.Join | SearchUrl(currency: currency) | FetchFlights(tries: 2) = data
+    data | If({IsNone} {@no-price} {data | Cheapest}) = price
+    price | When({IsLess(@no-price)} {
+      Inc(found)
+      return-date | If({Is("")} {""} {f" ~ {return-date}"}) = return-text
+      f"{date}{return-text}: {price} {currency}\n" | Push(lines)
+      price | When({IsLess(best-price)} {
+        price | Update(best-price)
+        date | Update(best-date)
+      })
+    })
+  } times: days)
+
+  found | If({Is(0)} {
+    "\nNo prices found for this route and date range (Google may be blocking the requests; try again shortly).\n"
+  } {
+    found | If({IsLess(days)} {f" ({found}/{days} dates returned a fare)"} {""}) = partial
+    f"\nCheapest: {best-date} at {best-price} {currency}{partial}\n"
+  }) | Push(lines)
+  span | When({IsMore(@max-days)} {
+    f"\n(The range was capped to the first {@max-days} days.)\n" | Push(lines)
+  })
+  lines | String.Join
+})
+
+{
+  definition: {
+    name: "google_flights_cheap_dates"
+    description: "Find the cheapest dates to fly between two airports over a date range, by running one real Google Flights search per date and reporting each date's cheapest fare. Supports one-way or fixed-duration round trips. Uses the public Google Flights website (no API key). Scans up to 45 days per call."
+    parameters: {
+      type: "object"
+      properties: {
+        from: {type: "string" description: "Departure airport IATA code, e.g. KIX. No spaces."}
+        to: {type: "string" description: "Arrival airport IATA code, e.g. NRT. No spaces."}
+        from-date: {type: "string" description: "Start of the date range to scan, YYYY-MM-DD."}
+        to-date: {type: "string" description: "End of the date range to scan, YYYY-MM-DD. At most 45 days after from-date."}
+        duration: {type: "integer" description: "Optional trip length in days. When set, prices are round-trip totals for a trip of exactly this many days (return = departure + duration); when omitted, prices are one-way."}
+        adults: {type: "integer" description: "Number of adult passengers, 1 to 9. Default 1."}
+        seat: {type: "string" description: "Cabin class: economy, premium-economy, business or first. Default economy."}
+        currency: {type: "string" description: "ISO 4217 currency code for prices, e.g. USD, EUR, JPY. Default USD."}
+      }
+      required: ["from" "to" "from-date" "to-date"]
+    }
+  }
+  use: "CheapDates"
+}

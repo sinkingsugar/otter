@@ -1,7 +1,9 @@
 //! Arithmetic: `Math.Add`, `Math.Subtract`, `Math.Multiply`, `Math.Divide`
-//! (one compose and evaluation path), `Math.Inc`/`Math.Dec`, and unary
-//! shards (`Math.Abs`, `Math.Round`, `Math.Floor`, `Math.Ceil`,
-//! `Math.Length`). All leaf shards. Names and aliases follow 1.x.
+//! (one compose and evaluation path, which the VM runs inline),
+//! `Math.Mod`, `Math.Max` and `Math.Min` (the same mixing, a separate
+//! evaluation path off the VM's), `Math.Inc`/`Math.Dec`, and unary shards
+//! (`Math.Abs`, `Math.Round`, `Math.Floor`, `Math.Ceil`, `Math.Length`).
+//! All leaf shards. Names and aliases follow 1.x.
 
 use super::leaf::{LeafShard, leaf_type};
 use super::*;
@@ -17,6 +19,9 @@ pub static ROUND: ShardType = leaf_type::<Unary<RoundOp>>();
 pub static FLOOR: ShardType = leaf_type::<Unary<FloorOp>>();
 pub static CEIL: ShardType = leaf_type::<Unary<CeilOp>>();
 pub static LENGTH: ShardType = leaf_type::<Length>();
+pub static MOD: ShardType = leaf_type::<Mixed<ModOp>>();
+pub static MAX: ShardType = leaf_type::<Mixed<MaxOp>>();
+pub static MIN: ShardType = leaf_type::<Mixed<MinOp>>();
 
 /// Types arithmetic works on (same type on both sides).
 pub const ARITHMETIC: &[TypeName] = &[
@@ -236,6 +241,19 @@ pub(crate) fn compose_binary(
   name: &'static str,
   op: BinOp,
 ) -> Result<Composed<Operand>> {
+  compose_mixed(args, ctx, name, |operand, input| {
+    op.mismatch(operand, input)
+  })
+}
+
+/// [`compose_binary`] for any operation, with its mismatch message
+/// (`mismatch(operand, input)`).
+fn compose_mixed(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+  name: &'static str,
+  mismatch: impl FnOnce(Type, Type) -> String,
+) -> Result<Composed<Operand>> {
   let (operand, ty) = Operand::compose_arg(args, "operand", name, ctx)?;
   let input = ctx.input();
   let mixed = match (Shape::of_type(input), Shape::of_type(ty)) {
@@ -248,7 +266,7 @@ pub(crate) fn compose_binary(
         Phase::Compose,
         "input-type-mismatch",
         "input-type-mismatch",
-        op.mismatch(ty, input),
+        mismatch(ty, input),
       )
       .shard(name)
       .param("operand", Some(args.param_index("operand")))
@@ -352,6 +370,141 @@ impl<S: BinarySpec> LeafShard for Binary<S> {
 
   fn activate(op: &Operand, _: &mut (), ctx: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
     Ok(Flow::Next(arith(S::OP, S::DESC.name, input, &op.get(ctx))?))
+  }
+}
+
+// --- Math.Mod, Math.Max, Math.Min ---
+
+/// One operation that mixes like the arithmetic shards ([`Shape::mix`]) but
+/// is not one of the VM's: per component, in f64 rounded once to f32 for
+/// vectors.
+pub trait MixedSpec: 'static {
+  const DESC: ShardDesc;
+  /// Int with Int; an `Err` is an activation error (its message).
+  fn int(a: i64, b: i64) -> std::result::Result<i64, &'static str>;
+  fn float(a: f64, b: f64) -> f64;
+}
+
+pub struct ModOp;
+pub struct MaxOp;
+pub struct MinOp;
+
+const fn mixed_desc(
+  name: &'static str,
+  summary: &'static str,
+  help: &'static str,
+  aliases: &'static [&'static str],
+) -> ShardDesc {
+  ShardDesc {
+    help,
+    aliases,
+    ..binary_desc(name, summary, aliases)
+  }
+}
+
+impl MixedSpec for ModOp {
+  const DESC: ShardDesc = mixed_desc(
+    "Math.Mod",
+    crate::shard_doc!("Outputs the remainder of dividing the input by the operand."),
+    crate::shard_doc!(
+      "The remainder has the sign of the input, as Rust's `%` and C's `fmod` (`-7 | Mod(3)` is `-1`). Int, Float and the float vectors mix as in `Math.Add`; an Int remainder by zero is an activation error, a Float one is NaN."
+    ),
+    &["Mod"],
+  );
+  fn int(a: i64, b: i64) -> std::result::Result<i64, &'static str> {
+    // `i64::MIN % -1` is 0; only `checked_rem` calls it an overflow.
+    match b {
+      0 => Err("division by zero"),
+      _ => Ok(a.wrapping_rem(b)),
+    }
+  }
+  fn float(a: f64, b: f64) -> f64 {
+    a % b
+  }
+}
+
+impl MixedSpec for MaxOp {
+  const DESC: ShardDesc = mixed_desc(
+    "Math.Max",
+    crate::shard_doc!("Outputs the larger of the input and the operand."),
+    crate::shard_doc!(
+      "Int, Float and the float vectors mix as in `Math.Add` (per component for vectors); with one NaN side, the other side."
+    ),
+    &["Max"],
+  );
+  fn int(a: i64, b: i64) -> std::result::Result<i64, &'static str> {
+    Ok(a.max(b))
+  }
+  fn float(a: f64, b: f64) -> f64 {
+    a.max(b)
+  }
+}
+
+impl MixedSpec for MinOp {
+  const DESC: ShardDesc = mixed_desc(
+    "Math.Min",
+    crate::shard_doc!("Outputs the smaller of the input and the operand."),
+    crate::shard_doc!(
+      "Int, Float and the float vectors mix as in `Math.Add` (per component for vectors); with one NaN side, the other side."
+    ),
+    &["Min"],
+  );
+  fn int(a: i64, b: i64) -> std::result::Result<i64, &'static str> {
+    Ok(a.min(b))
+  }
+  fn float(a: f64, b: f64) -> f64 {
+    a.min(b)
+  }
+}
+
+/// `input op operand` for a [`MixedSpec`]: the rule of [`arith`].
+fn mixed<S: MixedSpec>(input: &Var, operand: &Var) -> Result<Var> {
+  let name = S::DESC.name;
+  if let (Var::Int(a), Var::Int(b)) = (input, operand) {
+    return S::int(*a, *b)
+      .map(Var::Int)
+      .map_err(|e| Error::Activation(format!("{name}: {e}")));
+  }
+  let (Some((a, na)), Some((b, nb))) = (components(input), components(operand)) else {
+    return Err(mismatch(name));
+  };
+  let size = match (na, nb) {
+    (Some(n), Some(m)) if n != m => return Err(mismatch(name)),
+    (Some(n), _) | (_, Some(n)) => n,
+    (None, None) => return Ok(Var::Float(S::float(a[0], b[0]))),
+  };
+  let mut r = [0f32; 4];
+  for (i, out) in r.iter_mut().enumerate() {
+    let x = if na.is_some() { a[i] } else { a[0] };
+    let y = if nb.is_some() { b[i] } else { b[0] };
+    *out = S::float(x, y) as f32;
+  }
+  Ok(match size {
+    2 => Var::float2(r[0], r[1]),
+    3 => Var::float3(r[0], r[1], r[2]),
+    _ => Var::float4(r[0], r[1], r[2], r[3]),
+  })
+}
+
+pub struct Mixed<S>(std::marker::PhantomData<S>);
+
+impl<S: MixedSpec> LeafShard for Mixed<S> {
+  type Compiled = Operand;
+  type State = ();
+  const DESC: ShardDesc = S::DESC;
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Operand>> {
+    compose_mixed(args, ctx, S::DESC.name, |operand, input| {
+      format!("{} cannot take {input} with {operand}", S::DESC.name)
+    })
+  }
+
+  fn instantiate(_: &Operand, _: &mut InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+
+  fn activate(op: &Operand, _: &mut (), ctx: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
+    Ok(Flow::Next(mixed::<S>(input, &op.get(ctx))?))
   }
 }
 

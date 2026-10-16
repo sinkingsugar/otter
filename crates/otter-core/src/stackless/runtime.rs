@@ -583,6 +583,48 @@ impl Mesh {
     self.running()
   }
 
+  /// `tick`, with every activation metered under `budget`
+  /// ([`crate::Budget`]): fuel, and cancellation or a deadline checked
+  /// inside the activation, so a loop that never suspends stops too. Pass
+  /// the same `budget` to every tick of the run. The metered engine and VM
+  /// are separate instantiations, slower than `tick`'s, which knows nothing
+  /// of budgets.
+  pub fn tick_budgeted(&mut self, budget: &crate::compose_time::RunBudget) -> usize {
+    let notify_only = self.wake_mode == WakeMode::OnNotify;
+    let Mesh {
+      instances,
+      frame,
+      spawn_queue,
+      revisions,
+      table,
+      max_call_depth,
+      ..
+    } = self;
+    for instance in instances.iter_mut() {
+      if instance.outcome.is_some() {
+        continue;
+      }
+      let woken = instance.wake.take();
+      if notify_only && instance.waiting && !woken {
+        continue;
+      }
+      instance.waiting = false;
+      step_with(
+        instance,
+        frame,
+        spawn_queue,
+        revisions,
+        table,
+        *max_call_depth,
+        Some(&budget.meter),
+      );
+    }
+    for (wire, input) in std::mem::take(&mut self.spawn_queue) {
+      self.start(wire, input);
+    }
+    self.running()
+  }
+
   /// Cancels a running instance: its state is cleaned up exactly once, and it
   /// is never activated again. Nothing needs unwinding: a suspended stackless
   /// instance is only data.
@@ -709,6 +751,28 @@ fn step(
   table: &Arc<FunctionRegistry>,
   max_call_depth: usize,
 ) {
+  step_with(
+    instance,
+    frame,
+    spawn_queue,
+    revisions,
+    table,
+    max_call_depth,
+    None,
+  )
+}
+
+/// `step`, with a budget's meter for `tick_budgeted`.
+#[inline(always)]
+fn step_with(
+  instance: &mut Instance,
+  frame: &mut Vec<Var>,
+  spawn_queue: &mut Vec<(Arc<CompiledWire>, Var)>,
+  revisions: &Revisions,
+  table: &Arc<FunctionRegistry>,
+  max_call_depth: usize,
+  meter: Option<&crate::compose_time::Meter>,
+) {
   if !instance.started {
     instance.started = true;
     let mut ictx = InstanceCtx {
@@ -767,7 +831,7 @@ fn step(
         waker,
         iteration: *iteration,
         max_call_depth,
-        meter: None,
+        meter,
       };
       state.activate(&mut ctx, input)
     }))

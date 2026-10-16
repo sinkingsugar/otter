@@ -7,6 +7,7 @@
 //! otter describe <shard>
 //! otter search <text>
 //! otter catalog
+//! otter tool <file> [arguments-json]
 //! ```
 //!
 //! `check --json` prints the 1.x `shards check --json` envelope
@@ -16,7 +17,10 @@
 //! each outcome is `{wire, outcome, value?, error?}`. `key:value` arguments are the script's
 //! `@key` values. Exit codes: 0 success, 1 problems or a failed run, 2
 //! usage. `-I dir` adds a directory `@include` and `@read` search after
-//! the including file's own.
+//! the including file's own. `tool` loads a tool script
+//! (`otter_lang::Tool`): without arguments it prints the definition as
+//! JSON, with a JSON object of arguments it calls the tool and prints its
+//! output.
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -33,10 +37,16 @@ const USAGE: &str = "usage:
   otter watch [-I dir ...] <file> [key:value ...]
   otter describe <shard>
   otter search <text>
-  otter catalog";
+  otter catalog
+  otter tool <file> [arguments-json]";
 
 fn catalog() -> Catalog {
-  Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG]).expect("catalog")
+  Catalog::new(&[
+    otter_core::shards::CATALOG,
+    otter_io::CATALOG,
+    otter_text::CATALOG,
+  ])
+  .expect("catalog")
 }
 
 struct Options {
@@ -257,6 +267,63 @@ fn run_json(
   )
 }
 
+/// `otter tool <file> [arguments]`: loads a tool (otter_lang::Tool); with
+/// no arguments prints its definition as JSON, else calls it with the
+/// arguments (a JSON object) and prints its output, the log on stderr.
+fn tool(args: &[String]) -> Result<ExitCode, String> {
+  let (file, arguments) = match args {
+    [file] => (file, None),
+    [file, arguments] => (file, Some(arguments)),
+    _ => return Err("tool needs a file and, to call it, a JSON object of arguments".into()),
+  };
+  let source = read(file)?;
+  let tool = match otter_lang::Tool::load(source, &catalog()) {
+    Ok(tool) => tool,
+    Err(e) => {
+      eprintln!("{e}");
+      return Ok(ExitCode::FAILURE);
+    }
+  };
+  let Some(arguments) = arguments else {
+    let d = tool.definition();
+    println!(
+      "{{\"name\":{},\"description\":{},\"parameters\":{}}}",
+      json_str(&d.name),
+      json_str(&d.description),
+      d.parameters
+    );
+    return Ok(ExitCode::SUCCESS);
+  };
+  let input = otter_lang::ToolInput::from_json(arguments)
+    .map_err(|e| e.to_string())?
+    .with_working_dir(
+      std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default(),
+    );
+  match tool.call(&input) {
+    Ok(out) => {
+      for line in &out.log {
+        eprintln!("{line}");
+      }
+      print!("{}", out.text);
+      if !out.text.ends_with('\n') {
+        println!();
+      }
+      Ok(ExitCode::SUCCESS)
+    }
+    Err(e) => {
+      if let otter_lang::ToolError::Failed { log, .. } = &e {
+        for line in log {
+          eprintln!("{line}");
+        }
+      }
+      eprintln!("{}: failed: {e}", tool.definition().name);
+      Ok(ExitCode::FAILURE)
+    }
+  }
+}
+
 fn main() -> ExitCode {
   let args: Vec<String> = std::env::args().skip(1).collect();
   let result = match args.first().map(String::as_str) {
@@ -285,6 +352,7 @@ fn main() -> ExitCode {
         Err(format!("no shard named {}{hint}", args[1]))
       }
     },
+    Some("tool") => tool(&args[1..]),
     Some("search") if args.len() == 2 => {
       for s in catalog().search(&args[1]) {
         println!("{}: {}", s.name(), s.desc.summary);

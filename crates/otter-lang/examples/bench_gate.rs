@@ -22,41 +22,137 @@
 //! Every workload verifies the work it did, and fails otherwise.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use otter_core::{Catalog, Mesh, Outcome, Type, Var, bench};
 use otter_lang::{Program, Session, Source, render};
 
-struct CountingAlloc;
+/// Counts allocations, and serves them from size classes so that their
+/// cost does not depend on the heap's history.
+///
+/// glibc's cost per call depends on the free chunks around a block, so
+/// any change to what a process allocates before a workload (a larger
+/// catalog, say) moved a workload's count with no change on its path:
+/// `vm/push-shared-seq` rose 2 to 11 percent, every instruction of it in
+/// `malloc.c`. Here a block goes back to its class's free list and is
+/// reused from it, so after warm-up an allocation is the same few
+/// instructions whatever ran before. Allocation counts and bytes keep
+/// measuring what the runtime asks for.
+struct CountingAlloc {
+  lock: AtomicBool,
+  /// Free blocks per class, linked through their first word.
+  free: UnsafeCell<[*mut u8; CLASSES]>,
+}
+
+// SAFETY: `free` is only touched while `lock` is held.
+unsafe impl Sync for CountingAlloc {}
+
+/// Powers of two from 16 bytes to 1 MiB; larger blocks go to the system.
+const CLASSES: usize = 17;
 
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
 static BYTES: AtomicU64 = AtomicU64::new(0);
 
-// SAFETY: forwards to the system allocator and only adds counting.
+fn class(layout: Layout) -> Option<usize> {
+  let size = layout.size().max(layout.align()).max(16);
+  let class = size.next_power_of_two().trailing_zeros() as usize - 4;
+  (class < CLASSES).then_some(class)
+}
+
+impl CountingAlloc {
+  fn locked<R>(&self, f: impl FnOnce(&mut [*mut u8; CLASSES]) -> R) -> R {
+    while self
+      .lock
+      .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+      .is_err()
+    {
+      std::hint::spin_loop();
+    }
+    // SAFETY: the lock is held.
+    let r = f(unsafe { &mut *self.free.get() });
+    self.lock.store(false, Ordering::Release);
+    r
+  }
+
+  /// SAFETY: as `GlobalAlloc::alloc`.
+  unsafe fn take(&self, layout: Layout) -> *mut u8 {
+    let Some(c) = class(layout) else {
+      // SAFETY: same contract as the caller's.
+      return unsafe { System.alloc(layout) };
+    };
+    let block = self.locked(|free| {
+      let block = free[c];
+      if !block.is_null() {
+        // SAFETY: a free block holds the next one in its first word.
+        free[c] = unsafe { *(block as *mut *mut u8) };
+      }
+      block
+    });
+    if !block.is_null() {
+      return block;
+    }
+    // A class's block is aligned to its size, so it serves any alignment
+    // its class covers.
+    // SAFETY: a nonzero power-of-two size and alignment.
+    unsafe { System.alloc(Layout::from_size_align_unchecked(16 << c, 16 << c)) }
+  }
+
+  /// SAFETY: as `GlobalAlloc::dealloc`.
+  unsafe fn give(&self, ptr: *mut u8, layout: Layout) {
+    let Some(c) = class(layout) else {
+      // SAFETY: same contract as the caller's.
+      return unsafe { System.dealloc(ptr, layout) };
+    };
+    self.locked(|free| {
+      // SAFETY: the block is at least 16 bytes and no longer in use.
+      unsafe { *(ptr as *mut *mut u8) = free[c] };
+      free[c] = ptr;
+    });
+  }
+}
+
+// SAFETY: blocks come from the system allocator, each used by one owner
+// until freed; a class's block is aligned to and as large as its class.
 unsafe impl GlobalAlloc for CountingAlloc {
   unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
     ALLOCS.fetch_add(1, Ordering::Relaxed);
     BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
     // SAFETY: same contract as the caller's.
-    unsafe { System.alloc(layout) }
+    unsafe { self.take(layout) }
   }
 
   unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
     // SAFETY: same contract as the caller's.
-    unsafe { System.dealloc(ptr, layout) }
+    unsafe { self.give(ptr, layout) }
   }
 
   unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
     ALLOCS.fetch_add(1, Ordering::Relaxed);
     BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-    // SAFETY: same contract as the caller's.
-    unsafe { System.realloc(ptr, layout, new_size) }
+    // SAFETY: the caller guarantees a valid size for this alignment.
+    let new = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
+    if class(layout).is_some() && class(layout) == class(new) {
+      return ptr;
+    }
+    // SAFETY: same contract as the caller's; the copy covers what both hold.
+    unsafe {
+      let moved = self.take(new);
+      if !moved.is_null() {
+        std::ptr::copy_nonoverlapping(ptr, moved, layout.size().min(new_size));
+        self.give(ptr, layout);
+      }
+      moved
+    }
   }
 }
 
 #[global_allocator]
-static ALLOC: CountingAlloc = CountingAlloc;
+static ALLOC: CountingAlloc = CountingAlloc {
+  lock: AtomicBool::new(false),
+  free: UnsafeCell::new([std::ptr::null_mut(); CLASSES]),
+};
 
 fn catalog() -> Catalog {
   Catalog::new(&[otter_core::shards::CATALOG]).expect("catalog")

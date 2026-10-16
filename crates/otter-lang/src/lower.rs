@@ -2210,10 +2210,12 @@ impl Lowerer<'_> {
           }
         },
         (None, Some(decls)) => {
-          // Past the end, a variadic last parameter takes the rest.
-          let d = decls
-            .get(position)
-            .or_else(|| decls.last().filter(|d| d.variadic));
+          // From its position on, a variadic parameter takes the rest;
+          // the parameters after it are given by name.
+          let d = match decls.iter().position(|d| d.variadic) {
+            Some(v) if position >= v => decls.get(v),
+            _ => decls.get(position),
+          };
           position += 1;
           d
         }

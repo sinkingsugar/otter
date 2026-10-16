@@ -413,6 +413,19 @@ impl CompiledNode for ControlNode {
   }
 }
 
+/// A custom composite's node, for a [`ShardType::composed_by`] function.
+pub(crate) fn custom_node(
+  custom: Box<dyn CustomControl>,
+  name: &'static str,
+  lifetime: crate::signature::Lifetime,
+) -> Arc<dyn CompiledNode> {
+  Arc::new(ControlNode {
+    custom,
+    name,
+    lifetime,
+  })
+}
+
 fn compose_control<S: ControlShard>(
   args: &Args,
   ctx: &mut ComposeCtx<'_>,
@@ -589,6 +602,17 @@ impl ShardType {
     }
   }
 
+  /// Attaches a compose function that builds the node itself, for a shard
+  /// whose arguments choose its implementation: the common form keeps its
+  /// own node, and nothing on its path tests for the other (`Once` and
+  /// `Once(every:)`, `Match` and `Match(passthrough:)`).
+  pub(crate) const fn composed_by(self, compose: ComposeFn) -> ShardType {
+    ShardType {
+      compose: Some(compose),
+      ..self
+    }
+  }
+
   /// Attaches a composite's implementation ([`ControlShard`]), checked
   /// against the description like [`ShardType::implemented_by`].
   pub const fn controlled_by<S: ControlShard>(self) -> ShardType {
@@ -628,7 +652,7 @@ impl ShardType {
   }
 }
 
-fn compose_erased<S: Shard>(
+pub(crate) fn compose_erased<S: Shard>(
   args: &Args,
   ctx: &mut ComposeCtx<'_>,
   lifetime: crate::signature::Lifetime,

@@ -42,6 +42,68 @@ pub fn emit(line: String) {
   });
 }
 
+/// How severe a message is (`Msg`'s `level`), least first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+  Trace,
+  Debug,
+  Info,
+  Warning,
+  Error,
+}
+
+impl Level {
+  pub const ALL: [Level; 5] = [
+    Level::Trace,
+    Level::Debug,
+    Level::Info,
+    Level::Warning,
+    Level::Error,
+  ];
+
+  /// The name scripts write (`"warning"`).
+  pub fn name(self) -> &'static str {
+    match self {
+      Level::Trace => "trace",
+      Level::Debug => "debug",
+      Level::Info => "info",
+      Level::Warning => "warning",
+      Level::Error => "error",
+    }
+  }
+
+  pub fn from_name(name: &str) -> Option<Level> {
+    Level::ALL.into_iter().find(|l| l.name() == name)
+  }
+}
+
+/// The least severe level written, for the whole process (`Info` unless a
+/// host lowers or raises it).
+static THRESHOLD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(Level::Info as u8);
+
+/// Sets the least severe level [`emit_at`] writes; less severe messages
+/// are dropped.
+pub fn set_level(level: Level) {
+  THRESHOLD.store(level as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The least severe level written.
+pub fn level() -> Level {
+  Level::ALL[usize::from(THRESHOLD.load(std::sync::atomic::Ordering::Relaxed))]
+}
+
+/// Writes one line at `level`, if the threshold admits it: an `Info` line
+/// as it is, any other prefixed with its level (`[warning] text`).
+pub fn emit_at(level: Level, line: &str) {
+  if (level as u8) < THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) {
+    return;
+  }
+  emit(match level {
+    Level::Info => line.to_string(),
+    other => format!("[{}] {line}", other.name()),
+  });
+}
+
 /// The capture active on this thread, to hand to work started elsewhere.
 pub fn current() -> Option<Sink> {
   CAPTURE.with(|c| c.borrow().clone())
@@ -83,6 +145,25 @@ mod tests {
       emit("after".into());
     });
     assert_eq!(lines, ["after"]);
+  }
+
+  #[test]
+  fn the_threshold_drops_less_severe_lines() {
+    // The only test here that changes the process-wide threshold.
+    let ((), lines) = capture(|| {
+      emit_at(Level::Debug, "dropped");
+      set_level(Level::Trace);
+      emit_at(Level::Debug, "kept");
+      set_level(Level::Error);
+      emit_at(Level::Warning, "dropped");
+      emit_at(Level::Error, "bad");
+      set_level(Level::Info);
+      emit_at(Level::Info, "plain");
+    });
+    assert_eq!(lines, ["[debug] kept", "[error] bad", "plain"]);
+    assert_eq!(level(), Level::Info);
+    assert_eq!(Level::from_name("warning"), Some(Level::Warning));
+    assert_eq!(Level::from_name("Warning"), None);
   }
 
   #[test]

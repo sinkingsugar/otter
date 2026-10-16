@@ -207,3 +207,158 @@ fn watch_reloads_atomic_saves_and_keeps_running_after_rejected_edits() {
     assert!(child.0.wait().unwrap().success());
   }
 }
+
+const GREET_TOOL: &str = r#"
+@fn(Greet input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input.name | If({IsString} {ExpectString} {"" | Fail}) = name
+  name | When({Is("boom")} {"no booms" | Fail})
+  f"greeting {name}" | Log
+  f"Hello, {name}!"
+})
+{
+  definition: {
+    name: "greet"
+    description: "Greets someone."
+    parameters: {type: "object" properties: {name: {type: "string"}} required: ["name"]}
+  }
+  use: "Greet"
+}
+"#;
+
+#[test]
+fn tool_prints_its_definition_and_runs_with_json_arguments() {
+  let file = script("greet.shs", GREET_TOOL);
+  let (code, out, err) = otter(&["tool", &file]);
+  assert_eq!(code, 0, "{err}");
+  assert_eq!(
+    out.trim_end(),
+    r#"{"name":"greet","description":"Greets someone.","parameters":{"properties":{"name":{"type":"string"}},"required":["name"],"type":"object"}}"#
+  );
+
+  // The output on stdout, the log on stderr.
+  let (code, out, err) = otter(&["tool", &file, r#"{"name": "Ann"}"#]);
+  assert_eq!(code, 0, "{err}");
+  assert_eq!(out, "Hello, Ann!\n");
+  assert!(err.contains("greeting Ann"), "{err}");
+
+  let (code, out, err) = otter(&["tool", &file, r#"{"name": "boom"}"#]);
+  assert_eq!(code, 1);
+  assert_eq!(out, "");
+  assert!(err.contains("greet: failed: no booms"), "{err}");
+
+  let (code, _, err) = otter(&["tool", &file, "[1]"]);
+  assert_eq!(code, 2);
+  assert!(err.contains("must be a JSON object"), "{err}");
+  let (code, _, err) = otter(&["tool", &file, "{"]);
+  assert_eq!(code, 2);
+  assert!(err.contains("invalid JSON"), "{err}");
+
+  // A script that is not a tool is reported at load, with its location.
+  let bad = script("not-a-tool.shs", "\"a\" | Add(1)\n");
+  let (code, _, err) = otter(&["tool", &bad]);
+  assert_eq!(code, 1);
+  assert!(err.contains("not-a-tool.shs:1:"), "{err}");
+}
+
+/// The Google Flights example tools (examples/tools/flights).
+mod flights {
+  use super::otter;
+
+  fn tool(name: &str) -> String {
+    format!(
+      "{}/../../examples/tools/flights/{name}",
+      env!("CARGO_MANIFEST_DIR")
+    )
+  }
+
+  #[test]
+  fn the_flights_tools_load_and_describe_themselves() {
+    for (file, name, required) in [
+      (
+        "search-flights.shs",
+        "google_flights_search",
+        r#""required":["from","to","date"]"#,
+      ),
+      (
+        "cheap-dates.shs",
+        "google_flights_cheap_dates",
+        r#""required":["from","to","from-date","to-date"]"#,
+      ),
+    ] {
+      let (code, out, err) = otter(&["tool", &tool(file)]);
+      assert_eq!(code, 0, "{file}: {err}");
+      assert!(
+        out.starts_with(&format!("{{\"name\":\"{name}\",\"description\":\"")),
+        "{out}"
+      );
+      assert!(out.contains(required), "{out}");
+    }
+    // Missing arguments fail before any request.
+    let (code, _, err) = otter(&["tool", &tool("search-flights.shs"), r#"{"from": "KIX"}"#]);
+    assert_eq!(code, 1);
+    assert!(err.contains("from, to and date are required"), "{err}");
+    let (code, _, err) = otter(&["tool", &tool("cheap-dates.shs"), "{}"]);
+    assert_eq!(code, 1);
+    assert!(
+      err.contains("from, to, from-date and to-date are required"),
+      "{err}"
+    );
+    // A reversed range fails before any request, rather than scanning one day.
+    let reversed =
+      r#"{"from": "KIX", "to": "NRT", "from-date": "2026-12-10", "to-date": "2026-12-01"}"#;
+    let (code, _, err) = otter(&["tool", &tool("cheap-dates.shs"), reversed]);
+    assert_eq!(code, 1);
+    assert!(err.contains("to-date is before from-date"), "{err}");
+  }
+
+  /// A date `days` from today, as `YYYY-MM-DD` (UTC).
+  fn date_in(days: u64) -> String {
+    let secs = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_secs();
+    // Howard Hinnant's civil_from_days.
+    let z = (secs / 86_400 + days) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+  }
+
+  /// Searches Google Flights for real: needs the network, and Google may
+  /// rate-limit. `cargo test -p otter-cli --test cli -- --ignored flights`.
+  #[test]
+  #[ignore = "queries the live Google Flights website"]
+  fn live_search() {
+    let args = format!(
+      r#"{{"from": "KIX", "to": "NRT", "date": "{}", "max-stops": 0}}"#,
+      date_in(30)
+    );
+    let (code, out, err) = otter(&["tool", &tool("search-flights.shs"), &args]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("One-way KIX -> NRT on "), "{out}");
+    assert!(out.contains(" - nonstop\n"), "{out}");
+    assert!(
+      out.contains("Book / see more: https://www.google.com/travel/flights/search?tfs="),
+      "{out}"
+    );
+  }
+
+  #[test]
+  #[ignore = "queries the live Google Flights website"]
+  fn live_cheap_dates() {
+    let args = format!(
+      r#"{{"from": "KIX", "to": "NRT", "from-date": "{}", "to-date": "{}"}}"#,
+      date_in(30),
+      date_in(33)
+    );
+    let (code, out, err) = otter(&["tool", &tool("cheap-dates.shs"), &args]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("Cheapest: "), "{out}");
+  }
+}

@@ -28,15 +28,18 @@ Columns: `ir` (instructions), `allocs` and `bytes` are gated: the check fails on
 
 ## Exactness
 
-Every column is exact: five full runs give identical numbers. Two things had to be fixed for that:
+Every column is exact: five full runs give identical numbers. Four things had to be fixed for that, and a fifth keeps the counts about the source:
 - the runtime's own hash maps used randomly seeded SipHash, so compose probed differently in each run, and that fixed cost differed between the N and 2N runs; they use fixed keys now (`otter_core::hash`);
-- Cachegrind probes the cache geometry from the CPU it starts on, which on a hybrid CPU differs between performance and efficiency cores; `run.py` passes a fixed one.
+- Cachegrind probes the cache geometry from the CPU it starts on, which on a hybrid CPU differs between performance and efficiency cores; `run.py` passes a fixed one;
+- Valgrind maps a file named after the process id for its debugger link, and the C library reads `/proc/self/maps` at start, so a longer pid cost a few instructions in some runs; `run.py` passes `--vgdb=no`;
+- the C library's `malloc` is counted, and its cost per call depends on the free chunks around a block, so anything a process allocates before a workload (a larger catalog) moved that workload's steady-state count with no change on its path. The driver serves allocations from its own size classes (a free list per power of two, `bench_gate.rs`), whose cost does not depend on the heap's history; the `allocs` and `bytes` columns still count every request.
+- the driver is built with one codegen unit, in `target/gate` (`GATE_ENV` in `run.py`; `scripts/hot-asm.py` builds the same way). With rustc's default sixteen, how the crate is cut into units decides what is inlined, so an edit anywhere moved the counts of unedited engine functions by 50 to 500 instructions per iteration (entity, reload, `prepare_function_call` and its neighbours). Shipped release builds keep sixteen: one unit was no faster in the wall-clock suite (and `make-table` 17 to 20 percent slower from code placement) while rebuilding 2.7 times slower. The baseline header records `codegen-units`.
 
 If a count starts to vary, `--jitter` shows which; find the source rather than adding a tolerance.
 
 ## Baselines and environments
 
-Instruction counts depend on the exact Valgrind and C library build as well as the source: Valgrind substitutes its own `memcpy` and `malloc`, and libc code is counted. The baseline's header records the toolchain, target, C library and Valgrind, and `--check` refuses a baseline from another environment (`--ignore-environment` overrides; `--allocations-only` compares only allocations, which do not depend on it).
+Instruction counts depend on the exact Valgrind and C library build as well as the source: Valgrind substitutes its own `memcpy` (Cachegrind does not replace `malloc`), and libc code is counted. The baseline's header records the toolchain, target, C library and Valgrind, and `--check` refuses a baseline from another environment (`--ignore-environment` overrides; `--allocations-only` compares only allocations, which do not depend on it).
 
 The committed baselines are CI's (`ubuntu-24.04` and `ubuntu-24.04-arm`, their packaged Valgrind): one per target, because instruction selection and register allocation differ. After an intended change, take the baselines the jobs measured:
 

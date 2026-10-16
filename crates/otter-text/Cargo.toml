@@ -1,0 +1,39 @@
+[package]
+name = "otter-text"
+description = "Otter text shards built on third-party crates: regular expressions and hashes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["docs"]
+# Documentation prose in shard descriptions; off for small builds.
+docs = ["otter-core/docs"]
+
+[dependencies]
+otter-core = { path = "../otter-core", default-features = false }
+# The RE2-style engine (linear time; no backreferences or lookaround):
+# `regex` searches and replaces; the whole-string match is built from its
+# engine crates, from the parsed pattern (see `regex.rs`). One project,
+# one version of each in the tree.
+regex = "1.11"
+regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "perf", "unicode", "meta", "nfa-pikevm", "nfa-backtrack", "hybrid", "dfa-onepass"] }
+regex-syntax = { version = "0.8", default-features = false, features = ["std", "unicode"] }
+sha1 = { version = "0.11", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+md-5 = { version = "0.11", default-features = false }
+# `std` (the default) detects SIMD support at run time.
+blake3 = "1.8"
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
+blake2 = { version = "0.11", default-features = false }
+# Random identifiers: the operating system's generator (WASI's `random_get`
+# on wasm), formatted by `uuid` without its own generator.
+getrandom = "0.4"
+uuid = { version = "1.18", default-features = false }
+
+[dev-dependencies]
+otter-lang = { path = "../otter-lang", default-features = false }

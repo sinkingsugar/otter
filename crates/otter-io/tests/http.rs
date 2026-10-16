@@ -139,6 +139,101 @@ fn named_arguments_and_compose_diagnostics() {
 }
 
 #[test]
+fn headers_from_a_literal_or_a_variable_reach_the_server() {
+  use otter_core::{Arg, ParamValue};
+  let server = TestServer::start();
+  let url = Var::string(&server.url("/echo-headers"));
+  let headers = |pairs: &[(&str, Var)]| Var::table(pairs.to_vec());
+  let get = |headers: ParamValue| {
+    http::get_args(vec![
+      Arg::pos(ParamValue::Value(url.clone())),
+      Arg::named("headers", headers),
+    ])
+  };
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire(
+    "literal",
+    false,
+    vec![get(ParamValue::Value(headers(&[
+      ("user-agent", Var::string("otter-test")),
+      ("x-b", Var::string("2")),
+      ("X-A", Var::string("1")),
+    ])))],
+  ));
+  let literal = mesh.compile("literal", Type::none()).unwrap();
+  let id = mesh.spawn(&literal, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  assert_eq!(
+    mesh.outcome(id),
+    Some(&Outcome::Completed(Var::string(
+      "user-agent: otter-test\nx-a: 1\nx-b: 2"
+    )))
+  );
+
+  // A variable is read at activation, so each run sends its current value.
+  mesh.declare_var("h", headers(&[("x-run", Var::string("one"))]), true);
+  mesh.add_wire(wire("bound", false, vec![get(ParamValue::Var("h".into()))]));
+  let bound = mesh.compile("bound", Type::none()).unwrap();
+  let id = mesh.spawn(&bound, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  let body = |mesh: &Mesh, id| match mesh.outcome(id) {
+    Some(Outcome::Completed(v)) => v.as_str().unwrap().to_string(),
+    other => panic!("{other:?}"),
+  };
+  assert!(
+    body(&mesh, id).ends_with("x-run: one"),
+    "{}",
+    body(&mesh, id)
+  );
+
+  // A bound value that is not a valid header fails the request at activation.
+  mesh.set_var("h", headers(&[("x-run", Var::string("a\nb"))]));
+  let id = mesh.spawn(&bound, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  assert!(
+    matches!(mesh.outcome(id), Some(Outcome::Failed(otter_core::Error::Activation(m))) if m == "Http.Get: invalid value for header x-run"),
+    "{:?}",
+    mesh.outcome(id)
+  );
+
+  // Constant headers are checked at compose.
+  for (name, value, message) in [
+    ("x-n", Var::Int(1), "header x-n must be a String, got Int"),
+    (
+      "bad name",
+      Var::string("v"),
+      "invalid header name \"bad name\"",
+    ),
+    ("x-v", Var::string("a\nb"), "invalid value for header x-v"),
+  ] {
+    let wire_name = format!("bad-{name}");
+    mesh.add_wire(wire(
+      &wire_name,
+      false,
+      vec![get(ParamValue::Value(headers(&[(name, value)])))],
+    ));
+    let err = mesh.compile(&wire_name, Type::none()).err().unwrap();
+    let d = err.diagnostic().unwrap();
+    assert_eq!(
+      (d.code, d.param.as_deref(), d.message.as_str()),
+      ("invalid-argument-value", Some("headers"), message)
+    );
+  }
+  // A variable must be a table whose values can be Strings.
+  mesh.declare_var("not-a-table", Var::Int(1), false);
+  mesh.declare_var("ints", headers(&[("x-n", Var::Int(1))]), false);
+  for var in ["not-a-table", "ints"] {
+    mesh.add_wire(wire(var, false, vec![get(ParamValue::Var(var.into()))]));
+    let err = mesh.compile(var, Type::none()).err().unwrap();
+    assert_eq!(
+      err.diagnostic().unwrap().code,
+      "wrong-variable-type",
+      "{var}"
+    );
+  }
+}
+
+#[test]
 fn connection_failure_and_error_status() {
   take_probe_events();
   let mut mesh = Mesh::new();
@@ -284,4 +379,161 @@ fn notified_waiting_polls_only_on_progress() {
   // waiting polls only when the runtime made progress (a few times).
   assert!(polls[0] >= 200, "poll mode: {} polls", polls[0]);
   assert!(polls[1] <= 5, "notify mode: {} polls", polls[1]);
+}
+
+/// Runs one `Http.Get` with `args` to completion: its composed output type
+/// and outcome.
+fn run_get(args: Vec<otter_core::Arg>) -> (Type, Outcome) {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("get", false, vec![http::get_args(args)]));
+  let get = mesh.compile("get", Type::none()).unwrap();
+  let otter_core::signature::SignatureOutput::Type(output) = get.signature().output else {
+    unreachable!("a compiled wire has an exact output type")
+  };
+  let id = mesh.spawn(&get, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  (output, mesh.outcome(id).cloned().unwrap())
+}
+
+/// `url` plus named literal options.
+fn get_args(url: &str, options: &[(&str, Var)]) -> Vec<otter_core::Arg> {
+  use otter_core::{Arg, ParamValue};
+  let mut args = vec![Arg::pos(ParamValue::Value(Var::string(url)))];
+  for (name, value) in options {
+    args.push(Arg::named(name, ParamValue::Value(value.clone())));
+  }
+  args
+}
+
+fn field<'a>(value: &'a Var, key: &str) -> &'a Var {
+  value.as_table().and_then(|t| t.get(key)).unwrap()
+}
+
+fn field_type(ty: Type, key: &str) -> Type {
+  ty.as_table()
+    .and_then(|t| t.keys.iter().find(|(k, _)| &**k == key))
+    .map(|(_, ty)| *ty)
+    .unwrap()
+}
+
+#[test]
+fn bytes_and_full_response_have_exact_types() {
+  let server = TestServer::start();
+  let (ty, outcome) = run_get(get_args(
+    &server.url("/binary"),
+    &[("bytes", Var::Bool(true))],
+  ));
+  assert_eq!(ty, Type::bytes());
+  assert_eq!(outcome, Outcome::Completed(Var::bytes(&[0xff, 0x00, 0x01])));
+
+  // A non-success status is a response, not an error.
+  let (ty, outcome) = run_get(get_args(
+    &server.url("/missing"),
+    &[("full-response", Var::Bool(true))],
+  ));
+  let headers = Type::table(Vec::<(&str, Type)>::new(), Some(Type::string()));
+  assert_eq!(
+    ty,
+    Type::fixed_table([
+      ("status", Type::int()),
+      ("headers", headers),
+      ("body", Type::string()),
+    ])
+  );
+  let Outcome::Completed(response) = outcome else {
+    panic!("{outcome:?}")
+  };
+  assert_eq!(field(&response, "status"), &Var::Int(404));
+  assert_eq!(field(&response, "body"), &Var::string("nope"));
+  let response_headers = field(&response, "headers");
+  assert_eq!(field(response_headers, "content-length"), &Var::string("4"));
+  assert_eq!(field(response_headers, "connection"), &Var::string("close"));
+
+  // Both: the body as Bytes; a repeated header joined.
+  let (ty, outcome) = run_get(get_args(
+    &server.url("/twice"),
+    &[
+      ("bytes", Var::Bool(true)),
+      ("full-response", Var::Bool(true)),
+    ],
+  ));
+  assert_eq!(field_type(ty, "body"), Type::bytes());
+  let Outcome::Completed(response) = outcome else {
+    panic!("{outcome:?}")
+  };
+  assert_eq!(field(&response, "status"), &Var::Int(200));
+  assert_eq!(field(&response, "body"), &Var::bytes(b"hello"));
+  assert_eq!(
+    field(field(&response, "headers"), "x-twice"),
+    &Var::string("a, b")
+  );
+
+  // Option values are checked at compose.
+  let mut mesh = Mesh::new();
+  for (name, option, value) in [
+    ("negative-retry", "retry", Var::Int(-1)),
+    ("negative-backoff", "backoff", Var::Float(-0.5)),
+    ("infinite-backoff", "backoff", Var::Float(f64::INFINITY)),
+  ] {
+    mesh.add_wire(wire(
+      name,
+      false,
+      vec![http::get_args(get_args(
+        &server.url("/ok"),
+        &[(option, value)],
+      ))],
+    ));
+    let err = mesh.compile(name, Type::none()).err().unwrap();
+    let d = err.diagnostic().unwrap();
+    assert_eq!(
+      (d.code, d.param.as_deref()),
+      ("invalid-argument-value", Some(option)),
+      "{name}"
+    );
+  }
+}
+
+#[test]
+fn retry_repeats_transient_failures_only() {
+  let quick = |retry: i64| vec![("retry", Var::Int(retry)), ("backoff", Var::Float(0.01))];
+  let failed = |outcome: &Outcome| match outcome {
+    Outcome::Failed(otter_core::Error::Activation(m)) => m.clone(),
+    other => panic!("{other:?}"),
+  };
+
+  // Transport errors: two dropped connections, then a response.
+  let server = TestServer::start();
+  let (_, outcome) = run_get(get_args(&server.url("/flaky"), &quick(2)));
+  assert_eq!(outcome, Outcome::Completed(Var::string("recovered")));
+  assert_eq!(server.received("/flaky"), 3);
+
+  // Too few attempts: the last error, with the count.
+  let server = TestServer::start();
+  let (_, outcome) = run_get(get_args(&server.url("/flaky"), &quick(1)));
+  let message = failed(&outcome);
+  assert!(
+    message.starts_with("Request failed") && message.ends_with("(after 2 attempts)"),
+    "{message}"
+  );
+  assert_eq!(server.received("/flaky"), 2);
+
+  // A transient status is retried; a 404 is not.
+  let server = TestServer::start();
+  let (_, outcome) = run_get(get_args(&server.url("/busy"), &quick(1)));
+  assert_eq!(outcome, Outcome::Completed(Var::string("recovered")));
+  assert_eq!(server.received("/busy"), 2);
+  let (_, outcome) = run_get(get_args(&server.url("/missing"), &quick(3)));
+  assert!(failed(&outcome).contains("status 404"));
+  assert_eq!(server.received("/missing"), 1);
+
+  // With full-response, a status is the answer, never retried.
+  let server = TestServer::start();
+  let mut options = quick(2);
+  options.push(("full-response", Var::Bool(true)));
+  let (_, outcome) = run_get(get_args(&server.url("/busy"), &options));
+  let Outcome::Completed(response) = outcome else {
+    panic!("{outcome:?}")
+  };
+  assert_eq!(field(&response, "status"), &Var::Int(503));
+  assert_eq!(server.received("/busy"), 1);
 }
