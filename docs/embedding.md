@@ -335,7 +335,7 @@ let catalog = Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG])?;
 // diagnostics (`ToolError::Compile`) before the tool is offered.
 let tool = Tool::load_with(Source::new("greet.shs", text), &catalog, &defines, &MemoryFiles::default())?;
 let d = tool.definition();
-offer(&d.name, &d.description, &d.parameters_json());
+offer(&d.name, &d.description, &d.parameters);
 
 // A model asked for a call: its arguments are JSON.
 let input = ToolInput::from_json(r#"{"name": "Ann"}"#)?

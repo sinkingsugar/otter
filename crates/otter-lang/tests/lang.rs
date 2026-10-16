@@ -4520,7 +4520,8 @@ mod tools {
   args.name | If({IsString} {ExpectString} {"nobody"}) = name
   input.env.greeting | If({IsString} {ExpectString} {"Hello"}) = greeting
   args.fail | When({Is(true)} {"asked to fail" | Fail})
-  args.wait | When({Is(true)} {Repeat({Pause} forever: true)})
+  args.wait | When({Is(true)} {"waiting" | Log  Repeat({Pause} forever: true)})
+  args.stop | When({Is(true)} {"stopping" | Log  Stop})
   f"{greeting}, {name}!" | Log
   f"{greeting}, {name}! (in {input.working-dir})"
 })
@@ -4545,7 +4546,7 @@ mod tools {
       ("echo", "Greets.")
     );
     assert_eq!(
-      d.parameters_json(),
+      d.parameters,
       r#"{"properties":{"name":{"type":"string"}},"type":"object"}"#
     );
     assert_eq!(tool.entry(), "Echo");
@@ -4594,19 +4595,24 @@ mod tools {
       timeout: Some(std::time::Duration::from_millis(30)),
       ..CallOptions::default()
     };
-    assert!(matches!(
-      tool.call_with(&wait, &timeout),
-      Err(ToolError::TimedOut(_))
-    ));
+    // The log of a call that did not finish still comes back.
+    match tool.call_with(&wait, &timeout) {
+      Err(ToolError::TimedOut { log, .. }) => assert_eq!(log, ["waiting"]),
+      other => panic!("{other:?}"),
+    }
     let cancel = Arc::new(AtomicBool::new(true));
     let cancelled = CallOptions {
       cancel: Some(cancel),
       ..CallOptions::default()
     };
-    assert!(matches!(
-      tool.call_with(&wait, &cancelled),
-      Err(ToolError::Cancelled)
-    ));
+    match tool.call_with(&wait, &cancelled) {
+      Err(ToolError::Cancelled { log }) => assert_eq!(log, ["waiting"]),
+      other => panic!("{other:?}"),
+    }
+    match tool.call(&ToolInput::from_json(r#"{"stop": true}"#).unwrap()) {
+      Err(ToolError::Stopped { log }) => assert_eq!(log, ["stopping"]),
+      other => panic!("{other:?}"),
+    }
   }
 
   /// The call ends when its function does, not when every wire it spawned

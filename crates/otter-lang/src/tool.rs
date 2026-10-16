@@ -84,16 +84,9 @@ struct Inner {
 pub struct ToolDefinition {
   pub name: String,
   pub description: String,
-  /// The JSON Schema of the arguments, as the script wrote it (a table).
-  pub parameters: Var,
-}
-
-impl ToolDefinition {
-  /// The parameters' JSON Schema as JSON text.
-  pub fn parameters_json(&self) -> String {
-    // Checked when the tool loaded.
-    otter_core::json::write(&self.parameters).expect("parameters were checked at load")
-  }
+  /// The JSON Schema of the arguments as JSON text, written from the
+  /// script's table when the tool loaded.
+  pub parameters: String,
 }
 
 /// What a call passes to the tool's function.
@@ -221,10 +214,18 @@ pub enum ToolError {
     message: String,
     log: Vec<String>,
   },
-  /// The script ended with `Stop` before producing an output.
-  Stopped,
-  Cancelled,
-  TimedOut(Duration),
+  /// The script ended with `Stop` before producing an output. `log`, here
+  /// and below: the lines the call logged before it ended.
+  Stopped {
+    log: Vec<String>,
+  },
+  Cancelled {
+    log: Vec<String>,
+  },
+  TimedOut {
+    limit: Duration,
+    log: Vec<String>,
+  },
 }
 
 impl std::fmt::Display for ToolError {
@@ -234,9 +235,9 @@ impl std::fmt::Display for ToolError {
       ToolError::Definition(m) => write!(f, "not a tool: {m}"),
       ToolError::Input(m) => write!(f, "invalid tool input: {m}"),
       ToolError::Failed { message, .. } => write!(f, "{message}"),
-      ToolError::Stopped => write!(f, "the tool stopped without a result"),
-      ToolError::Cancelled => write!(f, "the tool call was cancelled"),
-      ToolError::TimedOut(d) => write!(f, "the tool call timed out after {d:?}"),
+      ToolError::Stopped { .. } => write!(f, "the tool stopped without a result"),
+      ToolError::Cancelled { .. } => write!(f, "the tool call was cancelled"),
+      ToolError::TimedOut { limit, .. } => write!(f, "the tool call timed out after {limit:?}"),
     }
   }
 }
@@ -381,7 +382,10 @@ impl Tool {
         log,
       }),
       Err(RunError::Failed(message)) => Err(ToolError::Failed { message, log }),
-      Err(RunError::Other(e)) => Err(e),
+      Err(RunError::Stopped) => Err(ToolError::Stopped { log }),
+      Err(RunError::Cancelled) => Err(ToolError::Cancelled { log }),
+      Err(RunError::TimedOut(limit)) => Err(ToolError::TimedOut { limit, log }),
+      Err(RunError::Input(m)) => Err(ToolError::Input(m)),
     }
   }
 
@@ -389,7 +393,7 @@ impl Tool {
     let mut mesh = call_mesh(&self.inner.program, &self.inner.entry, &options.services);
     let id = mesh
       .spawn(&self.inner.call, value)
-      .map_err(|e| RunError::Other(ToolError::Input(e.to_string())))?;
+      .map_err(|e| RunError::Input(e.to_string()))?;
     let started = Instant::now();
     // While the instance waits, sleep between ticks, longer the longer it
     // waits (I/O takes milliseconds to seconds), at most `MAX_NAP`.
@@ -408,13 +412,13 @@ impl Tool {
         .is_some_and(|c| c.load(Ordering::Acquire))
       {
         mesh.cancel(id);
-        return Err(RunError::Other(ToolError::Cancelled));
+        return Err(RunError::Cancelled);
       }
       if let Some(limit) = options.timeout
         && started.elapsed() >= limit
       {
         mesh.cancel(id);
-        return Err(RunError::Other(ToolError::TimedOut(limit)));
+        return Err(RunError::TimedOut(limit));
       }
       nap = (nap * 2).clamp(Duration::from_micros(250), MAX_NAP);
       std::thread::sleep(nap);
@@ -422,8 +426,8 @@ impl Tool {
     match mesh.take_outcome(id) {
       Some(Outcome::Completed(value)) => Ok(value),
       Some(Outcome::Failed(e)) => Err(RunError::Failed(failure_message(&e))),
-      Some(Outcome::Stopped) => Err(RunError::Other(ToolError::Stopped)),
-      Some(Outcome::Cancelled) | None => Err(RunError::Other(ToolError::Cancelled)),
+      Some(Outcome::Stopped) => Err(RunError::Stopped),
+      Some(Outcome::Cancelled) | None => Err(RunError::Cancelled),
     }
   }
 }
@@ -440,9 +444,13 @@ fn call_mesh(program: &Program, entry: &str, services: &Services) -> Mesh {
   mesh
 }
 
+/// How a call ended without an output; `call_with` adds the log.
 enum RunError {
   Failed(String),
-  Other(ToolError),
+  Stopped,
+  Cancelled,
+  TimedOut(Duration),
+  Input(String),
 }
 
 /// An activation error's message without the wrapper's prefix.
@@ -490,7 +498,7 @@ fn read_definition(value: &Var) -> Result<(ToolDefinition, String), ToolError> {
     Some(p) if p.as_table().is_some() => p.clone(),
     Some(_) => return Err(bad("`definition.parameters` must be a table (JSON Schema)")),
   };
-  otter_core::json::write(&parameters)
+  let parameters = otter_core::json::write(&parameters)
     .map_err(|e| ToolError::Definition(format!("`definition.parameters`: {e}")))?;
   Ok((
     ToolDefinition {

@@ -285,7 +285,7 @@ fn tool(args: &[String]) -> Result<ExitCode, String> {
       "{{\"name\":{},\"description\":{},\"parameters\":{}}}",
       json_str(&d.name),
       json_str(&d.description),
-      d.parameters_json()
+      d.parameters
     );
     return Ok(ExitCode::SUCCESS);
   };
