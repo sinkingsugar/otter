@@ -7,7 +7,8 @@
 //! Cryptographic digests are Bytes in the algorithm's standard byte order
 //! (what `ToHex` prints is what `sha256sum`, `b3sum` and the like print).
 //! XXH3 is not cryptographic: its 64-bit hash is an Int (the hash's bits,
-//! so it may be negative; `ToHex` prints it as `xxhsum` does), and its
+//! so it may be negative; `ToHex` prints its digits, without `xxhsum`'s
+//! leading zeros), and its
 //! 128-bit hash is 16 bytes in the canonical, big-endian order `xxhsum`
 //! prints. SHA-1 and MD5 are broken for security; they are here to match
 //! checksums other systems publish.
@@ -206,7 +207,7 @@ impl Algorithm for Xxh3_64 {
       "Outputs the 64-bit XXH3 hash of a string's UTF-8 bytes or of a byte string, as an Int."
     ),
     shard_doc!(
-      "Seed 0. The Int holds the hash's 64 bits, so it may be negative; `ToHex` prints it as `xxhsum -H3` does (with a `0x` prefix). Fast and well distributed, not cryptographic: for keys and checksums, not for anything an adversary chooses."
+      "Seed 0. The Int holds the hash's 64 bits, so it may be negative; `ToHex` prints its hex digits (with a `0x` prefix and without `xxhsum`'s leading zeros). Fast and well distributed, not cryptographic: for keys and checksums, not for anything an adversary chooses."
     ),
     TypeName::Int,
   );
