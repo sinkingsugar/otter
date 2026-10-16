@@ -4,7 +4,10 @@
 //! A host inserts one into a mesh's services (`mesh.services_mut()`,
 //! `Session::set_services`, a tool call's `CallOptions::services`). Without
 //! one, the shards use [`FsAccess::unrestricted`]: any path, relative paths
-//! against the process's working directory.
+//! against the process's working directory. A tool call is the exception:
+//! without one it is confined to its working directory (`otter_lang::Tool`).
+//! It lives in the core, policy only, so the frontend's tools can set it;
+//! the `FS.*` shards are `otter-io`'s.
 //!
 //! [`FsAccess::within`] confines every operation to one directory, the
 //! working directory of the scripts it serves. The check runs at activation
@@ -22,7 +25,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use otter_core::service::Services;
+use crate::service::Services;
 
 /// Which paths the `FS.*` shards may use, and how relative paths resolve.
 /// A service: the host inserts it; shards read it at activation.
@@ -118,7 +121,7 @@ impl FsAccess {
   }
 
   /// The mesh's access, or the unrestricted default.
-  pub(crate) fn of(services: &Services) -> Arc<FsAccess> {
+  pub fn of(services: &Services) -> Arc<FsAccess> {
     static DEFAULT: OnceLock<Arc<FsAccess>> = OnceLock::new();
     services.get_arc::<FsAccess>().unwrap_or_else(|| {
       DEFAULT
@@ -168,7 +171,7 @@ fn resolve_within(root: &Path, path: &Path) -> io::Result<PathBuf> {
 
 /// `path` without `.` components, and with each `..` removing the component
 /// before it (never the root).
-pub(crate) fn normalize(path: &Path) -> PathBuf {
+pub fn normalize(path: &Path) -> PathBuf {
   let mut out = PathBuf::new();
   for component in path.components() {
     match component {
@@ -188,7 +191,7 @@ pub(crate) fn normalize(path: &Path) -> PathBuf {
 
 /// `path` (absolute, normalized) with its longest existing prefix resolved
 /// through the filesystem and the missing rest appended.
-pub(crate) fn canonical_prefix(path: &Path) -> io::Result<PathBuf> {
+pub fn canonical_prefix(path: &Path) -> io::Result<PathBuf> {
   let mut missing = Vec::new();
   let mut current = path;
   loop {

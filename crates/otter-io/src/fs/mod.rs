@@ -17,10 +17,10 @@
 //! stops there; what it already changed stays changed. A single read, write
 //! or rename cannot be interrupted and finishes on its own.
 
-pub mod access;
 pub mod path;
 
-pub use access::FsAccess;
+use otter_core::fs_access as access;
+pub use otter_core::fs_access::FsAccess;
 
 use std::fs;
 use std::io::{self, ErrorKind, Write as _};

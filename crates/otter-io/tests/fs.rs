@@ -348,6 +348,14 @@ fn path_helpers_need_no_disk() {
 /// A tool whose function runs `body` (which outputs a String), called with
 /// `access` as the mesh's file access: the result, or the failure message.
 fn call_tool(body: &str, access: Option<FsAccess>) -> Result<String, String> {
+  call_tool_with(body, access, "")
+}
+
+fn call_tool_with(
+  body: &str,
+  access: Option<FsAccess>,
+  working_dir: &str,
+) -> Result<String, String> {
   let text = format!(
     r#"@fn(Main input: {{input: {{}} env: {{}} working-dir: String}} output: String params: {{}} {{
       {body}
@@ -369,7 +377,7 @@ fn call_tool(body: &str, access: Option<FsAccess>) -> Result<String, String> {
     services,
     ..Default::default()
   };
-  let input = ToolInput::new(Var::table(Vec::<(&str, Var)>::new()));
+  let input = ToolInput::new(Var::table(Vec::<(&str, Var)>::new())).with_working_dir(working_dir);
   match tool.call_with(&input, &options) {
     Ok(out) => Ok(out.text),
     Err(ToolError::Failed { message, .. }) => Err(message),
@@ -471,11 +479,34 @@ fn a_host_confines_scripts_to_a_directory() {
   // Denied: nothing touches the disk.
   let message = call_tool(r#""a.txt" | FS.Read"#, Some(FsAccess::denied())).unwrap_err();
   assert_eq!(message, "FS.Read: a.txt: file access is denied");
-  // Without a policy, any path works.
+  // A host that wants no confinement says so.
   assert_eq!(
-    call_tool(&format!(r#""{secret}" | FS.Read"#), None),
+    call_tool(
+      &format!(r#""{secret}" | FS.Read"#),
+      Some(FsAccess::unrestricted())
+    ),
     Ok("secret".to_string())
   );
+  // Without a policy a call has no file access when it has no working
+  // directory, and is confined to it when it has one.
+  assert_eq!(
+    call_tool(r#""a.txt" | FS.Read"#, None).unwrap_err(),
+    "FS.Read: a.txt: file access is denied"
+  );
+  assert_eq!(
+    call_tool_in(r#""a.txt" | FS.Read"#, work.str()),
+    Ok("a".to_string())
+  );
+  let message = call_tool_in(&format!(r#""{secret}" | FS.Read"#), work.str()).unwrap_err();
+  assert!(
+    message.ends_with("outside the allowed directory"),
+    "{message}"
+  );
+}
+
+/// `call_tool` with no policy, in `working_dir`.
+fn call_tool_in(body: &str, working_dir: &str) -> Result<String, String> {
+  call_tool_with(body, None, working_dir)
 }
 
 /// Review findings: links already in the tree, a link through another link

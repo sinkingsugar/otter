@@ -16,6 +16,7 @@ pub mod describe;
 pub mod diagnostic;
 pub mod error;
 pub mod flow;
+pub mod fs_access;
 pub mod function;
 pub mod hash;
 #[doc(hidden)]

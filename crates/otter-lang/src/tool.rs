@@ -50,6 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use otter_core::diagnostic::{Diagnostic, PathStep};
+use otter_core::fs_access::FsAccess;
 use otter_core::service::Services;
 use otter_core::shard::ShardDef;
 use otter_core::signature::Effects;
@@ -376,7 +377,8 @@ impl Tool {
     options: &CallOptions,
   ) -> Result<ToolOutput, ToolError> {
     let value = input.to_var()?;
-    let (result, log) = otter_core::log::capture(|| self.run(value, options));
+    let services = call_services(&options.services, &input.working_dir)?;
+    let (result, log) = otter_core::log::capture(|| self.run(value, options, &services));
     match result {
       Ok(Var::String(ref s)) => Ok(ToolOutput {
         text: s.to_string(),
@@ -394,8 +396,8 @@ impl Tool {
     }
   }
 
-  fn run(&self, value: Var, options: &CallOptions) -> Result<Var, RunError> {
-    let mut mesh = call_mesh(&self.inner.program, &self.inner.entry, &options.services);
+  fn run(&self, value: Var, options: &CallOptions, services: &Services) -> Result<Var, RunError> {
+    let mut mesh = call_mesh(&self.inner.program, &self.inner.entry, services);
     let id = mesh
       .spawn(&self.inner.call, value)
       .map_err(|e| RunError::Input(e.to_string()))?;
@@ -466,6 +468,25 @@ impl Tool {
       Some(Outcome::Cancelled) | None => Err(RunError::Cancelled),
     }
   }
+}
+
+/// A call's services: the host's, and unless they hold an [`FsAccess`],
+/// file access confined to the call's working directory, or none without
+/// one. A tool is usually written by a model, which rarely thinks to scope
+/// its files: confinement is the default, and a host that wants more says
+/// so (`FsAccess::unrestricted()` in `CallOptions::services`).
+/// A working directory that does not exist holds no files: no access.
+fn call_services(services: &Services, working_dir: &str) -> Result<Services, ToolError> {
+  if services.get::<FsAccess>().is_some() {
+    return Ok(services.clone());
+  }
+  let access = match working_dir {
+    "" => FsAccess::denied(),
+    dir => FsAccess::within(dir).unwrap_or_else(|_| FsAccess::denied()),
+  };
+  let mut services = services.clone();
+  services.insert(access);
+  Ok(services)
 }
 
 /// A fresh mesh for a call: the program, the call wire, the services.
