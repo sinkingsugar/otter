@@ -4444,6 +4444,51 @@ fn type_tests_fail_sort_and_scalar_math() {
   );
 }
 
+/// Review findings on the text shards: malformed input is an error, never
+/// a wrong value or a panic.
+#[test]
+fn text_shards_reject_malformed_input() {
+  // Sort's comparator stays a total order with NaN, so Rust's sort cannot
+  // panic on it; the NaN is still an activation error.
+  let nans = (0..30)
+    .map(|i| match i % 3 {
+      0 => "nan".to_string(),
+      _ => format!("{}.5", (i * 7) % 30),
+    })
+    .collect::<Vec<_>>()
+    .join(" ");
+  let message = root_failure(&format!("0.0 | Div(0.0) = nan\n[{nans}] | Sort"));
+  assert!(message.contains("NaN"), "{message}");
+  // The tenth signed byte may only extend the sign: 2^63 does not fit.
+  assert!(
+    root_failure(r#""gICAgICAgICAAQ==" | FromBase64 | FromLEB128(signed: true)"#)
+      .contains("does not fit")
+  );
+  let v = root_value(
+    r#"
+"gICAgICAgICAfw==" | FromBase64 | FromLEB128(signed: true) = min
+"////////////fw==" | FromBase64 | FromLEB128(signed: true) = minus-one
+-9223372036854775807 | Sub(1) | Mod(-1) = rem
+"20260115" | Date.Parse(format: "%Y%m%d") | Date.Format(format: "%Y-%m-%d") = compact
+[0.1 0.2] | ToFloat2 | ToJson = floats
+[min minus-one rem compact floats]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[-9223372036854775808 -1 0 "2026-01-15" "[0.1,0.2]"]"#
+  );
+  for (script, expected) in [
+    (r#""\"\\u+041\"" | FromJson"#, "hex digits"),
+    (r#""%+F" | String.DecodeURI"#, "invalid escape"),
+    (r#""QUJD=" | FromBase64"#, "padding"),
+    (r#""QR==" | FromBase64"#, "bits set"),
+  ] {
+    let message = root_failure(script);
+    assert!(message.contains(expected), "{script}: {message}");
+  }
+}
+
 #[test]
 fn dates_parse_and_format_in_utc() {
   let v = root_value(

@@ -207,8 +207,13 @@ impl Parser<'_> {
     let Some(digits) = self.bytes.get(self.at..self.at + 4) else {
       return Err(self.error("expected four hex digits"));
     };
-    let text = std::str::from_utf8(digits).map_err(|_| self.error("expected hex digits"))?;
-    let code = u32::from_str_radix(text, 16).map_err(|_| self.error("expected hex digits"))?;
+    // Digits only: `from_str_radix` alone would take a sign (`\u+041`).
+    if !digits.iter().all(u8::is_ascii_hexdigit) {
+      return Err(self.error("expected four hex digits"));
+    }
+    let code = digits
+      .iter()
+      .fold(0, |n, &d| n << 4 | (d as char).to_digit(16).unwrap_or(0));
     self.at += 4;
     Ok(code)
   }
@@ -381,7 +386,12 @@ fn write_floats<'a>(items: impl Iterator<Item = &'a f32>, out: &mut String) -> R
     if i > 0 {
       out.push(',');
     }
-    write_float(f64::from(*x), out)?;
+    // An f32's own shortest text: widened to f64 it would print the
+    // binary error (`0.10000000149011612`).
+    if !x.is_finite() {
+      return Err(format!("{x} has no JSON form"));
+    }
+    let _ = write!(out, "{x:?}");
   }
   out.push(']');
   Ok(())

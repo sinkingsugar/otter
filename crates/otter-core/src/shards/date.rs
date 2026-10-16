@@ -115,14 +115,20 @@ fn parse_date(parts: &[Part], text: &str) -> std::result::Result<i64, String> {
       .parse()
       .map_err(|_| format!("number out of range at {start}"))
   };
-  for part in parts {
+  for (k, part) in parts.iter().enumerate() {
     match part {
       Part::Year => {
         let negative = bytes.get(at) == Some(&b'-');
         if negative {
           at += 1;
         }
-        let v = number(&mut at, 1, 9)?;
+        // Up to 9 digits when text ends the year; four when a number
+        // follows directly (`%Y%m%d`).
+        let max = match parts.get(k + 1) {
+          None | Some(Part::Char(_)) => 9,
+          Some(_) => 4,
+        };
+        let v = number(&mut at, 1, max)?;
         y = if negative { -v } else { v };
       }
       Part::Month => mo = number(&mut at, 2, 2)?,

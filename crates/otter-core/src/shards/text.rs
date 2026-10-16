@@ -488,6 +488,7 @@ fn decode_uri(s: &str) -> std::result::Result<String, String> {
     if bytes[i] == b'%' {
       let hex = bytes
         .get(i + 1..i + 3)
+        .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
         .and_then(|h| std::str::from_utf8(h).ok())
         .and_then(|h| u8::from_str_radix(h, 16).ok());
       match hex {
@@ -657,12 +658,14 @@ pub fn base64_encode(bytes: &[u8]) -> String {
   out
 }
 
-/// Decodes standard or URL-safe base64; padding is optional, whitespace is
-/// not allowed.
+/// Decodes standard or URL-safe base64; padding is optional but, when
+/// present, completes the last group of four, and the unused bits of the
+/// last digit are zero (RFC 4648 §3.5). Whitespace is not allowed.
 pub fn base64_decode(text: &str) -> std::result::Result<Vec<u8>, String> {
   let digits = text.trim_end_matches('=');
-  if text.len() - digits.len() > 2 {
-    return Err("too much padding".into());
+  let padding = text.len() - digits.len();
+  if padding > 2 || (padding > 0 && !text.len().is_multiple_of(4)) {
+    return Err("wrong padding".into());
   }
   let mut out = Vec::with_capacity(digits.len() * 3 / 4);
   let mut acc = 0u32;
@@ -686,6 +689,9 @@ pub fn base64_decode(text: &str) -> std::result::Result<Vec<u8>, String> {
   }
   if digits.len() % 4 == 1 {
     return Err("truncated input".into());
+  }
+  if acc != 0 {
+    return Err("the last digit has bits set past the data".into());
   }
   Ok(out)
 }
@@ -827,7 +833,15 @@ impl LebDirection for FromLeb {
     let mut value: u64 = 0;
     let mut shift = 0u32;
     for (i, &b) in bytes.iter().enumerate() {
-      if shift >= 64 || (shift == 63 && b & 0x7e != 0 && !(signed && b & 0x7f == 0x7f)) {
+      // The tenth byte holds bit 63 alone: 0 or 1 unsigned (1 fails the
+      // Int check below), and for signed only the sign extension of bit
+      // 63, `0x00` or `0x7f`.
+      let last_ok = if signed {
+        b == 0 || b == 0x7f
+      } else {
+        b & 0x7e == 0
+      };
+      if shift >= 64 || (shift == 63 && !last_ok) {
         return Err(fail("FromLEB128", "the value does not fit in an Int"));
       }
       value |= u64::from(b & 0x7f) << shift;
@@ -1048,6 +1062,47 @@ pub fn sort_order(a: &Var, b: &Var) -> Result<std::cmp::Ordering> {
   }
 }
 
+/// `sort_order` made total, so the sort's comparator is consistent even
+/// over values with no order (Rust's sort may panic otherwise): kinds rank
+/// numbers, strings, Bools, sequences, then the rest, all equal; NaN sorts
+/// after every number. The first unordered pair compared fills `error`.
+fn total_order(a: &Var, b: &Var, error: &mut Option<Error>) -> std::cmp::Ordering {
+  fn rank(v: &Var) -> u8 {
+    match v {
+      Var::Int(_) | Var::Float(_) => 0,
+      Var::String(_) => 1,
+      Var::Bool(_) => 2,
+      Var::Seq(_) => 3,
+      _ => 4,
+    }
+  }
+  fn is_nan(v: &Var) -> bool {
+    matches!(v, Var::Float(f) if f.is_nan())
+  }
+  let o = match (a, b) {
+    (Var::Int(_) | Var::Float(_), Var::Int(_) | Var::Float(_)) => match compare(a, b.clone()) {
+      Ok(o) => return o,
+      Err(_) => is_nan(a).cmp(&is_nan(b)),
+    },
+    (Var::String(x), Var::String(y)) => return x.cmp(y),
+    (Var::Bool(x), Var::Bool(y)) => return x.cmp(y),
+    (Var::Seq(x), Var::Seq(y)) => {
+      for (p, q) in x.iter().zip(y.iter()) {
+        let o = total_order(p, q, error);
+        if o.is_ne() {
+          return o;
+        }
+      }
+      return x.len().cmp(&y.len());
+    }
+    _ => rank(a).cmp(&rank(b)),
+  };
+  if error.is_none() {
+    *error = sort_order(a, b).err();
+  }
+  o
+}
+
 pub struct Sort;
 impl LeafShard for Sort {
   type Compiled = bool;
@@ -1072,13 +1127,9 @@ impl LeafShard for Sort {
   fn activate(desc: &bool, _: &mut (), _: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
     let mut items = input.as_seq().unwrap_or(&[]).to_vec();
     let mut error = None;
-    items.sort_by(|a, b| match sort_order(a, b) {
-      Ok(o) if *desc => o.reverse(),
-      Ok(o) => o,
-      Err(e) => {
-        error.get_or_insert(e);
-        std::cmp::Ordering::Equal
-      }
+    items.sort_by(|a, b| {
+      let o = total_order(a, b, &mut error);
+      if *desc { o.reverse() } else { o }
     });
     match error {
       Some(e) => Err(e),

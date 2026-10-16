@@ -412,10 +412,10 @@ impl MixedSpec for ModOp {
     &["Mod"],
   );
   fn int(a: i64, b: i64) -> std::result::Result<i64, &'static str> {
-    match a.checked_rem(b) {
-      Some(r) => Ok(r),
-      None if b == 0 => Err("division by zero"),
-      None => Err("integer overflow"),
+    // `i64::MIN % -1` is 0; only `checked_rem` calls it an overflow.
+    match b {
+      0 => Err("division by zero"),
+      _ => Ok(a.wrapping_rem(b)),
     }
   }
   fn float(a: f64, b: f64) -> f64 {
