@@ -7,6 +7,7 @@ How a Rust program (the host) adds its own shards and runs Shards scripts on the
 - `otter-core`: values, types, the shard traits, compose, and the scheduler (`Mesh`).
 - `otter-lang`: source to wire definitions, `check` and `run`, sessions with hot reload (§5), and tools (§6).
 - `otter-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work.
+- `otter-text` (native and wasm): regular expressions, hashes, `UUID` and `NanoID`, the text shards that need third-party crates.
 
 Depend on them by path or git. Host shards live in the host's own crate, and nothing in this repository needs to know about them.
 
@@ -84,7 +85,7 @@ Build one catalog from the core list and the host's list:
 Catalog::new(&[otter_core::shards::CATALOG, HOST_CATALOG])
 ```
 
-Add `otter_io::CATALOG` if scripts use `Http.Get`. Then:
+Add `otter_io::CATALOG` if scripts use `Http.Get`, and `otter_text::CATALOG` for `Regex.*`, `Hash.*`, `UUID` and `NanoID` (the `otter` command includes both). Then:
 
 - **Check without running:** `otter_lang::check(Source::new(path, text), &catalog, &defines)`. It returns the 1.x `{ok, file, diagnostics}` JSON envelope (`to_json()`), and `otter_lang::render` prints a diagnostic for humans.
 - **Run:** `Program::load(source, &catalog, &defines)`, then `program.run()`. The report has each entry wire's outcome, plus failures of spawned instances.

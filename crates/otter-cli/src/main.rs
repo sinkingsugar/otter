@@ -41,7 +41,12 @@ const USAGE: &str = "usage:
   otter tool <file> [arguments-json]";
 
 fn catalog() -> Catalog {
-  Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG]).expect("catalog")
+  Catalog::new(&[
+    otter_core::shards::CATALOG,
+    otter_io::CATALOG,
+    otter_text::CATALOG,
+  ])
+  .expect("catalog")
 }
 
 struct Options {
