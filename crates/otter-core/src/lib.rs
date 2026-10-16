@@ -37,7 +37,7 @@ pub mod var;
 pub use args::{Arg, Args};
 pub use catalog::Catalog;
 pub use compose::{CacheStats, CompiledWire, ComposeCache, ComposeCtx, WireDef};
-pub use compose_time::{EvalLimits, EvalUsage};
+pub use compose_time::{Budget, EvalLimits, EvalUsage, RunBudget};
 pub use describe::ShardDesc;
 pub use diagnostic::Diagnostic;
 pub use error::{Error, Result};

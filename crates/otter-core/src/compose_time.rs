@@ -13,13 +13,67 @@
 //! Runtime code never meters: the VM's metered form is a separate
 //! instantiation ([`crate::inline::VmCalls::METERED`]) and the engine checks
 //! one `Option` per step.
+//!
+//! A mesh can be driven under the same meter at run time ([`Budget`],
+//! `Mesh::tick_budgeted`): fuel, and a cancellation flag and deadline
+//! checked every [`INTERRUPT_EVERY`] units, so even a loop that never
+//! suspends can be stopped. It charges as an evaluation does, with no
+//! value limit; `Mesh::tick` never meters and is unchanged by it.
 
 use std::cell::Cell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::diagnostic::{Diagnostic, Phase};
 use crate::error::{Error, Result};
 use crate::shard::ShardType;
 use crate::var::Var;
+
+/// Fuel between two checks of a budgeted run's cancellation flag and
+/// deadline: one unit is an engine dispatch or a VM instruction, so a
+/// check (an atomic load and a clock read) costs well under a percent.
+pub const INTERRUPT_EVERY: u64 = 4096;
+
+/// A run-time budget: the limits of a run driven by `Mesh::tick_budgeted`.
+/// Every activation then runs metered and fails when the fuel is spent,
+/// or ends with `Error::Cancelled` once `cancel` is set or `deadline`
+/// passes, checked every [`INTERRUPT_EVERY`] units of work, inside loops
+/// that never suspend too.
+#[derive(Clone, Debug, Default)]
+pub struct Budget {
+  /// Engine dispatches and VM instructions, plus what native shards charge
+  /// (a unit per byte they allocate).
+  pub fuel: Option<u64>,
+  pub cancel: Option<Arc<AtomicBool>>,
+  pub deadline: Option<Instant>,
+}
+
+impl Budget {
+  /// A run under this budget, its fuel counted from zero.
+  pub fn start(&self) -> RunBudget {
+    RunBudget {
+      meter: Meter::runtime(self),
+    }
+  }
+}
+
+/// A run's meter: pass it to every `Mesh::tick_budgeted` of the run.
+pub struct RunBudget {
+  pub(crate) meter: Meter,
+}
+
+impl RunBudget {
+  /// The fuel the run has spent.
+  pub fn fuel_used(&self) -> u64 {
+    self.meter.fuel_used()
+  }
+}
+
+struct Interrupt {
+  cancel: Option<Arc<AtomicBool>>,
+  deadline: Option<Instant>,
+}
 
 /// The budgets of one compose-time evaluation. Host-configurable
 /// (`Mesh::set_eval_limits`); the defaults are small enough for the device,
@@ -98,6 +152,11 @@ pub struct Meter {
   fuel: Cell<u64>,
   depth: Cell<usize>,
   largest: Cell<usize>,
+  /// A run-time budget's cancellation flag and deadline.
+  interrupt: Option<Interrupt>,
+  /// The fuel past which `step` takes its slow path: the limit, or a
+  /// budgeted run's next interrupt check if that comes first.
+  stop: Cell<u64>,
   /// The evaluation runs again to locate its failure: the activation
   /// records `trace` (`Engine::steps::<true>`).
   pub(crate) locating: bool,
@@ -117,10 +176,34 @@ impl Meter {
       fuel: Cell::new(0),
       depth: Cell::new(0),
       largest: Cell::new(0),
+      interrupt: None,
+      stop: Cell::new(limits.fuel),
       locating: false,
       pc: Cell::new(0),
       trace: Default::default(),
     }
+  }
+
+  /// A run-time meter for a budgeted mesh: fuel and interruption only.
+  pub(crate) fn runtime(budget: &Budget) -> Meter {
+    Meter {
+      interrupt: Some(Interrupt {
+        cancel: budget.cancel.clone(),
+        deadline: budget.deadline,
+      }),
+      stop: Cell::new(INTERRUPT_EVERY.min(budget.fuel.unwrap_or(u64::MAX))),
+      ..Meter::new(EvalLimits {
+        fuel: budget.fuel.unwrap_or(u64::MAX),
+        depth: usize::MAX,
+        value_bytes: usize::MAX,
+        output_bytes: usize::MAX,
+      })
+    }
+  }
+
+  /// Fuel spent so far.
+  pub(crate) fn fuel_used(&self) -> u64 {
+    self.fuel.get()
   }
 
   /// A meter for running a failed evaluation again to locate the failure.
@@ -156,6 +239,48 @@ impl Meter {
         "the evaluation ran out of fuel (limit {})",
         self.limits.fuel
       )));
+    }
+    Ok(())
+  }
+
+  /// One engine dispatch or VM instruction of a metered run: a unit of
+  /// fuel and, every [`INTERRUPT_EVERY`] units of a budgeted run, its
+  /// interrupt check. Only the metered instantiations call it; `charge`,
+  /// which shared code inlines, stays as it was.
+  /// As cheap as `charge(1)`: one comparison against `stop`, the fuel
+  /// limit or, in a budgeted run, the next check if that comes first.
+  #[inline(always)]
+  pub(crate) fn step(&self) -> Result<()> {
+    let used = self.fuel.get().saturating_add(1);
+    self.fuel.set(used);
+    if used > self.stop.get() {
+      return self.stopped(used);
+    }
+    Ok(())
+  }
+
+  /// Past `stop`: out of fuel, or a budgeted run's check: cancelled, or
+  /// past its deadline.
+  #[cold]
+  #[inline(never)]
+  fn stopped(&self, used: u64) -> Result<()> {
+    if used > self.limits.fuel {
+      return Err(budget(format!(
+        "the evaluation ran out of fuel (limit {})",
+        self.limits.fuel
+      )));
+    }
+    self
+      .stop
+      .set(used.saturating_add(INTERRUPT_EVERY).min(self.limits.fuel));
+    if let Some(interrupt) = &self.interrupt
+      && (interrupt
+        .cancel
+        .as_ref()
+        .is_some_and(|c| c.load(Ordering::Acquire))
+        || interrupt.deadline.is_some_and(|d| Instant::now() >= d))
+    {
+      return Err(Error::Cancelled);
     }
     Ok(())
   }

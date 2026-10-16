@@ -170,20 +170,25 @@ pub fn call_type() -> Type {
   ])
 }
 
-/// How a call runs: services for the script's shards, a cancellation flag
-/// and a time limit.
+/// How a call runs: services for the script's shards, a cancellation flag,
+/// a time limit and a fuel budget. With any of the last three the call runs
+/// metered (`otter_core::Budget`): they are checked every few thousand
+/// instructions, inside loops that never suspend too, and the call runs the
+/// engine's metered form, slower on compute-heavy code. Without them it
+/// runs unmetered.
 #[derive(Clone, Default)]
 pub struct CallOptions {
   /// Inserted into the call's mesh (docs/embedding.md, services).
   pub services: Services,
   /// Set it (from any thread) to cancel the call: it ends with
-  /// [`ToolError::Cancelled`] after the current tick. A tick runs until the
-  /// call suspends (I/O, a `Pause`), so a loop that never suspends is not
-  /// interrupted.
+  /// [`ToolError::Cancelled`].
   pub cancel: Option<Arc<AtomicBool>>,
-  /// The longest the call may run; then it is cancelled and ends with
-  /// [`ToolError::TimedOut`]. Checked between ticks, as `cancel` is.
+  /// The longest the call may run; then it ends with
+  /// [`ToolError::TimedOut`].
   pub timeout: Option<Duration>,
+  /// The most work the call may do, in engine dispatches and VM
+  /// instructions; spent, the call fails ([`ToolError::Failed`]).
+  pub fuel: Option<u64>,
 }
 
 /// What a call returned.
@@ -395,6 +400,22 @@ impl Tool {
       .spawn(&self.inner.call, value)
       .map_err(|e| RunError::Input(e.to_string()))?;
     let started = Instant::now();
+    let deadline = options.timeout.map(|t| started + t);
+    let budget =
+      (options.cancel.is_some() || deadline.is_some() || options.fuel.is_some()).then(|| {
+        otter_core::Budget {
+          fuel: options.fuel,
+          cancel: options.cancel.clone(),
+          deadline,
+        }
+        .start()
+      });
+    // A budgeted run stops inside a tick with `Error::Cancelled`: past the
+    // deadline that is a time-out.
+    let interrupted = || match options.timeout {
+      Some(limit) if started.elapsed() >= limit => RunError::TimedOut(limit),
+      _ => RunError::Cancelled,
+    };
     // While the instance waits, sleep between ticks, longer the longer it
     // waits (I/O takes milliseconds to seconds), at most `MAX_NAP`.
     const MAX_NAP: Duration = Duration::from_millis(8);
@@ -403,7 +424,11 @@ impl Tool {
       // `tick` counts every running instance, including wires the call
       // spawned: the call is done when its own instance is. Dropping the
       // mesh cancels what it left running.
-      if mesh.tick() == 0 || mesh.outcome(id).is_some() {
+      let running = match &budget {
+        Some(budget) => mesh.tick_budgeted(budget),
+        None => mesh.tick(),
+      };
+      if running == 0 || mesh.outcome(id).is_some() {
         break;
       }
       if options
@@ -425,6 +450,14 @@ impl Tool {
     }
     match mesh.take_outcome(id) {
       Some(Outcome::Completed(value)) => Ok(value),
+      Some(Outcome::Failed(otter_core::Error::Cancelled)) => Err(interrupted()),
+      // The meter's own words are a compose-time evaluation's.
+      Some(Outcome::Failed(otter_core::Error::Diagnostic(d))) if d.code == "expansion-budget" => {
+        Err(RunError::Failed(format!(
+          "the call ran out of fuel (budget {})",
+          options.fuel.unwrap_or(u64::MAX)
+        )))
+      }
       Some(Outcome::Failed(e)) => Err(RunError::Failed(failure_message(&e))),
       Some(Outcome::Stopped) => Err(RunError::Stopped),
       Some(Outcome::Cancelled) | None => Err(RunError::Cancelled),

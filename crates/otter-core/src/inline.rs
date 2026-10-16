@@ -831,7 +831,7 @@ pub(crate) fn run<C: VmCalls>(
       // cases 7 to 16 percent at runtime (3ceac16).
       let meter = calls.meter().expect("metered");
       meter.at(index);
-      meter.charge(1)?;
+      meter.step()?;
     }
     // SAFETY: the hot arms keep `Tier`'s accumulator invariant; each reads
     // its operands before it writes, and writes only plain values over

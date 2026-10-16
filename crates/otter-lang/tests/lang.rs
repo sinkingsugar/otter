@@ -4538,6 +4538,7 @@ mod tools {
   args.fail | When({Is(true)} {"asked to fail" | Fail})
   args.wait | When({Is(true)} {"waiting" | Log  Repeat({Pause} forever: true)})
   args.stop | When({Is(true)} {"stopping" | Log  Stop})
+  args.spin | When({Is(true)} {"spinning" | Log  0 | Repeat({1} forever: true)})
   f"{greeting}, {name}!" | Log
   f"{greeting}, {name}! (in {input.working-dir})"
 })
@@ -4629,6 +4630,59 @@ mod tools {
       Err(ToolError::Stopped { log }) => assert_eq!(log, ["stopping"]),
       other => panic!("{other:?}"),
     }
+  }
+
+  /// A loop that never suspends runs inside one tick: with a time limit,
+  /// a cancellation flag or fuel the call runs metered, and each stops it.
+  #[cfg(not(any(target_arch = "wasm32", target_os = "espidf")))]
+  #[test]
+  fn a_call_that_never_suspends_still_stops() {
+    let tool = load(ECHO).unwrap();
+    let spin = ToolInput::from_json(r#"{"spin": true}"#).unwrap();
+    let started = std::time::Instant::now();
+    let timeout = CallOptions {
+      timeout: Some(std::time::Duration::from_millis(50)),
+      ..CallOptions::default()
+    };
+    match tool.call_with(&spin, &timeout) {
+      Err(ToolError::TimedOut { log, .. }) => assert_eq!(log, ["spinning"]),
+      other => panic!("{other:?}"),
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let setter = {
+      let cancel = cancel.clone();
+      std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel.store(true, std::sync::atomic::Ordering::Release);
+      })
+    };
+    let cancelled = CallOptions {
+      cancel: Some(cancel),
+      ..CallOptions::default()
+    };
+    match tool.call_with(&spin, &cancelled) {
+      Err(ToolError::Cancelled { log }) => assert_eq!(log, ["spinning"]),
+      other => panic!("{other:?}"),
+    }
+    setter.join().unwrap();
+    let fuel = CallOptions {
+      fuel: Some(100_000),
+      ..CallOptions::default()
+    };
+    match tool.call_with(&spin, &fuel) {
+      Err(ToolError::Failed { message, log }) => {
+        assert!(message.contains("ran out of fuel"), "{message}");
+        assert_eq!(log, ["spinning"]);
+      }
+      other => panic!("{other:?}"),
+    }
+    // Fuel is counted from each call's start, and a budgeted call that
+    // finishes in it returns as usual.
+    let out = tool
+      .call_with(&ToolInput::from_json(r#"{"name": "Ann"}"#).unwrap(), &fuel)
+      .unwrap();
+    assert_eq!(out.text, "Hello, Ann! (in )");
   }
 
   /// The call ends when its function does, not when every wire it spawned
