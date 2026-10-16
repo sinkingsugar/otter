@@ -477,3 +477,61 @@ fn a_host_confines_scripts_to_a_directory() {
     Ok("secret".to_string())
   );
 }
+
+/// Review findings: links already in the tree, a link through another link
+/// and `..`, and the root itself.
+#[cfg(unix)]
+#[test]
+fn links_in_the_tree_and_the_root_itself_stay_confined() {
+  use std::os::unix::fs::symlink;
+  let work = TempDir::new("confined");
+  let other = TempDir::new("victim");
+  let within = || Some(FsAccess::within(work.path()).unwrap());
+  let victim = other.path().join("victim.txt");
+  std::fs::write(&victim, "untouched").unwrap();
+
+  // A copy over a destination tree holding a link out writes nothing there.
+  std::fs::create_dir_all(work.path().join("src")).unwrap();
+  std::fs::write(work.path().join("src/f"), "payload").unwrap();
+  std::fs::create_dir_all(work.path().join("dst")).unwrap();
+  symlink(&victim, work.path().join("dst/f")).unwrap();
+  let message = call_tool(
+    r#""src" | FS.Copy(destination: "dst" overwrite: true)"#,
+    within(),
+  )
+  .unwrap_err();
+  assert!(
+    message.ends_with("outside the allowed directory"),
+    "{message}"
+  );
+  assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+  // Nor into a destination directory that is itself a link out.
+  symlink(other.path(), work.path().join("dst2")).unwrap();
+  assert!(
+    call_tool(
+      r#""src" | FS.Copy(destination: "dst2" overwrite: true)"#,
+      within()
+    )
+    .is_err()
+  );
+  assert!(!other.path().join("f").exists());
+
+  // `s/../secret` where `s` leads outside: the OS resolves `..` after `s`.
+  std::fs::create_dir_all(other.path().join("a/b")).unwrap();
+  std::fs::write(other.path().join("a/secret"), "SECRET").unwrap();
+  symlink(other.path().join("a/b"), work.path().join("s")).unwrap();
+  symlink("s/../secret", work.path().join("L")).unwrap();
+  let message = call_tool(r#""L" | FS.Read"#, within()).unwrap_err();
+  assert!(
+    message.ends_with("outside the allowed directory"),
+    "{message}"
+  );
+
+  // The root itself is not changed, however it is named.
+  for path in [".", "", "x/.."] {
+    let message =
+      call_tool(&format!(r#""{path}" | FS.RemoveAll | ToString"#), within()).unwrap_err();
+    assert!(message.ends_with("cannot be changed"), "{path}: {message}");
+  }
+  assert!(work.path().join("src/f").exists());
+}

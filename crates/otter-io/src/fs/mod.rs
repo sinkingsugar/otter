@@ -646,9 +646,18 @@ fn copy_tree(
   overwrite: bool,
   cancel: &CancellationToken,
 ) -> std::result::Result<(), (PathBuf, io::Error)> {
+  // Every target is checked, not only the top one: a symbolic link
+  // already in the destination tree must not lead the copy outside.
+  let to = &access
+    .resolve(to, true)
+    .map_err(|e| (to.to_path_buf(), e))?;
   match fs::create_dir(to) {
     Ok(()) => {}
-    Err(e) if e.kind() == ErrorKind::AlreadyExists && overwrite && to.is_dir() => {}
+    // Without following a link: into a real directory only.
+    Err(e)
+      if e.kind() == ErrorKind::AlreadyExists
+        && overwrite
+        && fs::symlink_metadata(to).is_ok_and(|m| m.is_dir()) => {}
     Err(e) => return Err((to.to_path_buf(), e)),
   }
   for entry in fs::read_dir(from).map_err(|e| (from.to_path_buf(), e))? {
@@ -678,6 +687,9 @@ fn copy_tree(
         ));
       }
     }
+    let target = access
+      .resolve(&target, true)
+      .map_err(|e| (target.clone(), e))?;
     copy_file(&source, &target, overwrite)?;
   }
   Ok(())

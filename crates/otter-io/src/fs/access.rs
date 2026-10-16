@@ -41,10 +41,6 @@ enum Scope {
   Denied,
 }
 
-/// How many symbolic links a check follows in a chain before it gives up
-/// (the usual OS limit).
-const MAX_LINKS: u32 = 40;
-
 impl FsAccess {
   /// Any path; relative paths resolve against the process's working
   /// directory. What the shards use when the host inserts no `FsAccess`.
@@ -109,7 +105,15 @@ impl FsAccess {
     match &self.scope {
       Scope::Unrestricted => Ok(path.to_path_buf()),
       Scope::Denied => Err(denied("file access is denied")),
-      Scope::Within(root) => resolve_within(root, path, MAX_LINKS),
+      Scope::Within(root) => {
+        let resolved = resolve_within(root, path)?;
+        // The root holds everything allowed: removing or replacing it
+        // (`"." | FS.RemoveAll`) would take the whole scope.
+        if write && resolved == *root {
+          return Err(denied("the allowed directory itself cannot be changed"));
+        }
+        Ok(resolved)
+      }
     }
   }
 
@@ -128,7 +132,7 @@ fn denied(message: &str) -> io::Error {
   io::Error::new(ErrorKind::PermissionDenied, message.to_string())
 }
 
-fn resolve_within(root: &Path, path: &Path, links: u32) -> io::Result<PathBuf> {
+fn resolve_within(root: &Path, path: &Path) -> io::Result<PathBuf> {
   // An absolute `path` replaces the root here.
   let normal = normalize(&root.join(path));
   let (parent, name) = match (normal.parent(), normal.file_name()) {
@@ -145,12 +149,19 @@ fn resolve_within(root: &Path, path: &Path, links: u32) -> io::Result<PathBuf> {
   // A last component that is a symbolic link must lead inside too, since
   // most operations follow it.
   if std::fs::symlink_metadata(&resolved).is_ok_and(|m| m.file_type().is_symlink()) {
-    if links == 0 {
-      return Err(io::Error::other("too many levels of symbolic links"));
-    }
     let target = std::fs::read_link(&resolved)?;
     let from = resolved.parent().unwrap_or(root);
-    resolve_within(root, &from.join(target), links - 1)?;
+    // Where the OS will go: resolved through the filesystem, never
+    // lexically, since `..` after a link in the target leaves that
+    // link's directory (`s/../x` with `s` pointing outside). What does
+    // not exist yet resolves through its existing prefix; a missing
+    // component followed by `..` is an error, and the OS reports a loop.
+    let lands = canonical_prefix(&from.join(target))?;
+    if !lands.starts_with(root) {
+      return Err(denied(
+        "a symbolic link leads outside the allowed directory",
+      ));
+    }
   }
   Ok(resolved)
 }
