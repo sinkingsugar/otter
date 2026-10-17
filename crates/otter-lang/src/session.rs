@@ -260,17 +260,20 @@ impl Session {
   /// records. At `@run`'s iteration limit, cancels remaining instances and
   /// reports their outcomes in this same call. Idle calls are no-ops.
   pub fn tick(&mut self) -> Vec<Finished> {
-    self.logging(Self::tick_inner)
+    if self.log.is_some() {
+      return self.logged(Self::tick_inner);
+    }
+    self.tick_inner()
   }
 
-  /// Runs `f` with the session's log sink, if it has one: everything that
-  /// runs the program or ends it (ticks, stops, reloads that cancel work)
-  /// logs there.
-  fn logging<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-    match self.log.clone() {
-      Some(sink) => otter_core::log::with_sink(Some(sink), || f(self)),
-      None => f(self),
-    }
+  /// Runs `f` with the session's log sink: everything that runs the
+  /// program or ends it (ticks, stops, reloads that cancel work) logs
+  /// there. Callers check for a sink first and run `f` directly without
+  /// one.
+  #[cold]
+  #[inline(never)]
+  fn logged<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+    otter_core::log::with_sink(self.log.clone(), || f(self))
   }
 
   fn tick_inner(&mut self) -> Vec<Finished> {
@@ -303,7 +306,10 @@ impl Session {
   /// the revision's mesh and compose cache. Safe to call repeatedly.
   /// Dropping the session also cancels work, but discards the outcomes.
   pub fn stop(&mut self) -> Vec<Finished> {
-    self.logging(Self::stop_inner)
+    if self.log.is_some() {
+      return self.logged(Self::stop_inner);
+    }
+    self.stop_inner()
   }
 
   fn stop_inner(&mut self) -> Vec<Finished> {
@@ -359,7 +365,10 @@ impl Session {
       return self.reload(source, catalog, defines);
     }
     // Replaced instances are cancelled here, and their cleanup may log.
-    self.logging(|session| session.preserve(source, catalog, defines))
+    if self.log.is_some() {
+      return self.logged(|session| session.preserve(source, catalog, defines));
+    }
+    self.preserve(source, catalog, defines)
   }
 
   fn preserve(
@@ -431,8 +440,8 @@ impl Session {
 impl Drop for Session {
   /// Ends the program with the session's log sink, as `stop` does.
   fn drop(&mut self) {
-    if self.active.is_some() {
-      self.logging(|session| drop(session.active.take()));
+    if self.active.is_some() && self.log.is_some() {
+      self.logged(|session| drop(session.active.take()));
     }
   }
 }

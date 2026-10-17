@@ -331,24 +331,30 @@ fn lower_files<'a>(
   };
   let mut out = Lowered::default();
   // Script-argument defaults before anything reads a name: a function's
-  // parameter defaults may read one, and must see it with its type.
+  // parameter defaults may read one, and must see it with its type. The
+  // same pass finds the functions, whose signatures come next.
+  let mut bodies = Vec::new();
   for stmt in &program.statements {
-    if let Some((name, params, block)) = default_decl(stmt) {
-      l.piped_declaration(name, stmt);
-      l.const_decl(block, params);
+    match top_level_func(stmt) {
+      Some((name, params, block)) if name.node == "fn" => {
+        bodies.push(Signature::Pending(name, params, block, stmt));
+      }
+      Some((name, params, block)) if name.node == "const" && is_default(params) => {
+        l.piped_declaration(name, stmt);
+        l.const_decl(block, params);
+      }
+      _ => {}
     }
   }
   // Function signatures next: a call may precede its declaration, and
   // bodies may call each other.
-  let mut bodies = Vec::new();
-  for stmt in &program.statements {
-    if let Some((name, params, block)) = top_level_func(stmt)
-      && name.node == "fn"
-    {
+  for signature in &mut bodies {
+    if let Signature::Pending(name, params, block, stmt) = *signature {
       l.piped_declaration(name, stmt);
-      if let Some((index, body)) = l.fn_header(&mut out, block, params) {
-        bodies.push((index, body, block.span));
-      }
+      *signature = match l.fn_header(&mut out, block, params) {
+        Some((index, body)) => Signature::Lowered(index, body, block.span),
+        None => Signature::Failed,
+      };
     }
   }
   // Constants next: bodies and wires read them, and a constant may call a
@@ -369,7 +375,10 @@ fn lower_files<'a>(
     l.temps = 0;
     let _ = l.read_const(&name, &[]);
   }
-  for (index, body, span) in bodies {
+  for signature in bodies {
+    let Signature::Lowered(index, body, span) = signature else {
+      continue;
+    };
     let name = out.functions[index].name.clone();
     l.wire = function_key(&name);
     l.temps = 0;
@@ -470,18 +479,12 @@ fn top_level_func(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> 
   }
 }
 
-/// A `@const` that is a default for a script argument.
-fn default_decl(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> {
-  let Statement::Pipeline(pipe) = stmt else {
-    return None;
-  };
-  let block = &pipe.blocks[0];
-  match &block.kind {
-    BlockKind::Func { name, params } if name.node == "const" && is_default(params.as_ref()) => {
-      Some((name, params.as_ref(), block))
-    }
-    _ => None,
-  }
+/// A function's signature while the program's top level is lowered: found
+/// (with the defaults), then lowered, its body after the constants.
+enum Signature<'s> {
+  Pending(&'s Name, Option<&'s Params>, &'s Block, &'s Statement),
+  Lowered(usize, Option<&'s [Statement]>, Span),
+  Failed,
 }
 
 /// Whether a `@const`'s parameters end with `ignore-redefined: true`: a
