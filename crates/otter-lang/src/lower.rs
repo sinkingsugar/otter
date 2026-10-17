@@ -336,9 +336,7 @@ fn lower_files<'a>(
   let mut bodies = Vec::new();
   for stmt in &program.statements {
     match top_level_func(stmt) {
-      Some((name, params, block)) if name.node == "fn" => {
-        bodies.push(Signature::Pending(name, params, block, stmt));
-      }
+      Some((name, _, _)) if name.node == "fn" => bodies.push(Signature::Pending(stmt)),
       Some((name, params, block)) if name.node == "const" && is_default(params) => {
         l.piped_declaration(name, stmt);
         l.const_decl(block, params);
@@ -349,10 +347,19 @@ fn lower_files<'a>(
   // Function signatures next: a call may precede its declaration, and
   // bodies may call each other.
   for signature in &mut bodies {
-    if let Signature::Pending(name, params, block, stmt) = *signature {
+    if let Signature::Pending(stmt) = *signature
+      && let Statement::Pipeline(pipe) = stmt
+      && let block = &pipe.blocks[0]
+      && let BlockKind::Func { name, params } = &block.kind
+    {
+      let params = params.as_ref();
       l.piped_declaration(name, stmt);
       *signature = match l.fn_header(&mut out, block, params) {
-        Some((index, body)) => Signature::Lowered(index, body, block.span),
+        Some((index, body)) => Signature::Lowered(
+          u32::try_from(index).expect("fewer than 2^32 functions"),
+          body,
+          block.span,
+        ),
         None => Signature::Failed,
       };
     }
@@ -379,6 +386,7 @@ fn lower_files<'a>(
     let Signature::Lowered(index, body, span) = signature else {
       continue;
     };
+    let index = index as usize;
     let name = out.functions[index].name.clone();
     l.wire = function_key(&name);
     l.temps = 0;
@@ -480,12 +488,21 @@ fn top_level_func(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> 
 }
 
 /// A function's signature while the program's top level is lowered: found
-/// (with the defaults), then lowered, its body after the constants.
+/// (with the defaults), then lowered, its body after the constants. The
+/// index is a `u32` so the tag shares its word: the list is no larger
+/// than the `(index, body, span)` list it replaced on 64-bit targets (4
+/// bytes larger per function on 32-bit ones, where that tuple has no
+/// padding to share).
 enum Signature<'s> {
-  Pending(&'s Name, Option<&'s Params>, &'s Block, &'s Statement),
-  Lowered(usize, Option<&'s [Statement]>, Span),
+  Pending(&'s Statement),
+  Lowered(u32, Option<&'s [Statement]>, Span),
   Failed,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(
+  std::mem::size_of::<Signature>() <= std::mem::size_of::<(usize, Option<&[Statement]>, Span)>()
+);
 
 /// Whether a `@const`'s parameters end with `ignore-redefined: true`: a
 /// default for a script argument.

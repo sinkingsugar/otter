@@ -261,22 +261,8 @@ impl Session {
   /// reports their outcomes in this same call. Idle calls are no-ops.
   pub fn tick(&mut self) -> Vec<Finished> {
     if self.log.is_some() {
-      return self.logged(Self::tick_inner);
+      return self.logged(Self::tick);
     }
-    self.tick_inner()
-  }
-
-  /// Runs `f` with the session's log sink: everything that runs the
-  /// program or ends it (ticks, stops, reloads that cancel work) logs
-  /// there. Callers check for a sink first and run `f` directly without
-  /// one.
-  #[cold]
-  #[inline(never)]
-  fn logged<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-    otter_core::log::with_sink(self.log.clone(), || f(self))
-  }
-
-  fn tick_inner(&mut self) -> Vec<Finished> {
     let Some(active) = &mut self.active else {
       return Vec::new();
     };
@@ -307,12 +293,8 @@ impl Session {
   /// Dropping the session also cancels work, but discards the outcomes.
   pub fn stop(&mut self) -> Vec<Finished> {
     if self.log.is_some() {
-      return self.logged(Self::stop_inner);
+      return self.logged(Self::stop);
     }
-    self.stop_inner()
-  }
-
-  fn stop_inner(&mut self) -> Vec<Finished> {
     let Some(mut active) = self.active.take() else {
       return Vec::new();
     };
@@ -366,17 +348,8 @@ impl Session {
     }
     // Replaced instances are cancelled here, and their cleanup may log.
     if self.log.is_some() {
-      return self.logged(|session| session.preserve(source, catalog, defines));
+      return self.logged(|session| session.reload_preserving(source, catalog, defines));
     }
-    self.preserve(source, catalog, defines)
-  }
-
-  fn preserve(
-    &mut self,
-    source: Source,
-    catalog: &Catalog,
-    defines: &std::collections::HashMap<String, String>,
-  ) -> Result<Vec<Finished>, (Source, Vec<Diagnostic>)> {
     let program = self.load(source, catalog, defines)?;
     let active = self.active.as_mut().expect("active mesh");
     let mut candidate = active.mesh.revision();
@@ -443,6 +416,24 @@ impl Drop for Session {
     if self.active.is_some() && self.log.is_some() {
       self.logged(|session| drop(session.active.take()));
     }
+  }
+}
+
+impl Session {
+  /// Runs `f` (a tick, a stop, a reload) with the session's log sink as
+  /// the thread's: everything that runs the program or ends it logs there.
+  /// The sink is taken out meanwhile, so `f` runs the plain path, and put
+  /// back afterwards, even if `f` panics. Callers check for a sink first:
+  /// without one they pay a branch, not a call through here.
+  #[cold]
+  #[inline(never)]
+  fn logged<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+    let sink = self.log.take();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      otter_core::log::with_sink(sink.clone(), || f(self))
+    }));
+    self.log = sink;
+    result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
   }
 }
 
