@@ -1,6 +1,6 @@
 # Otter
 
-Otter is a programming language and its Rust implementation: the runtime, the frontend and the `otter` command. It succeeds [Shards](https://github.com/fragcolor-xyz/shards) 1.x, and a program is still a pipeline of shards. Programs keep the `.shs` extension. The project was renamed from shards2 on 2026-10-11, and the language from Shards to Otter on 2026-10-17; older records and benchmark results use the old names.
+Otter is a programming language and its Rust implementation: the runtime, the frontend and the `otter` command. It succeeds [Shards](https://github.com/fragcolor-xyz/shards) 1.x, and a program is still a pipeline of shards. Script files are `.otr` (preferred for new files), `.otter` or `.shs` (still accepted). The project was renamed from shards2 on 2026-10-11, and the language from Shards to Otter on 2026-10-17; older records and benchmark results use the old names.
 
 **Status:** core prototype and language frontend working (2026-10-07): the compiled/state split on one directly resumable (stackless) engine, real async I/O (`Http.Get`), a hand-written frontend with `check --json`, hot reload, wasm (WASI) and ESP32 (QEMU) builds. Functions (`@fn`, golden path M5) and recursion (M7) are in, with private frames and state-preserving reload of edited bodies; values are 32 bytes with f32 vectors and struct tables (M6). Compose-time evaluation and flow parameters (M8, M9) followed. **Next:** the priorities in [`docs/host-requirements.md`](docs/host-requirements.md) §7. Current status is in `docs/current-state.md`.
 
@@ -48,7 +48,7 @@ bench/http-concurrency/run.sh path/to/1.x/shards                              # 
 - `crates/otter-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only; TLS via the `rustls-ring` or `native-tls` feature.
 - `crates/otter-text`: text shards that need third-party crates: regular expressions (`Regex.Match`, `Regex.Search`, `Regex.Replace`, on the Rust `regex` engine), hashes (`Hash.Sha2-256`, `Hash.Sha1`, `Hash.Md5`, `Hash.Blake2-128`/`-256`, `Hash.Blake3`, `Hash.XXH3-64`/`-128`), `UUID` and `NanoID`. Native and wasm.
 - `crates/otter-lang`: the language frontend: parser, lowering to wire definitions with a source map, `check`/`run`, and host-driven `Session` execution with state-preserving reload of edited functions.
-- `crates/otter-cli`: the `otter` command: `cargo run -p otter-cli -- check --json file.shs`, `run`, `watch`, `describe`, `search`, `tool`. File watching and warm host sessions are covered in [the embedding guide](docs/embedding.md#5-warm-sessions-and-hot-reload), tools a host loads and calls in [its §6](docs/embedding.md#6-tools).
+- `crates/otter-cli`: the `otter` command: `cargo run -p otter-cli -- check --json file.otr`, `run`, `watch`, `describe`, `search`, `tool`. File watching and warm host sessions are covered in [the embedding guide](docs/embedding.md#5-warm-sessions-and-hot-reload), tools a host loads and calls in [its §6](docs/embedding.md#6-tools).
 
 ## Development
 

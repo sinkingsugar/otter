@@ -3594,6 +3594,45 @@ fn an_included_file_declares_once_wherever_it_is_named() {
 }
 
 #[test]
+fn includes_name_any_extension() {
+  // `.otr` is preferred, `.otter` and `.shs` are accepted: the frontend
+  // never looks at an extension, and a name is used as written.
+  let files = files(&[
+    ("lib/a.otr", "@include(\"b.otter\")\n@const(a 20)"),
+    (
+      "lib/b.otter",
+      "@include(\"c.shs\")\n@fn(Twice input: Int output: Int params: {} { Math.Multiply(2) })",
+    ),
+    ("lib/c.shs", "@const(c 2)"),
+    ("lib/bad.otter", "\"a\" | Add(1)"),
+  ]);
+  for main in ["main.otr", "main.otter", "main.shs"] {
+    let program = Program::load_with(
+      Source::new(main, "@include(\"lib/a.otr\")\n@a | Twice | Add(@c)"),
+      &catalog(),
+      &no_defines(),
+      &files,
+    )
+    .unwrap_or_else(|(_, d)| panic!("{main}: {d:?}"));
+    assert_eq!(program.files, ["lib/a.otr", "lib/b.otter", "lib/c.shs"]);
+    let report = program.run().unwrap_or_else(|d| panic!("{d:?}"));
+    assert_eq!(completed(&report, "root"), Var::Int(42));
+  }
+  // An include without its extension finds nothing: there is no default.
+  let d = load_with("@include(\"lib/a\")", &files)
+    .err()
+    .expect("no default extension");
+  assert_eq!(d[0].code, "file-not-found");
+  // A problem in an included file is located in it, whatever its name.
+  let program = load_with("@include(\"lib/bad.otter\")", &files).unwrap();
+  let d = &program.compose()[0];
+  assert_eq!(
+    (d.code, d.file.as_deref()),
+    ("input-type-mismatch", Some("lib/bad.otter"))
+  );
+}
+
+#[test]
 fn problems_in_included_files_are_located_there() {
   let files = files(&[
     (

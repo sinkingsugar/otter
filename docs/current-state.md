@@ -1,6 +1,6 @@
 # Current state
 
-Checkpoint: 2026-10-11 (the project is renamed Otter: crates `otter-*`, the `otter` command; records and results before the rename use `shards2` and `shards-*`). On 2026-10-17 the language was renamed from Shards to Otter as well: diagnostics say "in Otter" ("`null` is spelled `none` in Otter"), "shard" still names a building block, and programs keep the `.shs` extension. Check `git log` and the working tree for later changes. The plan for current work is [golden-path.md](golden-path.md); it overrides older statements elsewhere. Earlier checkpoints, review rounds and the 1.x deviation list are in [history.md](history.md).
+Checkpoint: 2026-10-11 (the project is renamed Otter: crates `otter-*`, the `otter` command; records and results before the rename use `shards2` and `shards-*`). On 2026-10-17 the language was renamed from Shards to Otter as well: diagnostics say "in Otter" ("`null` is spelled `none` in Otter"), "shard" still names a building block, and script files are `.otr` (preferred for new files), `.otter` or `.shs` (still accepted; nothing picks or filters an extension, tested in `otter-cli/tests/cli.rs` and `lang.rs`). Check `git log` and the working tree for later changes. The plan for current work is [golden-path.md](golden-path.md); it overrides older statements elsewhere. Earlier checkpoints, review rounds and the 1.x deviation list are in [history.md](history.md).
 
 ## Next
 

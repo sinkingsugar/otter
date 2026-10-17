@@ -81,7 +81,7 @@ fn options(args: &[String]) -> Result<Options, String> {
       a if a.starts_with("-I") => include_paths.push(a[2..].into()),
       a if a.starts_with("--") => return Err(format!("unknown option {a}")),
       a => match script_argument(a) {
-        // In any order: `check a:b file.shs` and `check file.shs a:b`.
+        // In any order: `check a:b file.otr` and `check file.otr a:b`.
         Some((k, v)) => {
           defines.insert(k.to_string(), v.to_string());
         }

@@ -119,36 +119,28 @@ fn catalog_commands() {
   assert!(err.contains("usage:"));
 }
 
-#[test]
-fn watch_reloads_atomic_saves_and_keeps_running_after_rejected_edits() {
-  use std::io::{BufRead, Write};
-  use std::process::{Child, Stdio};
-  use std::sync::mpsc;
-  use std::time::Duration;
+/// `otter watch <file>`, its stdout and stderr read as lines; killed on
+/// drop.
+struct Watch {
+  child: std::process::Child,
+  lines: std::sync::mpsc::Receiver<String>,
+}
 
-  struct KillOnDrop(Child);
-  impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-      let _ = self.0.kill();
-      let _ = self.0.wait();
-    }
-  }
-
-  {
-    let file = script("watch.shs", "41");
-    let mut child = KillOnDrop(
-      Command::new(env!("CARGO_BIN_EXE_otter"))
-        .arg("watch")
-        .arg(&file)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap(),
-    );
-    let (send, lines) = mpsc::channel();
-    let stdout = child.0.stdout.take().unwrap();
-    let stderr = child.0.stderr.take().unwrap();
+impl Watch {
+  fn start(file: &str) -> Self {
+    use std::io::BufRead;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_otter"))
+      .arg("watch")
+      .arg(file)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .unwrap();
+    let (send, lines) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     let errors = send.clone();
     std::thread::spawn(move || {
       for line in std::io::BufReader::new(stdout).lines() {
@@ -164,48 +156,76 @@ fn watch_reloads_atomic_saves_and_keeps_running_after_rejected_edits() {
         }
       }
     });
-    let wait_for = |expected: &str| {
-      let deadline = std::time::Instant::now() + Duration::from_secs(10);
-      loop {
-        let line = lines
-          .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-          .unwrap_or_else(|e| panic!("waiting for {expected}: {e}"));
-        if line.contains(expected) {
-          break line;
-        }
+    Watch { child, lines }
+  }
+
+  /// The next line containing `expected`, waiting up to 10 s.
+  fn wait_for(&self, expected: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+      let line = self
+        .lines
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .unwrap_or_else(|e| panic!("waiting for {expected}: {e}"));
+      if line.contains(expected) {
+        break line;
       }
-    };
-    wait_for("root: 41");
-    std::fs::write(&file, "unknown").unwrap();
-    wait_for("edit rejected; previous execution retained");
-    let replacement = format!("{file}.new");
-    std::fs::write(&replacement, "42").unwrap();
-    std::fs::rename(&replacement, &file).unwrap();
-    wait_for("root: 42");
-    let live = |output, body| {
-      format!(
-        r#"@fn(Inner input: None output: {output} params: {{n: Int}} {{{body}}})
+    }
+  }
+
+  /// A command line on stdin (`r` restarts, `q` quits).
+  fn send(&mut self, command: &str) {
+    use std::io::Write;
+    let stdin = self.child.stdin.as_mut().unwrap();
+    writeln!(stdin, "{command}").unwrap();
+  }
+
+  fn exits_cleanly(mut self) -> bool {
+    self.child.wait().unwrap().success()
+  }
+}
+
+impl Drop for Watch {
+  fn drop(&mut self) {
+    let _ = self.child.kill();
+    let _ = self.child.wait();
+  }
+}
+
+#[test]
+fn watch_reloads_atomic_saves_and_keeps_running_after_rejected_edits() {
+  let file = script("watch.shs", "41");
+  let mut watch = Watch::start(&file);
+  watch.wait_for("root: 41");
+  std::fs::write(&file, "unknown").unwrap();
+  watch.wait_for("edit rejected; previous execution retained");
+  let replacement = format!("{file}.new");
+  std::fs::write(&replacement, "42").unwrap();
+  std::fs::rename(&replacement, &file).unwrap();
+  watch.wait_for("root: 42");
+  let live = |output, body| {
+    format!(
+      r#"@fn(Inner input: None output: {output} params: {{n: Int}} {{{body}}})
 @wire(main {{Keep(n 0) Inc(n) Inner(n: n)}} looped: true)
 @mesh(m) @schedule(m main) @run(m fps: 10)"#
-      )
-    };
-    std::fs::write(&file, live("String", r#"f"old {n}" Log"#)).unwrap();
-    wait_for("old 1");
-    std::fs::write(&file, live("String", r#"f"new {n}" Log"#)).unwrap();
-    let line = wait_for("new ");
-    assert!(line.strip_prefix("new ").unwrap().parse::<i64>().unwrap() > 1);
-    // A changed interface is rejected; explicit restart accepts it and
-    // resets script locals without restarting the watching process.
-    std::fs::write(&file, live("Int", r#"f"restart {n}" Log 123"#)).unwrap();
-    wait_for("edit rejected; previous execution retained");
-    child.0.stdin.as_mut().unwrap().write_all(b"r\n").unwrap();
-    wait_for("restart 1");
-    std::fs::write(&file, r#""pending" Log Pause(1000.0)"#).unwrap();
-    wait_for("pending");
-    child.0.stdin.as_mut().unwrap().write_all(b"q\n").unwrap();
-    wait_for("root: cancelled");
-    assert!(child.0.wait().unwrap().success());
-  }
+    )
+  };
+  std::fs::write(&file, live("String", r#"f"old {n}" Log"#)).unwrap();
+  watch.wait_for("old 1");
+  std::fs::write(&file, live("String", r#"f"new {n}" Log"#)).unwrap();
+  let line = watch.wait_for("new ");
+  assert!(line.strip_prefix("new ").unwrap().parse::<i64>().unwrap() > 1);
+  // A changed interface is rejected; explicit restart accepts it and
+  // resets script locals without restarting the watching process.
+  std::fs::write(&file, live("Int", r#"f"restart {n}" Log 123"#)).unwrap();
+  watch.wait_for("edit rejected; previous execution retained");
+  watch.send("r");
+  watch.wait_for("restart 1");
+  std::fs::write(&file, r#""pending" Log Pause(1000.0)"#).unwrap();
+  watch.wait_for("pending");
+  watch.send("q");
+  watch.wait_for("root: cancelled");
+  assert!(watch.exits_cleanly());
 }
 
 const GREET_TOOL: &str = r#"
@@ -361,4 +381,61 @@ mod flights {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Cheapest: "), "{out}");
   }
+}
+
+// Scripts may be named `.otr` (preferred), `.otter` or `.shs`: nothing
+// picks or filters an extension, and an include names its file in full.
+
+#[test]
+fn every_extension_checks_runs_and_includes_the_others() {
+  script("ext-base.shs", "@const(base 20)\n");
+  script(
+    "ext-twice.otter",
+    "@fn(Twice input: Int output: Int params: {} { Math.Multiply(2) })\n",
+  );
+  script("ext-two.otr", "@const(two 2)\n");
+  for ext in ["otr", "otter", "shs"] {
+    let file = script(
+      &format!("ext-main.{ext}"),
+      "@include(\"ext-base.shs\")\n@include(\"ext-twice.otter\")\n@include(\"ext-two.otr\")\n@base | Twice | Add(@two)\n",
+    );
+    let (code, out, err) = otter(&["check", &file]);
+    assert_eq!(code, 0, "{ext}: {out}{err}");
+    let (code, out, err) = otter(&["run", &file]);
+    assert_eq!((code, out.as_str()), (0, "root: 42\n"), "{ext}: {err}");
+  }
+  // A problem in an included file is located in it, whatever its name.
+  script("ext-bad.otter", "\"a\" | Add(1)\n");
+  let file = script("ext-includes-bad.otr", "@include(\"ext-bad.otter\")\n");
+  let (code, _, err) = otter(&["check", &file]);
+  assert_eq!(code, 1);
+  assert!(err.contains("ext-bad.otter:1:"), "{err}");
+}
+
+#[test]
+fn tools_load_from_every_extension() {
+  for ext in ["otr", "otter", "shs"] {
+    let file = script(&format!("greet-ext.{ext}"), GREET_TOOL);
+    let (code, out, err) = otter(&["tool", &file]);
+    assert_eq!(code, 0, "{ext}: {err}");
+    assert!(out.starts_with(r#"{"name":"greet","#), "{ext}: {out}");
+    let (code, out, err) = otter(&["tool", &file, r#"{"name": "Ann"}"#]);
+    assert_eq!((code, out.as_str()), (0, "Hello, Ann!\n"), "{ext}: {err}");
+  }
+}
+
+#[test]
+fn watch_follows_includes_across_extensions() {
+  let lib = script("watch-ext-lib.otter", "@const(v 41)\n");
+  script("watch-ext-more.shs", "@const(w 0)\n");
+  let file = script(
+    "watch-ext.otr",
+    "@include(\"watch-ext-lib.otter\")\n@include(\"watch-ext-more.shs\")\n@v | Add(@w)\n",
+  );
+  let mut watch = Watch::start(&file);
+  watch.wait_for("root: 41");
+  std::fs::write(&lib, "@const(v 42)\n").unwrap();
+  watch.wait_for("root: 42");
+  watch.send("q");
+  assert!(watch.exits_cleanly());
 }

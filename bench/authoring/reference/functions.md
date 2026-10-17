@@ -123,4 +123,4 @@ Without `@run`, code at the top level runs once, as the wire `root`. With `@run`
 
 ## Running
 
-`otter check file.shs` reports problems with their location; `otter run file.shs` runs the program. `Log` writes its input as one line (`Log("label")` writes `label: value`). After the log, `otter run` prints each top-level or scheduled wire's result (`root: 36`); these result lines are not part of a task's expected output.
+`otter check file.otr` reports problems with their location; `otter run file.otr` runs the program. `Log` writes its input as one line (`Log("label")` writes `label: value`). After the log, `otter run` prints each top-level or scheduled wire's result (`root: 36`); these result lines are not part of a task's expected output.

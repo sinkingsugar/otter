@@ -203,7 +203,7 @@ Locals resolve by name and lexical context. Since 2.0 forbids shadowing, the rem
 ### 4.6 Diagnostics and tooling
 
 - `PathStep::Expansion { macro, call_site }`: an error in generated code shows the generated operation, the macro definition and the call site.
-- `otter expand file.shs` prints the expanded program as readable source, renaming introduced names only where they would print ambiguously. `--json` adds lexical contexts and provenance, which printed names alone cannot show.
+- `otter expand file.otr` prints the expanded program as readable source, renaming introduced names only where they would print ambiguously. `--json` adds lexical contexts and provenance, which printed names alone cannot show.
 
 ### 4.7 Gate
 

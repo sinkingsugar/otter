@@ -91,7 +91,7 @@ Add `otter_io::CATALOG` if scripts use `Http.Get` or the filesystem, and `otter_
 - **Check without running:** `otter_lang::check(Source::new(path, text), &catalog, &defines)`. It returns the 1.x `{ok, file, diagnostics}` JSON envelope (`to_json()`), and `otter_lang::render` prints a diagnostic for humans.
 - **Run:** `Program::load(source, &catalog, &defines)`, then `program.run()`. The report has each entry wire's outcome, plus failures of spawned instances.
 - **Script arguments:** `defines` maps `name` to a string, read as `@name` in scripts.
-- **Files:** `@include("lib.shs")` and `@read("data.txt")` (or `@read("blob.bin" bytes: true)`) read files while the program loads, relative to the file naming them. `Program::load` and `check` read the filesystem (`FsFiles`); `Program::load_with`, `check_with` and `Session::set_files` take any `Files`: `FsFiles { include_paths }` searches more directories after the including file's (the CLI's `-I`), and `MemoryFiles` holds files by name, for a host without a filesystem (a device carrying its scripts in flash) and for tests. A host's own `Files` implements `resolve` (the file a path names, pushing every name it looks at, found or not, to `looked`) and `contents` (a file's bytes now, by that name). `Program::files` and `Session::files_read` list what a program read; `FileWatcher` reloads when any name its last load looked at changes, compared by exact bytes through the session's `Files`: an edit, a file created where a missing include was looked for, or one created earlier in the search order. A file is included once per program however often it is named. Diagnostics name the file they are in.
+- **Files:** `@include("lib.otr")` and `@read("data.txt")` (or `@read("blob.bin" bytes: true)`) read files while the program loads, relative to the file naming them. A name is used as written, with no default extension: scripts are `.otr` (preferred for new files), `.otter` or `.shs` (still accepted), and any of them may include the others. `Program::load` and `check` read the filesystem (`FsFiles`); `Program::load_with`, `check_with` and `Session::set_files` take any `Files`: `FsFiles { include_paths }` searches more directories after the including file's (the CLI's `-I`), and `MemoryFiles` holds files by name, for a host without a filesystem (a device carrying its scripts in flash) and for tests. A host's own `Files` implements `resolve` (the file a path names, pushing every name it looks at, found or not, to `looked`) and `contents` (a file's bytes now, by that name). `Program::files` and `Session::files_read` list what a program read; `FileWatcher` reloads when any name its last load looked at changes, compared by exact bytes through the session's `Files`: an edit, a file created where a missing include was looked for, or one created earlier in the search order. A file is included once per program however often it is named. Diagnostics name the file they are in.
 - **Files while running:** `otter_io::CATALOG` has the `FS.*` shards: `FS.Read` (`bytes:`), `FS.Write` (`contents:`, `overwrite:`, `append:`), `FS.Exists`, `FS.IsFile`, `FS.IsDirectory`, `FS.Iterate` (`recursive:`), `FS.CreateDirectories`, `FS.Remove`, `FS.RemoveAll`, `FS.Copy` (`destination:`, `overwrite:`), `FS.Rename` (`new-name:`), each taking the path as input and running on the blocking pool, and the leaf path helpers `FS.Join`, `FS.Extension`, `FS.Filename` and `FS.Parent`, which touch no disk. Which paths they may use is the mesh's `otter_io::fs::FsAccess` service, read at activation. Without one, any path, relative paths against the process's working directory (what `otter run` uses). `FsAccess::within(dir)` resolves relative paths against `dir` and denies any path that leaves it, by `..`, an absolute path or a symbolic link (a link's target resolved by the filesystem, and every file a directory copy writes checked), and any change to `dir` itself; `.read_only()` also denies changes, and `FsAccess::denied()` denies all file access. The check resolves the path through the filesystem and the operation then uses the resolved path; it cannot close the race with another process swapping a directory for a link between the two, so a host running untrusted scripts beside untrusted writers needs an OS sandbox too. Failures are activation errors: `FS.Read: notes.txt: No such file or directory (os error 2)`, `FS.Write: ../x: outside the allowed directory`.
 - **Logging:** `Log` writes to standard output; values print as text: whole floats without `.0`, other floats exact (1.x rounded to six digits). A host shard can log with `otter_core::log::emit`. `otter_core::log::capture` collects the lines a run logs, including lines logged by work it started through `otter_io` on other threads, which is useful in host tests.
 
@@ -234,8 +234,8 @@ Hosts can use the same pattern with recorded inputs to test without live I/O.
 ### Watching a file
 
 ```sh
-cargo run -p otter-cli -- watch live.shs
-cargo run -p otter-cli -- watch live.shs key:value
+cargo run -p otter-cli -- watch live.otr
+cargo run -p otter-cli -- watch live.otr key:value
 ```
 
 The CLI polls contents every 100 ms and requires two identical samples before
@@ -268,7 +268,7 @@ let catalog = Catalog::new(&[otter_core::shards::CATALOG]).unwrap();
 let mut session = Session::new(); // or Session::with_mesh(...)
 let (commands, input) = mpsc::channel::<WatchControl>();
 // Hand `commands` to your UI/input thread. Send Restart or Stop as needed.
-FileWatcher::new("live.shs").run(
+FileWatcher::new("live.otr").run(
     &mut session, &catalog, &HashMap::new(),
     || input.try_recv().unwrap_or(WatchControl::Continue),
     |event| match event {
@@ -336,7 +336,7 @@ use otter_lang::{CallOptions, MemoryFiles, Source, Tool, ToolError, ToolInput};
 let catalog = Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG])?;
 // Parses, lowers and composes everything once: problems are located
 // diagnostics (`ToolError::Compile`) before the tool is offered.
-let tool = Tool::load_with(Source::new("greet.shs", text), &catalog, &defines, &MemoryFiles::default())?;
+let tool = Tool::load_with(Source::new("greet.otr", text), &catalog, &defines, &MemoryFiles::default())?;
 let d = tool.definition();
 offer(&d.name, &d.description, &d.parameters);
 

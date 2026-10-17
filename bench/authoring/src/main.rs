@@ -294,7 +294,7 @@ fn judge(report: &serde_json::Value, expected: &[String]) -> (bool, &'static str
 
 /// Runs a checked program and compares its log with the expected lines.
 fn test(bin: &Path, dir: &Path, expected: &[String]) -> Result<Verdict, String> {
-  let run = otter(bin, &["run", "--json", "solution.shs"], dir)?;
+  let run = otter(bin, &["run", "--json", "solution.otr"], dir)?;
   let detail = format!(
     "exit {:?}\n{}\nstderr:\n{}",
     run.status,
@@ -338,8 +338,8 @@ impl Drop for Scratch {
 
 /// Checks a program in `dir`; returns the report and whether it is ok.
 fn check(bin: &Path, dir: &Path, program: &str) -> Result<(serde_json::Value, String), String> {
-  std::fs::write(dir.join("solution.shs"), program).map_err(|e| e.to_string())?;
-  let out = otter(bin, &["check", "--json", "solution.shs"], dir)?;
+  std::fs::write(dir.join("solution.otr"), program).map_err(|e| e.to_string())?;
+  let out = otter(bin, &["check", "--json", "solution.otr"], dir)?;
   let json: serde_json::Value = serde_json::from_str(out.stdout.trim())
     .map_err(|e| format!("check --json: {e}: {}{}", out.stdout, out.stderr))?;
   Ok((json, out.stdout.trim().to_string()))
