@@ -15,7 +15,7 @@
 // The layout is positional and undocumented, so parsing is defensive: a
 // malformed row is skipped, not fatal. No API key.
 
-@include("flights.shs")
+@include("flights.otr")
 
 // --- the tool ---
 

@@ -11,7 +11,7 @@
 // no rows, which looks like rate limiting but is not. Sequential requests
 // are not throttled (about 0.5 s a date). No API key.
 
-@include("flights.shs")
+@include("flights.otr")
 
 @const(max-days 45)
 

@@ -69,7 +69,7 @@ fn main() {
 
   let catalog = Catalog::new(&[otter_core::shards::CATALOG]).expect("core catalog");
   let program = Program::load(
-    Source::new("smoke.shs", include_str!("../smoke.shs")),
+    Source::new("smoke.otr", include_str!("../smoke.otr")),
     &catalog,
     &HashMap::new(),
   )

@@ -295,12 +295,12 @@ mod flights {
   fn the_flights_tools_load_and_describe_themselves() {
     for (file, name, required) in [
       (
-        "search-flights.shs",
+        "search-flights.otr",
         "google_flights_search",
         r#""required":["from","to","date"]"#,
       ),
       (
-        "cheap-dates.shs",
+        "cheap-dates.otr",
         "google_flights_cheap_dates",
         r#""required":["from","to","from-date","to-date"]"#,
       ),
@@ -314,10 +314,10 @@ mod flights {
       assert!(out.contains(required), "{out}");
     }
     // Missing arguments fail before any request.
-    let (code, _, err) = otter(&["tool", &tool("search-flights.shs"), r#"{"from": "KIX"}"#]);
+    let (code, _, err) = otter(&["tool", &tool("search-flights.otr"), r#"{"from": "KIX"}"#]);
     assert_eq!(code, 1);
     assert!(err.contains("from, to and date are required"), "{err}");
-    let (code, _, err) = otter(&["tool", &tool("cheap-dates.shs"), "{}"]);
+    let (code, _, err) = otter(&["tool", &tool("cheap-dates.otr"), "{}"]);
     assert_eq!(code, 1);
     assert!(
       err.contains("from, to, from-date and to-date are required"),
@@ -326,7 +326,7 @@ mod flights {
     // A reversed range fails before any request, rather than scanning one day.
     let reversed =
       r#"{"from": "KIX", "to": "NRT", "from-date": "2026-12-10", "to-date": "2026-12-01"}"#;
-    let (code, _, err) = otter(&["tool", &tool("cheap-dates.shs"), reversed]);
+    let (code, _, err) = otter(&["tool", &tool("cheap-dates.otr"), reversed]);
     assert_eq!(code, 1);
     assert!(err.contains("to-date is before from-date"), "{err}");
   }
@@ -359,7 +359,7 @@ mod flights {
       r#"{{"from": "KIX", "to": "NRT", "date": "{}", "max-stops": 0}}"#,
       date_in(30)
     );
-    let (code, out, err) = otter(&["tool", &tool("search-flights.shs"), &args]);
+    let (code, out, err) = otter(&["tool", &tool("search-flights.otr"), &args]);
     assert_eq!(code, 0, "{err}");
     assert!(out.starts_with("One-way KIX -> NRT on "), "{out}");
     assert!(out.contains(" - nonstop\n"), "{out}");
@@ -377,7 +377,7 @@ mod flights {
       date_in(30),
       date_in(33)
     );
-    let (code, out, err) = otter(&["tool", &tool("cheap-dates.shs"), &args]);
+    let (code, out, err) = otter(&["tool", &tool("cheap-dates.otr"), &args]);
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("Cheapest: "), "{out}");
   }

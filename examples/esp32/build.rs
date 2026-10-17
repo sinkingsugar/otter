@@ -31,8 +31,8 @@ fn acceptance() {
     // This shared frontend fixture is relative to tests/lang.rs; retain its
     // location when compiling the generated file from OUT_DIR.
     let source = fs::read_to_string(path).unwrap().replace(
-      "\"../../../examples/esp32/smoke.shs\"",
-      &format!("{:?}", fs::canonicalize("smoke.shs").unwrap()),
+      "\"../../../examples/esp32/smoke.otr\"",
+      &format!("{:?}", fs::canonicalize("smoke.otr").unwrap()),
     );
     fn runnable(items: &mut Vec<Item>) {
       let mut calls = Vec::new();

@@ -4,9 +4,9 @@ Two tools a host loads at run time (`otter_lang::Tool`, [docs/embedding.md §6](
 
 | File | Tool | What it does |
 |---|---|---|
-| `search-flights.shs` | `google_flights_search` | One-way or round-trip search between two airports on given dates: prices, airlines, flight numbers, times, durations, stops, layovers and a booking link. |
-| `cheap-dates.shs` | `google_flights_cheap_dates` | The cheapest dates over a range of up to 45 days: one real search per date, each date's cheapest fare. |
-| `flights.shs` | | Shared by both (`@include`d): the `tfs` itinerary token, defensive reads of the page's data, formatting, the fetch with its retry. |
+| `search-flights.otr` | `google_flights_search` | One-way or round-trip search between two airports on given dates: prices, airlines, flight numbers, times, durations, stops, layovers and a booking link. |
+| `cheap-dates.otr` | `google_flights_cheap_dates` | The cheapest dates over a range of up to 45 days: one real search per date, each date's cheapest fare. |
+| `flights.otr` | | Shared by both (`@include`d): the `tfs` itinerary token, defensive reads of the page's data, formatting, the fetch with its retry. |
 
 ## How they work
 
@@ -24,9 +24,9 @@ The `otter` binary has TLS (rustls) by default:
 
 ```sh
 cargo build --release -p otter-cli
-otter tool examples/tools/flights/search-flights.shs        # the definition, as JSON
-otter tool examples/tools/flights/search-flights.shs '{"from": "KIX", "to": "NRT", "date": "2026-11-20", "max-stops": 0}'
-otter tool examples/tools/flights/cheap-dates.shs '{"from": "KIX", "to": "NRT", "from-date": "2026-11-20", "to-date": "2026-11-27"}'
+otter tool examples/tools/flights/search-flights.otr        # the definition, as JSON
+otter tool examples/tools/flights/search-flights.otr '{"from": "KIX", "to": "NRT", "date": "2026-11-20", "max-stops": 0}'
+otter tool examples/tools/flights/cheap-dates.otr '{"from": "KIX", "to": "NRT", "from-date": "2026-11-20", "to-date": "2026-11-27"}'
 ```
 
 ## Tests
@@ -37,4 +37,4 @@ otter tool examples/tools/flights/cheap-dates.shs '{"from": "KIX", "to": "NRT", 
 cargo test -p otter-cli --test cli -- --ignored --test-threads 1 flights
 ```
 
-The page layout is Google's and changes without notice; when the live tests fail with no rows, compare a saved page's `ds:1` block against the positions `search-flights.shs` reads.
+The page layout is Google's and changes without notice; when the live tests fail with no rows, compare a saved page's `ds:1` block against the positions `search-flights.otr` reads.

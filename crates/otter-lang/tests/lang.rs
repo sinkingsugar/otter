@@ -981,7 +981,7 @@ fn reload_reports_cleanup_failure_and_still_cleans_other_instances() {
 #[test]
 fn esp32_firmware_script_completes_after_suspending() {
   let report = run(
-    include_str!("../../../examples/esp32/smoke.shs"),
+    include_str!("../../../examples/esp32/smoke.otr"),
     &no_defines(),
   );
   assert_eq!(report.outcomes.len(), 1);

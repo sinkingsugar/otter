@@ -1,4 +1,4 @@
-// Shared by the Google Flights tools (search-flights.shs, cheap-dates.shs):
+// Shared by the Google Flights tools (search-flights.otr, cheap-dates.otr):
 // the `tfs` itinerary token, defensive reads of the page's positional
 // payload, formatting, and the fetch with its retry.
 
