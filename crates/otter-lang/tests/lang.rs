@@ -5295,8 +5295,8 @@ fn a_session_streams_log_lines_to_the_host() {
   session
     .reload(
       Source::new(
-        "t.shs",
-        "@wire(main { Keep(n 0) Inc(n) n | Log(\"step\") } looped: true)\n@mesh(m) @schedule(m main) @run(m)",
+        "t.otr",
+        "@wire(main { Keep(n 0) Inc(n) n | Log(\"step\") Msg(\"m\" level: \"warning\") } looped: true)\n@mesh(m) @schedule(m main) @run(m)",
       ),
       &catalog(),
       &no_defines(),
@@ -5305,15 +5305,18 @@ fn a_session_streams_log_lines_to_the_host() {
   for tick in 1..=3 {
     session.tick();
     let lines = seen.lock().unwrap();
-    // This tick's line is already there, before the next tick runs.
-    assert_eq!(lines.len(), tick, "{lines:?}");
-    assert_eq!(lines[tick - 1].text, format!("step: {tick}"));
-    assert!(lines[tick - 1].instance.is_some());
+    // This tick's lines are already there, before the next tick runs.
+    assert_eq!(lines.len(), 2 * tick, "{lines:?}");
+    let (log, msg) = (&lines[2 * tick - 2], &lines[2 * tick - 1]);
+    assert_eq!(log.text, format!("step: {tick}"));
+    assert_eq!(msg.text, "[warning] m");
+    assert!(log.instance.is_some());
+    assert_eq!(msg.instance, log.instance);
   }
   // Without a sink, the session leaves the thread's own (here a capture).
   session.set_log_sink(None);
   let (_, captured) = otter_core::log::capture(|| session.tick());
-  assert_eq!(captured, ["step: 4"]);
+  assert_eq!(captured, ["step: 4", "[warning] m"]);
 }
 
 /// `@const(... ignore-redefined: true)` is a default a script argument
