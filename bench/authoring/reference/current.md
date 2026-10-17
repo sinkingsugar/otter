@@ -1,4 +1,4 @@
-# Shards language reference (current syntax)
+# Otter language reference (current syntax)
 
 A program is a pipeline of **shards**. Each shard receives the previous shard's output as its input and produces an output. `|` separates shards and is optional: `1 | Log` and `1 Log` mean the same.
 

@@ -1,4 +1,4 @@
-//! otter-text acceptance: Shards scripts using the regex, hash and
+//! otter-text acceptance: Otter scripts using the regex, hash and
 //! identifier shards, loaded and run through the frontend.
 
 use std::collections::{HashMap, HashSet};

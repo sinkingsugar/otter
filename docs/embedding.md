@@ -1,6 +1,6 @@
 # Embedding Otter and Writing Host Shards
 
-How a Rust program (the host) adds its own shards and runs Shards scripts on them. The complete example, a host crate with a leaf shard, a blocking shard, a catalog and a script, is [`crates/otter-cli/tests/embedding.rs`](../crates/otter-cli/tests/embedding.rs). It is a test, so it stays correct; copy from it.
+How a Rust program (the host) adds its own shards and runs Otter scripts on them. The complete example, a host crate with a leaf shard, a blocking shard, a catalog and a script, is [`crates/otter-cli/tests/embedding.rs`](../crates/otter-cli/tests/embedding.rs). It is a test, so it stays correct; copy from it.
 
 ## 1. Crates
 

@@ -1,6 +1,6 @@
 # Authoring eval
 
-Spec: [docs/golden-path.md §8](../../docs/golden-path.md). It measures how well a model writes Shards from a reference alone, so syntax and API disputes are settled with data (decision D12).
+Spec: [docs/golden-path.md §8](../../docs/golden-path.md). It measures how well a model writes Otter from a reference alone, so syntax and API disputes are settled with data (decision D12).
 
 ## Pieces
 

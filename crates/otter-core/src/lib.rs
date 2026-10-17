@@ -1,4 +1,4 @@
-//! Otter: the Shards 2.0 runtime core.
+//! Otter: the runtime core.
 //!
 //! The design is in `docs/shards-2-compose-split.md`, the shard contract in
 //! `docs/prototype-shard-contract.md` and the current plan in

@@ -1,4 +1,4 @@
-//! `otter`: check, run and describe Shards programs.
+//! `otter`: check, run and describe Otter programs.
 //!
 //! ```text
 //! otter check [--json] [-I dir ...] <file> [key:value ...]

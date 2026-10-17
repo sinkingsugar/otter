@@ -1,6 +1,6 @@
 [package]
 name = "otter-lang"
-description = "Otter: the Shards language frontend: source to wire definitions"
+description = "Otter: the language frontend: source to wire definitions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

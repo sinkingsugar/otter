@@ -1,4 +1,4 @@
-//! Otter: the Shards language frontend, source text to wire definitions.
+//! Otter: the language frontend, source text to wire definitions.
 //!
 //! [`parser`] reads source into a syntax tree with spans (hand-written, with
 //! recovery and messages in language terms); lowering turns it into

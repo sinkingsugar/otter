@@ -1,6 +1,6 @@
 [package]
 name = "otter-core"
-description = "Otter: the Shards 2.0 runtime core"
+description = "Otter: the runtime core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

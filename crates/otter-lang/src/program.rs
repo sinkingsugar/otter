@@ -249,7 +249,7 @@ impl Program {
         related.column = Some(column);
       }
     }
-    // `x-1` is one name in Shards; say so when it is the unknown variable.
+    // `x-1` is one name in Otter; say so when it is the unknown variable.
     if d.code == "unknown-variable"
       && let Some(name) = d
         .message

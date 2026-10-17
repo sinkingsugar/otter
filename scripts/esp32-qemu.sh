@@ -37,7 +37,7 @@ for _ in $(seq $((timeout * 4))); do
     ! kill -0 "$pid" 2>/dev/null; then
     break
   fi
-  if grep -q '^Shards ESP32 smoke test passed' "$log"; then
+  if grep -q '^Otter ESP32 smoke test passed' "$log"; then
     status=0
     break
   fi

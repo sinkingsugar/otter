@@ -202,7 +202,7 @@ impl<'a> Lexer<'a> {
             Problem::syntax(
               Span::new(at, at + 1),
               "semicolon",
-              "`;` is not a comment or a separator in Shards; the rest of this line was ignored"
+              "`;` is not a comment or a separator in Otter; the rest of this line was ignored"
                 .into(),
             )
             .help("write comments with `//`; statements need no separator"),
@@ -243,7 +243,7 @@ impl<'a> Lexer<'a> {
       b'#' => single(self, Tok::Hash),
       b'=' => single(self, Tok::Assign(AssignOp::Bind)),
       b'>' => {
-        // `>=`, `>` and `>>` were assignments; Shards 2 spells them as words.
+        // `>=`, `>` and `>>` were assignments; Otter spells them as words.
         let (len, message) = match self.peek(1) {
           Some(b'=') => (
             2,
@@ -292,7 +292,7 @@ impl<'a> Lexer<'a> {
         self.error(
           start,
           "number-form",
-          "`~` is not a number sign in Shards 2: write `-` for a negative number".into(),
+          "`~` is not a number sign in Otter: write `-` for a negative number".into(),
         );
         None
       }
@@ -308,7 +308,7 @@ impl<'a> Lexer<'a> {
             Span::new(start, self.pos),
             "implicit-loop-variable",
             format!(
-              "`{}` is 1.x's implicit loop variable; Shards 2 has none",
+              "`{}` is 1.x's implicit loop variable; Otter has none",
               &self.text[start..self.pos]
             ),
           )

@@ -1533,7 +1533,7 @@ impl Lowerer<'_> {
             key.span,
             "generic",
             "table-key",
-            format!("table keys are strings in Shards 2: write `\"{i}\"`"),
+            format!("table keys are strings in Otter: write `\"{i}\"`"),
           )
           .fix(format!("\"{i}\"")),
         );
@@ -1542,7 +1542,7 @@ impl Lowerer<'_> {
       TableKey::Value(_) => {
         self.unsupported(
           key.span,
-          "table keys are strings in Shards 2 (sequence and value keys are not supported)",
+          "table keys are strings in Otter (sequence and value keys are not supported)",
         );
         return None;
       }
@@ -2132,7 +2132,7 @@ impl Lowerer<'_> {
             name.span,
             "unknown-shard",
             "removed-shard",
-            format!("`{}` is removed in Shards 2: {help}", name.node),
+            format!("`{}` is removed in Otter: {help}", name.node),
           )
           .shard(&name.node),
         );
@@ -2149,7 +2149,7 @@ impl Lowerer<'_> {
             name.span,
             "unknown-shard",
             "and-or",
-            format!("`{word}` is not a shard in Shards 2: combine conditions with `{all}(...)`"),
+            format!("`{word}` is not a shard in Otter: combine conditions with `{all}(...)`"),
           )
           .help(format!("`If({{a | {word} | b}} ...)` becomes `If({all}(a b) ...)`; conditions can be Bool variables or flows"))
           .did_you_mean(vec![all.to_string()])

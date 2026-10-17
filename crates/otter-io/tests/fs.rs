@@ -1,4 +1,4 @@
-//! The `FS.*` shards, through Shards scripts: reads and writes, probes,
+//! The `FS.*` shards, through Otter scripts: reads and writes, probes,
 //! listings, directories, copies and renames, the path helpers, the errors
 //! scripts see, and the host's access policy (`FsAccess`).
 

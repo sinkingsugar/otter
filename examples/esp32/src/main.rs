@@ -55,7 +55,7 @@ mod acceptance {
       println!("acceptance suite {name}: main stack min free {stack} B, heap min free {heap} B");
       std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    println!("Shards ESP32 acceptance suites passed");
+    println!("Otter ESP32 acceptance suites passed");
   }
 }
 
@@ -95,7 +95,7 @@ fn main() {
     )
   };
   println!(
-    "Shards ESP32 smoke test passed: 42 ({} ticks); main stack min free {} of {} B, heap min free {} B",
+    "Otter ESP32 smoke test passed: 42 ({} ticks); main stack min free {} of {} B, heap min free {} B",
     ticks,
     stack_free,
     esp_idf_sys::CONFIG_ESP_MAIN_TASK_STACK_SIZE,

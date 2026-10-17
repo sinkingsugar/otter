@@ -1,6 +1,6 @@
 # Otter
 
-Otter is a new Rust implementation of the [Shards](https://github.com/fragcolor-xyz/shards) runtime: Shards 2.0. The language is still Shards (`.shs` files); Otter is the runtime, the frontend and the `otter` command. Renamed from shards2 on 2026-10-11; older records and benchmark results use the old names.
+Otter is a programming language and its Rust implementation: the runtime, the frontend and the `otter` command. It succeeds [Shards](https://github.com/fragcolor-xyz/shards) 1.x, and a program is still a pipeline of shards. Programs keep the `.shs` extension. The project was renamed from shards2 on 2026-10-11, and the language from Shards to Otter on 2026-10-17; older records and benchmark results use the old names.
 
 **Status:** core prototype and language frontend working (2026-10-07): the compiled/state split on one directly resumable (stackless) engine, real async I/O (`Http.Get`), a hand-written frontend with `check --json`, hot reload, wasm (WASI) and ESP32 (QEMU) builds. Functions (`@fn`, golden path M5) and recursion (M7) are in, with private frames and state-preserving reload of edited bodies; values are 32 bytes with f32 vectors and struct tables (M6). Compose-time evaluation and flow parameters (M8, M9) followed. **Next:** the priorities in [`docs/host-requirements.md`](docs/host-requirements.md) §7. Current status is in `docs/current-state.md`.
 

@@ -476,7 +476,7 @@ else. Reply with the complete program in a single fenced code block and nothing 
 
 fn first_prompt(config: &RunConfig, task: &Task) -> String {
   format!(
-    "You are writing a program in the Shards language. Use only what the reference below \
+    "You are writing a program in the Otter language. Use only what the reference below \
      describes.\n\n<reference>\n{}\n</reference>\n\nTask:\n{}\n\n{INSTRUCTIONS}\n",
     config.reference, task.prompt
   )

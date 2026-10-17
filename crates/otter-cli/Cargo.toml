@@ -1,6 +1,6 @@
 [package]
 name = "otter-cli"
-description = "The otter command: check, run and describe Shards programs"
+description = "The otter command: check, run and describe Otter programs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

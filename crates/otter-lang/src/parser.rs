@@ -340,7 +340,7 @@ impl<'a> Parser<'a> {
           "false" => BlockKind::Literal(Literal::Bool(false)),
           "null" => {
             self.problem(
-              Problem::syntax(start, "null", "`null` is spelled `none` in Shards".into())
+              Problem::syntax(start, "null", "`null` is spelled `none` in Otter".into())
                 .fix("none"),
             );
             BlockKind::Literal(Literal::None)
