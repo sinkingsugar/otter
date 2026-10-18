@@ -645,6 +645,10 @@ impl Mesh {
   /// are separate instantiations, slower than `tick`'s, which knows nothing
   /// of budgets.
   pub fn tick_budgeted(&mut self, budget: &crate::compose_time::RunBudget) -> usize {
+    // Requests as in `tick`: before anything runs, and at the end.
+    if self.requests.pending() {
+      drain(&mut self.instances, &self.requests);
+    }
     let notify_only = self.wake_mode == WakeMode::OnNotify;
     let Mesh {
       instances,
@@ -677,7 +681,6 @@ impl Mesh {
     for queued in std::mem::take(&mut self.spawn_queue) {
       self.start(queued.wire, queued.input, queued.completion);
     }
-    // As in `tick`.
     if self.requests.pending() {
       drain(&mut self.instances, &self.requests);
     }
@@ -687,8 +690,9 @@ impl Mesh {
   /// Blocks the calling thread until a tick can make progress, instead of
   /// ticking in a loop: until an instance is ready to run (it yielded, or
   /// has not started), a waiting instance's waker fires (from any thread,
-  /// such as I/O completing on `otter-io`'s runtime), a timed pause is due,
-  /// `until` passes, or `cancel` is cancelled. Returns at once when nothing
+  /// such as I/O completing on `otter-io`'s runtime), a timed pause or a
+  /// `Wait` deadline is due, an instance is asked to end through its handle
+  /// (`Completion::request`), `until` passes, or `cancel` is cancelled. Returns at once when nothing
   /// is running. It may return early; tick and wait again.
   ///
   /// On a target without threads (wasm) nothing can wake it but time: with
@@ -701,7 +705,10 @@ impl Mesh {
     let _watch = cancel.map(|c| c.watch(signal));
     signal.hold(|mut held| {
       loop {
-        if cancel.is_some_and(|c| c.is_cancelled()) || held.take_woken() {
+        // A request made through a handle: the next tick acts on it before
+        // running anything.
+        if cancel.is_some_and(|c| c.is_cancelled()) || held.take_woken() || self.requests.pending()
+        {
           return;
         }
         let mut due = until;
@@ -710,7 +717,8 @@ impl Mesh {
           running = true;
           match instance.waiting.wait {
             Wait::Ready => return,
-            Wait::Waker if instance.wake.is_set() => return,
+            // A timed `Wait` registers its waker too.
+            Wait::Waker | Wait::Timed if instance.wake.is_set() => return,
             Wait::Waker => {}
             Wait::Timed => {
               if let Some(at) = instance.waiting.at {

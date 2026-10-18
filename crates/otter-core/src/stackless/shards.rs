@@ -104,9 +104,7 @@ impl Shard for Wait {
               key,
               deadline,
             });
-            if deadline.is_none() {
-              ctx.set_waiting();
-            }
+            wait_until(ctx, deadline);
             return Ok(Step::Suspend);
           }
         }
@@ -134,15 +132,23 @@ impl Shard for Wait {
           )));
         }
         None => {
-          // Polled every tick with a deadline; woken by the end otherwise.
-          if registration.deadline.is_none() {
-            ctx.set_waiting();
-          }
+          wait_until(ctx, registration.deadline);
           return Ok(Step::Suspend);
         }
       },
     };
     instances::ended(outcome, completion.wire(), "Wait").map(Step::Next)
+  }
+}
+
+/// Tells the scheduler what a suspended `Wait` waits for: the end, whose
+/// waker it registered, and its deadline if it has one (then it is still
+/// activated every tick, and a host blocked in `Mesh::wait` sleeps until
+/// the deadline or the waker, whichever comes first).
+fn wait_until(ctx: &mut ActivationCtx<'_>, deadline: Option<Instant>) {
+  match deadline {
+    Some(at) => ctx.resume_at(at),
+    None => ctx.set_waiting(),
   }
 }
 

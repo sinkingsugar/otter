@@ -40,7 +40,10 @@ pub struct CancelRequests(AtomicUsize);
 
 impl CancelRequests {
   pub(crate) fn pending(&self) -> bool {
-    self.0.load(Ordering::Acquire) != 0
+    // Sequentially consistent with the count's increment, so a waiter that
+    // announced itself before this read either sees the request or is
+    // notified (`Completion::request`, `Signal::notify`).
+    self.0.load(Ordering::SeqCst) != 0
   }
 
   /// Takes the count, before a pass that acts on every marked instance.
@@ -153,7 +156,9 @@ impl Completion {
     {
       return;
     }
-    self.requests.0.fetch_add(1, Ordering::AcqRel);
+    self.requests.0.fetch_add(1, Ordering::SeqCst);
+    // A host blocked in `Mesh::wait` ticks, and the tick acts on it.
+    self.wake.signal().notify();
   }
 
   /// The request made of the instance, if any.
