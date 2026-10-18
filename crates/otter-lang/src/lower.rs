@@ -183,6 +183,9 @@ struct Lowerer<'a> {
   /// Constants already lowered once: their problems were reported then,
   /// and lowering them again at a read reports nothing new.
   consts_checked: HashSet<String>,
+  /// Script arguments a default typed (`@const(... ignore-redefined:
+  /// true)`): read from `consts`, where the parsed argument is.
+  typed_defines: HashSet<String>,
   /// Constants without a `#( )`, lowered once to a value every read
   /// shares (`None` when lowering failed, reported then).
   const_values: HashMap<String, Option<Var>>,
@@ -317,6 +320,7 @@ fn lower_files<'a>(
     consts: HashMap::default(),
     const_stack: Vec::new(),
     consts_checked: HashSet::default(),
+    typed_defines: HashSet::default(),
     const_values: HashMap::default(),
     const_reads: 0,
     const_expansion: 0,
@@ -326,17 +330,38 @@ fn lower_files<'a>(
     reads: Vec::new(),
   };
   let mut out = Lowered::default();
-  // Function signatures first: a call may precede its declaration, and
-  // bodies may call each other.
+  // Script-argument defaults before anything reads a name: a function's
+  // parameter defaults may read one, and must see it with its type. The
+  // same pass finds the functions, whose signatures come next.
   let mut bodies = Vec::new();
   for stmt in &program.statements {
-    if let Some((name, params, block)) = top_level_func(stmt)
-      && name.node == "fn"
-    {
-      l.piped_declaration(name, stmt);
-      if let Some((index, body)) = l.fn_header(&mut out, block, params) {
-        bodies.push((index, body, block.span));
+    match top_level_func(stmt) {
+      Some((name, _, _)) if name.node == "fn" => bodies.push(Signature::Pending(stmt)),
+      Some((name, params, block)) if name.node == "const" && is_default(params) => {
+        l.piped_declaration(name, stmt);
+        l.const_decl(block, params);
       }
+      _ => {}
+    }
+  }
+  // Function signatures next: a call may precede its declaration, and
+  // bodies may call each other.
+  for signature in &mut bodies {
+    if let Signature::Pending(stmt) = *signature
+      && let Statement::Pipeline(pipe) = stmt
+      && let block = &pipe.blocks[0]
+      && let BlockKind::Func { name, params } = &block.kind
+    {
+      let params = params.as_ref();
+      l.piped_declaration(name, stmt);
+      *signature = match l.fn_header(&mut out, block, params) {
+        Some((index, body)) => Signature::Lowered(
+          u32::try_from(index).expect("fewer than 2^32 functions"),
+          body,
+          block.span,
+        ),
+        None => Signature::Failed,
+      };
     }
   }
   // Constants next: bodies and wires read them, and a constant may call a
@@ -344,6 +369,7 @@ fn lower_files<'a>(
   for stmt in &program.statements {
     if let Some((name, params, block)) = top_level_func(stmt)
       && name.node == "const"
+      && !is_default(params)
     {
       l.piped_declaration(name, stmt);
       l.const_decl(block, params);
@@ -356,7 +382,11 @@ fn lower_files<'a>(
     l.temps = 0;
     let _ = l.read_const(&name, &[]);
   }
-  for (index, body, span) in bodies {
+  for signature in bodies {
+    let Signature::Lowered(index, body, span) = signature else {
+      continue;
+    };
+    let index = index as usize;
     let name = out.functions[index].name.clone();
     l.wire = function_key(&name);
     l.temps = 0;
@@ -455,6 +485,38 @@ fn top_level_func(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> 
     }
     _ => None,
   }
+}
+
+/// A function's signature while the program's top level is lowered: found
+/// (with the defaults), then lowered, its body after the constants. The
+/// index is a `u32` so the tag shares its word: the list is no larger
+/// than the `(index, body, span)` list it replaced on 64-bit targets (4
+/// bytes larger per function on 32-bit ones, where that tuple has no
+/// padding to share).
+enum Signature<'s> {
+  Pending(&'s Statement),
+  Lowered(u32, Option<&'s [Statement]>, Span),
+  Failed,
+}
+
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(
+  std::mem::size_of::<Signature>() <= std::mem::size_of::<(usize, Option<&[Statement]>, Span)>()
+);
+
+/// Whether a `@const`'s parameters end with `ignore-redefined: true`: a
+/// default for a script argument.
+fn is_default(params: Option<&Params>) -> bool {
+  params.and_then(|p| p.items.last()).is_some_and(|last| {
+    last
+      .name
+      .as_ref()
+      .is_some_and(|n| n.node == "ignore-redefined")
+      && matches!(
+        &last.value.blocks[..],
+        [b] if b.kind == BlockKind::Literal(Literal::Bool(true))
+      )
+  })
 }
 
 fn statement_span(stmt: &Statement) -> Span {
@@ -1671,7 +1733,9 @@ impl Lowerer<'_> {
   /// `@name`: a script argument (a string), or a constant. `at` is where
   /// the value goes (see [`Self::constant`]).
   fn read_name(&mut self, name: &Name, at: &[PathStep]) -> Option<ParamValue> {
-    if let Some(v) = self.defines.get(&name.node) {
+    if let Some(v) = self.defines.get(&name.node)
+      && !self.typed_defines.contains(&name.node)
+    {
       return Some(ParamValue::Value(Var::string(v)));
     }
     if self.consts.contains_key(&name.node) {
@@ -1792,10 +1856,36 @@ impl Lowerer<'_> {
 
   /// `@const(name value)`: a program-level constant read as `@name`
   /// (docs/metaprogramming.md §2.1); `value` is a literal or a `#( )`. Its
-  /// name shares the namespace of the script arguments.
+  /// name shares the namespace of the script arguments: a script argument
+  /// of the same name is an error, unless `ignore-redefined: true` makes
+  /// the constant a default the argument replaces (1.x's `@define(...
+  /// IgnoreRedefined: true)`).
   fn const_decl(&mut self, block: &Block, params: Option<&Params>) {
-    let usage = "`@const(name value)`, where value is a literal or `#( ... )`";
-    let items = params.map(|p| &p.items[..]).unwrap_or(&[]);
+    let usage = "`@const(name value)`, where value is a literal or `#( ... )`, optionally `ignore-redefined: true`";
+    let mut items = params.map(|p| &p.items[..]).unwrap_or(&[]);
+    let mut default = false;
+    if let [rest @ .., last] = items
+      && last
+        .name
+        .as_ref()
+        .is_some_and(|n| n.node == "ignore-redefined")
+    {
+      match &last.value.blocks[..] {
+        [b] if matches!(b.kind, BlockKind::Literal(Literal::Bool(_))) => {
+          default = b.kind == BlockKind::Literal(Literal::Bool(true));
+          items = rest;
+        }
+        _ => {
+          self.problem(Problem::construct(
+            last.value.span,
+            "generic",
+            "declaration",
+            "`ignore-redefined:` takes `true` or `false`".into(),
+          ));
+          return;
+        }
+      }
+    }
     let name = match items {
       [n, _] if n.name.is_none() => match &n.value.blocks[..] {
         [b] => match &b.kind {
@@ -1822,6 +1912,72 @@ impl Lowerer<'_> {
       ));
       return;
     };
+    // A default: the script argument of the same name, when given, wins,
+    // read as the default's type (arguments arrive as strings).
+    if default {
+      let BlockKind::Literal(
+        kind @ (Literal::Int(_) | Literal::Float(_) | Literal::Bool(_) | Literal::String(_)),
+      ) = &value.kind
+      else {
+        self.problem(Problem::construct(
+          value.span,
+          "generic",
+          "declaration",
+          "a default for a script argument is a number, a string or a bool literal".into(),
+        ));
+        return;
+      };
+      if let Some(given) = self.defines.get(&name.node) {
+        // The argument replaces this default, not a second declaration.
+        if self.consts.contains_key(&name.node) {
+          self.problem(Problem::construct(
+            name.span,
+            "generic",
+            "duplicate-binding",
+            format!("`@{}` is already defined", name.node),
+          ));
+          return;
+        }
+        let parsed = match kind {
+          Literal::Int(_) => given.trim().parse().ok().map(Literal::Int),
+          Literal::Float(_) => given.trim().parse().ok().map(Literal::Float),
+          Literal::Bool(_) => match given.trim() {
+            "true" => Some(Literal::Bool(true)),
+            "false" => Some(Literal::Bool(false)),
+            _ => None,
+          },
+          Literal::String(_) => Some(Literal::String(given.clone())),
+          Literal::None => None,
+        };
+        let Some(parsed) = parsed else {
+          self.problem(Problem::construct(
+            name.span,
+            "generic",
+            "script-argument-type",
+            format!(
+              "script argument `{}` is `{given}`, which is not {} like its default",
+              name.node,
+              match kind {
+                Literal::Int(_) => "an Int",
+                Literal::Float(_) => "a Float",
+                Literal::Bool(_) => "a Bool (`true` or `false`)",
+                _ => "of a supported type",
+              }
+            ),
+          ));
+          return;
+        };
+        self.typed_defines.insert(name.node.clone());
+        self.consts.insert(
+          name.node,
+          Block {
+            kind: BlockKind::Literal(parsed),
+            ..value
+          },
+        );
+        return;
+      }
+    }
     if self.defines.contains_key(&name.node) || self.consts.contains_key(&name.node) {
       self.problem(Problem::construct(
         name.span,

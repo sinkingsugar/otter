@@ -74,6 +74,15 @@ The surveys' working files are not part of this repository; the numbers above ar
 - **`Step`** (advance another wire by one iteration from this one): not provided; the survey's uses are UI ticking, which the host drives.
 - **Channels** (`Produce`/`Consume`) and events (`Events.Send/Receive/Update`): a mesh service with async receive (H3), not a core construct.
 
+**Decision (2026-10-11):** accepted in this form, after a review of 1.x's wire shards (`shards/modules/core/wires.cpp`) and Astra's design review:
+- 1.x's names: `Spawn(wire)` outputs a handle (a `Wire.Instance` object, H1), replacing today's pass-through; `Wait(w)` (the handle as a parameter, as 1.x's `Wire` parameter) with `timeout:` (seconds; expiring is an error), output `Any`; `Peek(w)` (non-blocking: `none` while the child runs, fails if it failed); `IsRunning(w)`; `Stop(w)` stops that instance, and `Stop` alone stays "stop this wire".
+- `Wait` on a child that ended `Stopped` or `Cancelled` fails with a distinct error for each; a failed child's error passes through; a completed `none` stays a value. `Stop(w)` is an idempotent request; `Wait` acknowledges the child's cleanup, not quiescence of external work (H6).
+- A spawned instance belongs to its spawner instance (not its iteration); `detach: true` gives it to the mesh. When the spawner ends, for any reason, its whole tree is cancelled in the same pass, children queued in the same activation included; finished children are pruned, so a looped spawner does not accumulate them.
+- Handles are shareable values: several waiters, waiters that drop, a handle valid after the mesh retires the record, and across a reload it keeps naming the original instance (never retargets).
+- Implementation: a shared completion cell per spawned instance (outcome, cancel request, waiters); `Wait` as an async shard; the mesh honors cancel requests before its wake filtering.
+- Deviations from 1.x: structured ownership by default (1.x `Joint: false` lets children outlive spawners); handles never dangle or retarget (1.x `Spawn` returns a weak pointer into a recycled pool); stopped and cancelled children are distinguishable (1.x keeps the last output across a stop); spawned wires see the mesh's variables and their input, no deep-copied captured variables. Not ported: `Detach` (`detach:`), `Step`, `SwitchTo`, `Suspend`/`Resume`, `Branch`, `WhenDone`, `DoMany`/`TryMany`/`Expand`.
+- Gate: fan out, collect and cancel a three-generation tree under both wake modes; spawn-then-exit before the child starts; detached survival; a parked async child cancelled; several and dropped waiters; every ending (`Stopped`, `Cancelled`, failure, a cleanup panic); bounded bookkeeping for looped parents; retained and restarted reloads with handles held in mesh variables; mesh destruction.
+
 ### H6. Cancellation is not quiescence
 
 **Need.** Cancelling an instance drops its pending future and fires its token; a worker running blocking code finishes later. A model context, connection or host object must not be freed or reused while a worker still uses it.
@@ -246,6 +255,8 @@ The surveyed host is not being ported as it is. It is being replaced by **an age
 4. **Iteration** (H12): `ForEach`, `Map`, `Filter`, `Reduce` with a named element, flattened into the VM.
 
 **M10** (code as data, `metaprogramming.md` §4) is not on this host's critical path. It runs after A1 and A2, or in parallel with them when there is capacity; its three cases are supplied.
+
+**Host needs met on the way (2026-10-11):** log lines streamed to the host as they are written, each with its instance (`otter_core::log::Sink::stream`, `Session::set_log_sink`); defaults for script arguments (`@const(name value ignore-redefined: true)`, the argument read as the default's type). Iteration with a named element (A4 below) is needed by a host's scripts too.
 
 **Track B: catalog breadth** (§3), at any time and in parallel: strings, regex (dialect decided first), JSON (mapping decided first), fs, hashes, time, the `Is*` family, `Fail`/`Pass`/`Msg`, and parameter parity (`Get(default:)`). The text-tool subset comes first.
 
