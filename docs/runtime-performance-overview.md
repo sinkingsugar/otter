@@ -128,6 +128,46 @@ ns) and `assign-int` at width 8 (20 to 22 ns), which is function placement
 (lesson 6): with `run` byte-identical and both binaries built with 64-byte
 function alignment they measure the same.
 
+## The mesh tick loop: register pressure (2026-10-19)
+
+A2 (PR #16) made `Mesh::tick` cost about one instruction more per activation
+on x86-64, accepted by the maintainer as it stood: depth/1 86,592 to 86,706,
+entity/100 193,709 to 193,776; aarch64 +15 and +16 (the gate with one codegen
+unit). It is register allocation, not work: the loop keeps `self`,
+`notify_only` (the wake mode), the instances' end pointer, the instance and
+the per-tick values in all six callee-saved registers, so a value live across
+the calls after `Engine::activate` loses its register. On `main` before A2 the
+end pointer stayed on the stack and the panic payload's data pointer kept
+`%rbp`; after A2 the end pointer takes a register and the payload pointer is
+stored to the stack after every activation, panicking or not.
+
+Tried on the A2 code, none kept (per iteration, against A2; x86-64 then
+aarch64, depth/1 and entity/100):
+
+| Change | depth x86 | depth a64 | entity x86 | entity a64 |
+|---|---|---|---|---|
+| the panic arm in a `#[cold]` function taking the payload | -109 | -2 | +91 | +98 |
+| `Instance` padded back to its old size | -1 | 0 | -3 | 0 |
+| no `Instance.wake` (read the completion's) | +100 | +100 | +100 | +100 |
+| the wake mode read in place each iteration | +89 | -1 | +189 | -51 |
+| suspension inline, the rest in a `#[inline(never)]` function | -209 | +92 | +991 | +1,093 |
+| suspension and loop iteration inline, the ends `#[cold]` | +291 | +194 | -209 | -256 |
+| an index loop | +897 | +798 | +953 | +754 |
+| one loop per wake mode (const generic) | about +2,100 | about +2,800 | about +2,200 | about +2,600 |
+
+Each moved the spill to another path (the out-of-line panic arm freed the
+suspend path and spilled the result's discriminant on the loop-iteration path,
+which entity takes) or added more work than it saved. A real fix takes a value
+out of the loop rather than reshuffling it: fewer loop-carried values (the
+per-tick pointers built into one context passed by reference, or the wake mode
+folded into the instance's own check), or a smaller panic boundary. Under
+`panic = "abort"` (the ESP32 firmware) `catch_unwind` has no failure arm and
+the pressure goes away; the gate measures unwinding, which hosts get by
+default. Read the loop with `cargo rustc --release -p otter-core --target
+x86_64-unknown-linux-gnu -- --emit=asm` and one codegen unit, and confirm any
+change with Cachegrind on both architectures: the two workloads take different
+paths through the loop and move in opposite directions.
+
 ## Lessons from the VM optimization work
 
 Conclusions at `12ef2f0`, after the assembly comparison, controlled layout
