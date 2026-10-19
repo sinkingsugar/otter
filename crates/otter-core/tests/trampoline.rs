@@ -358,6 +358,117 @@ mod wait {
     assert!(started.elapsed() < Duration::from_secs(1));
   }
 
+  /// A mesh whose `gated` instance waits on the gate's waker, with a
+  /// handle to it in the mesh variable `g`.
+  fn gated_mesh(mode: WakeMode) -> (Mesh, otter_core::InstanceId, Var) {
+    let mut mesh = Mesh::new();
+    mesh.set_wake_mode(mode);
+    mesh.add_wire(WireDef {
+      name: "gated".into(),
+      looped: false,
+      flow: vec![ShardDef::new(&WAIT, vec![])],
+    });
+    let code = mesh.compile("gated", Type::none()).unwrap();
+    let id = mesh.spawn(&code, Var::None).unwrap();
+    let handle = mesh.handle(id).unwrap();
+    mesh.declare_var("g", handle.clone(), false);
+    (mesh, id, handle)
+  }
+
+  fn completion(handle: &Var) -> &Arc<otter_core::wire_instance::Completion> {
+    handle
+      .as_object::<otter_core::wire_instance::WireInstance>()
+      .expect("a Wire.Instance")
+      .completion()
+  }
+
+  #[test]
+  fn it_wakes_when_another_thread_asks_an_instance_to_end() {
+    for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+      let _gate = gate();
+      let (mut mesh, id, handle) = gated_mesh(mode);
+      mesh.tick();
+      let stopper = {
+        let completion = completion(&handle).clone();
+        std::thread::spawn(move || {
+          std::thread::sleep(Duration::from_millis(100));
+          completion.request(otter_core::wire_instance::Request::Stop);
+        })
+      };
+      let started = Instant::now();
+      mesh.wait(Some(started + Duration::from_secs(10)), None);
+      stopper.join().unwrap();
+      assert!(started.elapsed() >= Duration::from_millis(100), "{mode:?}");
+      assert!(started.elapsed() < Duration::from_secs(5), "{mode:?}");
+      // Asked before this wait: it returns at once.
+      let started = Instant::now();
+      mesh.wait(Some(started + Duration::from_secs(10)), None);
+      assert!(started.elapsed() < Duration::from_secs(1), "{mode:?}");
+      mesh.tick();
+      assert_eq!(mesh.outcome(id), Some(&Outcome::Stopped), "{mode:?}");
+    }
+  }
+
+  /// A `Wait` with a timeout tells the mesh its deadline: the host sleeps
+  /// until it, or until the instance waited for ends, whichever is first.
+  #[test]
+  fn a_timed_wait_sleeps_until_its_deadline_or_the_end() {
+    for mode in [WakeMode::PollEveryTick, WakeMode::OnNotify] {
+      // The deadline.
+      let _gate = gate();
+      let (mut mesh, _, _) = gated_mesh(mode);
+      mesh.add_wire(wire(vec![wait_timeout("g", 0.1)], false));
+      let code = mesh.compile("root", Type::none()).unwrap();
+      let waiter = mesh.spawn(&code, Var::None).unwrap();
+      let started = Instant::now();
+      mesh.tick();
+      mesh.wait(Some(started + Duration::from_secs(10)), None);
+      assert!(started.elapsed() >= Duration::from_millis(100), "{mode:?}");
+      assert!(started.elapsed() < Duration::from_secs(5), "{mode:?}");
+      mesh.tick();
+      assert!(
+        matches!(mesh.outcome(waiter), Some(Outcome::Failed(Error::Diagnostic(d))) if d.code == "wait-timeout"),
+        "{mode:?}: {:?}",
+        mesh.outcome(waiter)
+      );
+
+      // The end, long before the deadline.
+      let gate = gate();
+      let (mut mesh, gated, _) = gated_mesh(mode);
+      mesh.add_wire(wire(vec![wait_timeout("g", 10.0)], false));
+      let code = mesh.compile("root", Type::none()).unwrap();
+      let waiter = mesh.spawn(&code, Var::None).unwrap();
+      mesh.tick();
+      let opener = {
+        let gate = gate.clone();
+        std::thread::spawn(move || {
+          std::thread::sleep(Duration::from_millis(100));
+          gate.ready.store(true, Ordering::Relaxed);
+          for waker in gate.wakes.lock().unwrap().iter() {
+            waker.wake_by_ref();
+          }
+        })
+      };
+      let started = Instant::now();
+      let mut waits = 0;
+      while mesh.outcome(waiter).is_none() {
+        mesh.wait(Some(started + Duration::from_secs(20)), None);
+        waits += 1;
+        mesh.tick();
+      }
+      opener.join().unwrap();
+      assert!(started.elapsed() < Duration::from_secs(5), "{mode:?}");
+      // Woken by the gate, then by the end (a spurious wake may add one).
+      assert!(waits <= 3, "{mode:?}: {waits} waits");
+      assert_eq!(mesh.outcome(gated), Some(&Outcome::Completed(Var::Int(42))));
+      assert_eq!(
+        mesh.outcome(waiter),
+        Some(&Outcome::Completed(Var::Int(42))),
+        "{mode:?}"
+      );
+    }
+  }
+
   #[test]
   fn a_pause_the_clock_cannot_reach_never_wakes() {
     let mut mesh = Mesh::new();

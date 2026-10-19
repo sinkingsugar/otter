@@ -5,7 +5,6 @@ use crate::hash::{HashMap, HashSet};
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::task::Waker;
 use std::time::Instant;
 
 use super::Engine;
@@ -19,6 +18,7 @@ use crate::reload::{FunctionKey, FunctionRegistry, ReloadReport, ResetPolicy, Re
 use crate::shard::{ActivationCtx, Step};
 use crate::types::Type;
 use crate::var::Var;
+use crate::wire_instance::{CancelRequests, Completion, Queued, WireInstance};
 
 struct Instance {
   id: InstanceId,
@@ -34,8 +34,11 @@ struct Instance {
   /// What it waits for since its last activation (`ActivationCtx::set_waiting`,
   /// `ActivationCtx::resume_at`).
   waiting: Waiting,
+  /// The completion's wake flag, read every tick.
   wake: Arc<WakeFlag>,
-  waker: Waker,
+  /// What handles to the instance name: its published outcome, its
+  /// waiters, the requests made of it and the children it owns.
+  completion: Arc<Completion>,
   /// The loop iteration ([`crate::instance::LeafCtx::iteration`]).
   iteration: u64,
   /// A body of the same wire accepted by a reload (a function inlined into
@@ -49,7 +52,9 @@ pub struct Mesh {
   revisions: Revisions,
   layout: FrameLayout,
   frame: Vec<Var>,
-  spawn_queue: Vec<(Arc<CompiledWire>, Var)>,
+  spawn_queue: Vec<Queued>,
+  /// Requests to end instances not acted on yet (`wire_instance`).
+  requests: Arc<CancelRequests>,
   wires: HashMap<String, WireDef>,
   functions: HashMap<String, FunctionDef>,
   cache: ComposeCache,
@@ -83,11 +88,16 @@ impl Mesh {
   }
 
   pub fn with_cache(cache: ComposeCache) -> Mesh {
+    Mesh::build(cache, Arc::default())
+  }
+
+  fn build(cache: ComposeCache, requests: Arc<CancelRequests>) -> Mesh {
     Mesh {
       revisions: Revisions::default(),
       layout: FrameLayout::default(),
       frame: Vec::new(),
       spawn_queue: Vec::new(),
+      requests,
       wires: HashMap::default(),
       functions: HashMap::default(),
       cache,
@@ -256,7 +266,10 @@ impl Mesh {
   /// A fresh compilation candidate retaining the mesh-variable schema and
   /// values, without instances or a compose cache.
   pub fn revision(&self) -> Self {
-    let mut next = Self::new();
+    // A candidate never runs instances (`install_revision` takes its
+    // compiled state, not it): it shares the request counter rather than
+    // allocate one.
+    let mut next = Self::build(ComposeCache::default(), self.requests.clone());
     next.layout = self.layout.clone();
     next.frame = self.frame.clone();
     next.wake_mode = self.wake_mode;
@@ -483,6 +496,9 @@ impl Mesh {
       }
       self.report.swapped.push(name);
     }
+    // The children of instances the reload ended (or failed to move onto
+    // their new body) end with them, before the host runs anything.
+    drain(&mut self.instances, &self.requests);
   }
 
   /// How many times call sites consulted the reload registry. A call site
@@ -529,18 +545,33 @@ impl Mesh {
         input.type_of()
       )));
     }
-    Ok(self.start(wire.clone(), input))
+    let signal = self.signal.get_or_insert_with(Arc::default).clone();
+    let completion = Completion::new(wire.name.as_str().into(), self.requests.clone(), signal);
+    Ok(self.start(wire.clone(), input, completion))
   }
 
-  fn start(&mut self, wire: Arc<CompiledWire>, input: Var) -> InstanceId {
+  /// A handle to an instance (a `Wire.Instance` value, as `Spawn` outputs),
+  /// while its record exists. It stays valid after the record is retired.
+  pub fn handle(&self, id: InstanceId) -> Option<Var> {
+    self
+      .instances
+      .iter()
+      .find(|i| i.id == id)
+      .map(|i| WireInstance::var(i.completion.clone()))
+  }
+
+  fn start(
+    &mut self,
+    wire: Arc<CompiledWire>,
+    input: Var,
+    completion: Arc<Completion>,
+  ) -> InstanceId {
     let id = self.next_id;
     self.next_id += 1;
-    let signal = self.signal.get_or_insert_with(Arc::default).clone();
-    let wake = Arc::new(WakeFlag::new(signal));
     self.instances.push(Instance {
       waiting: Waiting::default(),
-      waker: Waker::from(wake.clone()),
-      wake,
+      wake: completion.wake.clone(),
+      completion,
       iteration: 0,
       id,
       locals: wire.fresh_locals(),
@@ -559,6 +590,11 @@ impl Mesh {
   /// then starts instances spawned during the tick. Returns the number of
   /// instances still running.
   pub fn tick(&mut self) -> usize {
+    // Requests made since the last tick (a host stopping an instance
+    // through its handle) end their targets before anything runs.
+    if self.requests.pending() {
+      drain(&mut self.instances, &self.requests);
+    }
     let notify_only = self.wake_mode == WakeMode::OnNotify;
     let Mesh {
       instances,
@@ -587,8 +623,17 @@ impl Mesh {
         *max_call_depth,
       );
     }
-    for (wire, input) in std::mem::take(&mut self.spawn_queue) {
-      self.start(wire, input);
+    for queued in std::mem::take(&mut self.spawn_queue) {
+      self.start(queued.wire, queued.input, queued.completion);
+    }
+    // Requests made during the tick take effect at its end, after every
+    // running instance had its activation (nothing is checked per
+    // activation; a target that finished meanwhile ended as the request
+    // says, see `finish`): stops, the children of owners that ended
+    // (queued ones end without being instantiated), and so on down each
+    // tree.
+    if self.requests.pending() {
+      drain(&mut self.instances, &self.requests);
     }
     self.running()
   }
@@ -600,6 +645,10 @@ impl Mesh {
   /// are separate instantiations, slower than `tick`'s, which knows nothing
   /// of budgets.
   pub fn tick_budgeted(&mut self, budget: &crate::compose_time::RunBudget) -> usize {
+    // Requests as in `tick`: before anything runs, and at the end.
+    if self.requests.pending() {
+      drain(&mut self.instances, &self.requests);
+    }
     let notify_only = self.wake_mode == WakeMode::OnNotify;
     let Mesh {
       instances,
@@ -629,8 +678,11 @@ impl Mesh {
         Some(&budget.meter),
       );
     }
-    for (wire, input) in std::mem::take(&mut self.spawn_queue) {
-      self.start(wire, input);
+    for queued in std::mem::take(&mut self.spawn_queue) {
+      self.start(queued.wire, queued.input, queued.completion);
+    }
+    if self.requests.pending() {
+      drain(&mut self.instances, &self.requests);
     }
     self.running()
   }
@@ -638,8 +690,9 @@ impl Mesh {
   /// Blocks the calling thread until a tick can make progress, instead of
   /// ticking in a loop: until an instance is ready to run (it yielded, or
   /// has not started), a waiting instance's waker fires (from any thread,
-  /// such as I/O completing on `otter-io`'s runtime), a timed pause is due,
-  /// `until` passes, or `cancel` is cancelled. Returns at once when nothing
+  /// such as I/O completing on `otter-io`'s runtime), a timed pause or a
+  /// `Wait` deadline is due, an instance is asked to end through its handle
+  /// (`Completion::request`), `until` passes, or `cancel` is cancelled. Returns at once when nothing
   /// is running. It may return early; tick and wait again.
   ///
   /// On a target without threads (wasm) nothing can wake it but time: with
@@ -652,7 +705,10 @@ impl Mesh {
     let _watch = cancel.map(|c| c.watch(signal));
     signal.hold(|mut held| {
       loop {
-        if cancel.is_some_and(|c| c.is_cancelled()) || held.take_woken() {
+        // A request made through a handle: the next tick acts on it before
+        // running anything.
+        if cancel.is_some_and(|c| c.is_cancelled()) || held.take_woken() || self.requests.pending()
+        {
           return;
         }
         let mut due = until;
@@ -661,7 +717,8 @@ impl Mesh {
           running = true;
           match instance.waiting.wait {
             Wait::Ready => return,
-            Wait::Waker if instance.wake.is_set() => return,
+            // A timed `Wait` registers its waker too.
+            Wait::Waker | Wait::Timed if instance.wake.is_set() => return,
             Wait::Waker => {}
             Wait::Timed => {
               if let Some(at) = instance.waiting.at {
@@ -696,6 +753,7 @@ impl Mesh {
       .find(|i| i.id == id && i.outcome.is_none())
     {
       finish(instance, Outcome::Cancelled);
+      drain(&mut self.instances, &self.requests);
     }
   }
 
@@ -807,7 +865,7 @@ impl Drop for Mesh {
 fn step(
   instance: &mut Instance,
   frame: &mut Vec<Var>,
-  spawn_queue: &mut Vec<(Arc<CompiledWire>, Var)>,
+  spawn_queue: &mut Vec<Queued>,
   revisions: &Revisions,
   table: &Arc<FunctionRegistry>,
   max_call_depth: usize,
@@ -828,7 +886,7 @@ fn step(
 fn step_with(
   instance: &mut Instance,
   frame: &mut Vec<Var>,
-  spawn_queue: &mut Vec<(Arc<CompiledWire>, Var)>,
+  spawn_queue: &mut Vec<Queued>,
   revisions: &Revisions,
   table: &Arc<FunctionRegistry>,
   max_call_depth: usize,
@@ -875,7 +933,7 @@ fn step_with(
       locals,
       state,
       waiting,
-      waker,
+      completion,
       iteration,
       ..
     } = instance;
@@ -889,7 +947,7 @@ fn step_with(
         mesh_frame: frame,
         spawn_queue,
         waiting,
-        waker,
+        completion,
         iteration: *iteration,
         max_call_depth,
         meter,
@@ -969,6 +1027,14 @@ fn carry_keeps(instance: &Instance, wire: &CompiledWire) -> Vec<Var> {
 /// Ends an instance: cleans up its state exactly once (if it was
 /// instantiated) and records the outcome.
 fn finish(instance: &mut Instance, mut outcome: Outcome) {
+  // A request made before the instance ended decides how it ended, unless
+  // it failed: a target that ran to completion in the tick it was stopped
+  // (or its owner ended) is Stopped (Cancelled), not Completed.
+  if matches!(outcome, Outcome::Completed(_) | Outcome::Stopped)
+    && let Some(request) = instance.completion.requested()
+  {
+    outcome = request.outcome();
+  }
   if let Some(mut state) = instance.state.take() {
     let mut ctx = InstanceCtx {
       instance: instance.id,
@@ -986,5 +1052,26 @@ fn finish(instance: &mut Instance, mut outcome: Outcome) {
   instance.locals = Vec::new();
   instance.input = Var::None;
   instance.next_body = None;
+  // Published after the cleanup: a waiter acknowledges it (H5). The
+  // instance's children are asked to end.
+  instance.completion.finish(outcome.clone());
   instance.outcome = Some(outcome);
+}
+
+/// Ends every instance with a request, until none are left (ending one
+/// requests its children's end). Out of line: inlined, it grew `tick`'s
+/// frame past the reach of aarch64's paired stores, which cost the
+/// activation context an instruction per activation.
+#[cold]
+#[inline(never)]
+fn drain(instances: &mut [Instance], requests: &CancelRequests) {
+  while requests.take() != 0 {
+    for instance in instances.iter_mut() {
+      if instance.outcome.is_none()
+        && let Some(request) = instance.completion.requested()
+      {
+        finish(instance, request.outcome());
+      }
+    }
+  }
 }

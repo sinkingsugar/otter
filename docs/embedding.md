@@ -60,7 +60,7 @@ Compose runs once per wire shape, and its result is shared by every instance. It
 
 - **Leaf shards** return `Flow::Next(value)`. Runtime failures are `Error::Activation(message)`. `Maybe` can catch them; otherwise they end the instance.
 - **Async shards** start one operation per activation from owned inputs: no borrows of frames or of `ctx`. The adapter polls it on later ticks.
-- **A shard that suspends says what it waits for**, so a host blocked in `Mesh::wait` sleeps instead of ticking: `ctx.set_waiting()` before suspending on its waker (the async adapter does it), `ctx.resume_at(instant)` for a time (`Pause`). Suspending with neither is a yield: ready on the next tick. A host driving its own mesh calls `mesh.wait(until, cancel)` between ticks.
+- **A shard that suspends says what it waits for**, so a host blocked in `Mesh::wait` sleeps instead of ticking: `ctx.set_waiting()` before suspending on its waker (the async adapter does it), `ctx.resume_at(instant)` for a time (`Pause`, and `Wait` with `timeout:`, which registers its waker too: the first of the two wakes the host). Suspending with neither is a yield: ready on the next tick. A host driving its own mesh calls `mesh.wait(until, cancel)` between ticks; asking an instance to end through its handle (`Completion::request`) from any thread wakes it too, and the next tick ends the instance before running anything.
 - **Blocking work cannot be interrupted from outside.** `spawn_blocking` passes a cancellation token: check it at safe points or wire it to the library's own cancel hook. Cancelling the instance cancels the token. Never leave external state half-changed when stopping early.
 - **Read and build values through the accessors**, not the storage: `Var::as_str`, `Var::as_seq` (a `&[Var]`) and `Var::as_table` give borrowed views; a `Table` has `get`, `len`, `contains_key` and `iter`/`keys`/`values` in sorted key order. Build tables with `Table::builder().with("key", value).build()`, `collect()` from `(key, Var)` pairs, or `Var::table([...])`; derive a changed table with `table.into_builder()`, which takes the storage when it is not shared. These build map tables (sorted entries). A fixed table type carries an interned key `Shape`; compose turns literals into struct tables of their shape and reads literal keys by slot, and a host that returns one record shape many times can do the same with `Table::with_shape(shape, values)` (values in the shape's sorted key order) or convert a built value once with `into_struct`. Do not intern a shape per value with unbounded key sets: shapes live in the type registry, which never frees ([values-and-types.md](values-and-types.md) §2.1). Strings, sequences and bytes are `Var::string("..")`, `Var::seq(vec)` and `Var::bytes(&data)`, or `Var::from_string`, `from_seq`, `from_bytes` and `from_table` for an `Arc` or `Table` already held; match them by reference and take storage out with `into_seq` and `into_table` ([values-and-types.md](values-and-types.md) §2). Float vectors are `Var::float2(x, y)`, `float3`, `float4` (f32 components, wrapped in `Float2`/`Float3`/`Float4`, which deref to the array).
 - **Keep per-instance state in `State`**, not in `Compiled`. Resources a script holds (a connection, a session) are objects; what owns and pools them is a service (below).
@@ -183,9 +183,12 @@ Other lifetime rules:
 - Unchanged stateful functions retain their state too. Their `Once` blocks
   do not repeat merely because another function was edited.
 - `Spawn` remains a static compiled dependency. Editing its target can
-  restart the code that owns that dependency. Spawned instances are detached:
-  compatible ones survive independently, while changed/removed ones are
-  cancelled. A spawned wire that calls an edited function selects the new
+  restart the code that owns that dependency. A spawned instance lives as
+  long as the instance that spawned it (or, with `detach: true`, as the
+  mesh): compatible ones survive the reload, while changed/removed ones
+  are cancelled, and a restarted owner's children are cancelled with it.
+  Handles (`Wire.Instance` values) keep naming the instance they were
+  given for, never its replacement. A spawned wire that calls an edited function selects the new
   body at its next call like any other caller.
 - Entry roots cancelled by a reload report `Cancelled`, including spawned
   children. Failed entries stay stopped until the next accepted reload, and

@@ -35,6 +35,7 @@ pub mod stackless;
 pub mod types;
 pub mod var;
 mod wait;
+pub mod wire_instance;
 
 pub use args::{Arg, Args};
 pub use catalog::Catalog;

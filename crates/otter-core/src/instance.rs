@@ -124,6 +124,11 @@ impl WakeFlag {
     self.woken.swap(false, std::sync::atomic::Ordering::AcqRel)
   }
 
+  /// What a wake notifies: the mesh's signal.
+  pub(crate) fn signal(&self) -> &std::sync::Arc<crate::wait::Signal> {
+    &self.signal
+  }
+
   /// Whether the waker fired since the last [`WakeFlag::take`].
   pub(crate) fn is_set(&self) -> bool {
     self.woken.load(std::sync::atomic::Ordering::SeqCst)
