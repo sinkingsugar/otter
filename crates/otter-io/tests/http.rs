@@ -537,3 +537,152 @@ fn retry_repeats_transient_failures_only() {
   assert_eq!(field(&response, "status"), &Var::Int(503));
   assert_eq!(server.received("/busy"), 1);
 }
+
+/// Runs one `Http.Post` with `args` on `input` (of type `ty`) to
+/// completion: its outcome.
+fn run_post(args: Vec<otter_core::Arg>, ty: Type, input: Var) -> Outcome {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("post", false, vec![http::post_args(args)]));
+  let post = mesh.compile("post", ty).unwrap();
+  let id = mesh.spawn(&post, input).unwrap();
+  run_until_done(&mut mesh, id);
+  mesh.outcome(id).cloned().unwrap()
+}
+
+#[test]
+fn post_sends_its_input_as_the_body() {
+  let server = TestServer::start();
+  let url = server.url("/echo-body");
+  let json = Var::table([("content-type", Var::string("application/json"))]);
+
+  // A String, with the content type the script sets.
+  let outcome = run_post(
+    get_args(&url, &[("headers", json.clone())]),
+    Type::string(),
+    Var::string("{\"a\":1}"),
+  );
+  assert_eq!(
+    outcome,
+    Outcome::Completed(Var::string("POST application/json {\"a\":1}"))
+  );
+
+  // Bytes, sent as they are; no content type unless the script sets one.
+  let outcome = run_post(
+    get_args(&url, &[("bytes", Var::Bool(true))]),
+    Type::bytes(),
+    Var::bytes(&[0xff, 0x00, 0x01]),
+  );
+  let mut expected = b"POST - ".to_vec();
+  expected.extend_from_slice(&[0xff, 0x00, 0x01]);
+  assert_eq!(outcome, Outcome::Completed(Var::bytes(&expected)));
+
+  // None: an empty body.
+  let outcome = run_post(get_args(&url, &[]), Type::none(), Var::None);
+  assert_eq!(outcome, Outcome::Completed(Var::string("POST - ")));
+
+  // The output options are Http.Get's.
+  let outcome = run_post(
+    get_args(&url, &[("full-response", Var::Bool(true))]),
+    Type::string(),
+    Var::string("x"),
+  );
+  let Outcome::Completed(response) = outcome else {
+    panic!("{outcome:?}")
+  };
+  assert_eq!(field(&response, "status"), &Var::Int(200));
+  assert_eq!(field(&response, "body"), &Var::string("POST - x"));
+
+  // Http.Get is still a GET.
+  let (_, outcome) = run_get(get_args(&url, &[]));
+  assert_eq!(outcome, Outcome::Completed(Var::string("GET - ")));
+}
+
+#[test]
+fn post_checks_its_input_at_compose_and_names_itself() {
+  let server = TestServer::start();
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire(
+    "int",
+    false,
+    vec![http::post_args(get_args(&server.url("/echo-body"), &[]))],
+  ));
+  let err = mesh.compile("int", Type::int()).err().unwrap();
+  let d = err.diagnostic().unwrap();
+  assert_eq!(
+    (d.code, d.shard.as_deref()),
+    ("input-type-mismatch", Some("Http.Post"))
+  );
+
+  // Its own diagnostics and errors name Http.Post.
+  mesh.add_wire(wire(
+    "bad-timeout",
+    false,
+    vec![http::post_args(get_args(
+      &server.url("/echo-body"),
+      &[("timeout", Var::Int(0))],
+    ))],
+  ));
+  let err = mesh.compile("bad-timeout", Type::none()).err().unwrap();
+  let d = err.diagnostic().unwrap();
+  assert_eq!(
+    (d.code, d.shard.as_deref(), d.param.as_deref()),
+    ("invalid-argument-value", Some("Http.Post"), Some("timeout"))
+  );
+  mesh.declare_var("h", Var::table([("x-run", Var::string("a\nb"))]), true);
+  mesh.add_wire(wire(
+    "bad-header",
+    false,
+    vec![http::post_args(vec![
+      otter_core::Arg::pos(otter_core::ParamValue::Value(Var::string(
+        &server.url("/echo-body"),
+      ))),
+      otter_core::Arg::named("headers", otter_core::ParamValue::Var("h".into())),
+    ])],
+  ));
+  let bad = mesh.compile("bad-header", Type::none()).unwrap();
+  let id = mesh.spawn(&bad, Var::None).unwrap();
+  run_until_done(&mut mesh, id);
+  assert!(
+    matches!(mesh.outcome(id), Some(Outcome::Failed(otter_core::Error::Activation(m))) if m == "Http.Post: invalid value for header x-run"),
+    "{:?}",
+    mesh.outcome(id)
+  );
+}
+
+#[test]
+fn post_retries_transient_failures_with_its_body() {
+  let server = TestServer::start();
+  let outcome = run_post(
+    get_args(
+      &server.url("/flaky"),
+      &[("retry", Var::Int(2)), ("backoff", Var::Float(0.01))],
+    ),
+    Type::string(),
+    Var::string("again"),
+  );
+  assert_eq!(outcome, Outcome::Completed(Var::string("recovered")));
+  assert_eq!(server.received("/flaky"), 3);
+}
+
+#[test]
+fn post_from_a_script() {
+  use otter_lang::{Program, Source};
+  use std::collections::HashMap;
+  let server = TestServer::start();
+  let catalog =
+    otter_core::Catalog::new(&[otter_core::shards::CATALOG, otter_io::CATALOG]).unwrap();
+  let defines = HashMap::from([("url".to_string(), server.url("/echo-body"))]);
+  let text = r#"{a: 1} | ToJson | Http.Post(@url headers: {content-type: "application/json"})"#;
+  let program = match Program::load(Source::new("t.otr", text), &catalog, &defines) {
+    Ok(program) => program,
+    Err((_, d)) => panic!("load failed: {d:?}"),
+  };
+  let report = program
+    .run()
+    .unwrap_or_else(|d| panic!("run failed: {d:?}"));
+  let outcome = report.outcomes.into_iter().next().unwrap().1.unwrap();
+  assert_eq!(
+    outcome,
+    Outcome::Completed(Var::string("POST application/json {\"a\":1}"))
+  );
+}

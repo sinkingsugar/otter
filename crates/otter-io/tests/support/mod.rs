@@ -16,7 +16,9 @@
 //! - `/twice`: 200 `hello` with the header `x-twice` sent twice (`a`, `b`);
 //! - `/drop`: closes the connection without responding (a transport error);
 //! - `/flaky`: like `/drop` for the first two requests, then 200 `recovered`;
-//! - `/busy`: 503 `busy` for the first request, then 200 `recovered`.
+//! - `/busy`: 503 `busy` for the first request, then 200 `recovered`;
+//! - `/echo-body`: 200 with `<method> <content-type or -> <body>` (the body
+//!   read by its `Content-Length`, as sent).
 //!
 //! [`TestServer::received`] counts the requests a path received.
 //!
@@ -117,26 +119,67 @@ pub fn closed_port_url() -> String {
   format!("http://{addr}/ok")
 }
 
-/// The request's path and its header lines.
-fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<String>)> {
+/// A request as the server read it.
+struct Request {
+  method: String,
+  path: String,
+  /// Header lines, as sent.
+  headers: Vec<String>,
+  /// The body, `Content-Length` bytes (empty without one).
+  body: Vec<u8>,
+}
+
+impl Request {
+  /// The value of the header `name` (case-insensitive), if sent.
+  fn header(&self, name: &str) -> Option<&str> {
+    self.headers.iter().find_map(|line| {
+      let (n, value) = line.split_once(':')?;
+      n.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+  }
+}
+
+fn read_request(stream: &mut TcpStream) -> Option<Request> {
   stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
   let mut data = Vec::new();
   let mut buf = [0u8; 1024];
-  while !data.windows(4).any(|w| w == b"\r\n\r\n") {
+  let end = loop {
+    if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+      break at + 4;
+    }
     let n = stream.read(&mut buf).ok()?;
     if n == 0 {
       return None;
     }
     data.extend_from_slice(&buf[..n]);
-  }
-  let text = String::from_utf8_lossy(&data);
+  };
+  let text = String::from_utf8_lossy(&data[..end]).into_owned();
   let mut lines = text.split("\r\n");
-  let path = lines.next()?.split_whitespace().nth(1)?.to_string();
+  let mut request_line = lines.next()?.split_whitespace();
+  let method = request_line.next()?.to_string();
+  let path = request_line.next()?.to_string();
   let headers = lines
     .take_while(|l| !l.is_empty())
     .map(str::to_string)
     .collect();
-  Some((path, headers))
+  let mut request = Request {
+    method,
+    path,
+    headers,
+    body: data[end..].to_vec(),
+  };
+  let length: usize = request
+    .header("content-length")
+    .map_or(Some(0), |v| v.parse().ok())?;
+  while request.body.len() < length {
+    let n = stream.read(&mut buf).ok()?;
+    if n == 0 {
+      return None;
+    }
+    request.body.extend_from_slice(&buf[..n]);
+  }
+  request.body.truncate(length);
+  Some(request)
 }
 
 /// Waits until released (true) or until the client closes the connection
@@ -181,9 +224,11 @@ fn respond_with(
 }
 
 fn handle(mut stream: TcpStream, state: &State) {
-  let Some((path, headers)) = read_request(&mut stream) else {
+  let Some(request) = read_request(&mut stream) else {
     return;
   };
+  let path = request.path.clone();
+  let headers = &request.headers;
   state.record(format!("received {path}"));
   let done = match path.as_str() {
     "/ok" => respond(&mut stream, "200 OK", "hello").is_ok(),
@@ -222,6 +267,16 @@ fn handle(mut stream: TcpStream, state: &State) {
         .collect();
       echoed.sort();
       respond(&mut stream, "200 OK", &echoed.join("\n")).is_ok()
+    }
+    "/echo-body" => {
+      let mut echoed = format!(
+        "{} {} ",
+        request.method,
+        request.header("content-type").unwrap_or("-")
+      )
+      .into_bytes();
+      echoed.extend_from_slice(&request.body);
+      respond_with(&mut stream, "200 OK", "", &echoed).is_ok()
     }
     "/slow-headers" => {
       if !wait_release_or_close(&mut stream, state) {

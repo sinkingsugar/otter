@@ -20,7 +20,13 @@ fn http_get_is_described_without_starting_anything() {
   assert!(json.contains("\"output\":{\"kind\":\"dynamic\""), "{json}");
   assert!(json.contains("\"name\":\"full-response\""), "{json}");
   assert!(catalog.index_json().contains("\"name\":\"Http.Get\""));
-  assert_eq!(catalog.search("http").len(), 1);
+  assert_eq!(catalog.search("http").len(), 2);
+  // Http.Post: the same parameters, and its input is the body.
+  let json = catalog.describe_json("Http.Post").unwrap();
+  assert!(json.contains("\"name\":\"url\",\"index\":0"), "{json}");
+  assert!(json.contains("\"name\":\"full-response\""), "{json}");
+  assert!(json.contains("\"targets\":\"native-only\""), "{json}");
+  assert!(catalog.index_json().contains("\"name\":\"Http.Post\""));
   // The filesystem shards too.
   let json = catalog.describe_json("FS.Read").unwrap();
   assert!(json.contains("\"targets\":\"native-only\""), "{json}");

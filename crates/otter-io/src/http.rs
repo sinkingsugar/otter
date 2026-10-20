@@ -1,4 +1,8 @@
-//! `Http.Get`, following 1.x (`shards/modules/http/src/lib.rs`): requests
+//! `Http.Get` and `Http.Post`, following 1.x
+//! (`shards/modules/http/src/lib.rs`), one generic shard ([`Request`]):
+//! `Http.Post` takes the same parameters and outputs the same types, and
+//! sends its input (a String, Bytes, or none for an empty body) as the
+//! request body. Requests
 //! run on the shared runtime ([`crate::runtime`]); the client is cached by
 //! configuration and keeps pooled idle connections for at most 50 s; a
 //! non-success status fails with the response body (truncated); the request
@@ -29,6 +33,14 @@
 //! - with `full-response`, a header the response repeats is one entry, its
 //!   values joined with `, ` (1.x kept the last); values that are not
 //!   UTF-8 are converted lossily (1.x failed the request).
+//! - `Http.Post` sends a String or Bytes input as it is and sets no
+//!   content type: the script sets `content-type` in `headers`. 1.x also
+//!   took a table of Strings, sent as a form, and defaulted the content
+//!   type by input (JSON for a String, octet-stream for Bytes, a form for a
+//!   table) when no headers were given. Here a form is the script's to
+//!   encode. A wrong input type is a compose error (1.x: at activation).
+//!   A retried POST may reach the server more than once: retry it only
+//!   when the server tolerates that.
 //!
 //! **What cancellation does:** it stops local polling, and the request
 //! future is dropped on the runtime, which closes the connection (verified by
@@ -107,7 +119,7 @@ pub enum Headers {
   Bound(Binding),
 }
 
-pub struct GetCompiled {
+pub struct RequestCompiled {
   url: Url,
   timeout: Duration,
   headers: Headers,
@@ -231,15 +243,30 @@ async fn attempt(
   })
 }
 
+/// An HTTP request shard: `Http.Get` (`POST` false) or `Http.Post` (`POST`
+/// true), sharing parameters, compose and the request loop.
+///
 /// `Http.Get(url [timeout] [headers] [bytes] [full-response] [retry]
 /// [backoff])`: GETs `url` and outputs the body as a String (or Bytes), or
 /// the whole response as a table. Fails on a connection error, a timeout
 /// (default 10 s), or, without `full-response`, a non-success status (with
 /// the body in the error); `retry` repeats transient failures.
-pub struct Get;
+///
+/// `Http.Post` takes the same arguments and POSTs its input as the body: a
+/// String or Bytes as it is, none as an empty body. It sets no content
+/// type; the script sets `content-type` in `headers`.
+pub struct Request<const POST: bool>;
 
-/// `Http.Get`'s parameters. The decoder enforces these declarations and the
-/// catalog documents them.
+/// `Http.Get`.
+pub type Get = Request<false>;
+/// `Http.Post`.
+pub type Post = Request<true>;
+
+/// The compiled request (both methods).
+pub type GetCompiled = RequestCompiled;
+
+/// `Http.Get`'s parameters, which `Http.Post` shares. The decoder enforces
+/// these declarations and the catalog documents them.
 pub static GET_PARAMS: &[ParamDecl] = &[
   ParamDecl {
     name: "url",
@@ -331,27 +358,71 @@ pub const GET_DESC: ShardDesc = ShardDesc {
   lifetime: otter_core::signature::Lifetime::Stateless,
 };
 
-fn compose_error(code: &'static str, message: String, param: &str, index: usize) -> Error {
+pub const POST_DESC: ShardDesc = ShardDesc {
+  name: "Http.Post",
+  version: 1,
+  summary: shard_doc!(
+    "POSTs its input (a String or Bytes, or none for an empty body) to a URL and outputs the response body as a String, as Bytes, or the whole response as a table."
+  ),
+  help: shard_doc!(
+    "The input is sent as it is, with no content type of its own: set `content-type` in `headers` (`{content-type: \"application/json\"}` for `ToJson` output). Takes `Http.Get`'s parameters and fails as it does: on a connection error, when the timeout expires (per attempt), or, without `full-response`, on a non-success status (with the response body in the error, truncated to 1024 characters). With `retry`, transient failures are repeated after a doubling wait, so a retried POST may reach the server more than once. Cancelling the wire stops local polling and releases the request; it cannot undo work the server already received."
+  ),
+  params: Params::Declared(GET_PARAMS),
+  input: InputDesc::Types(&[TypeName::String, TypeName::Bytes, TypeName::None]),
+  output: OutputDesc::Dynamic(shard_doc!(
+    "String; Bytes with `bytes: true`; with `full-response: true`, `{status: Int headers: {name: String} body: String}` (the body Bytes with `bytes: true`)"
+  )),
+  targets: Targets::NativeOnly,
+  aliases: &[],
+  effects: otter_core::signature::Effects::IO_WAIT,
+  lifetime: otter_core::signature::Lifetime::Stateless,
+};
+
+fn compose_error(
+  shard: &'static str,
+  code: &'static str,
+  message: String,
+  param: &str,
+  index: usize,
+) -> Error {
   Error::Diagnostic(Box::new(
     Diagnostic::new(Phase::Compose, "compose-error", code, message)
-      .shard(GET_DESC.name)
+      .shard(shard)
       .param(param, Some(index)),
   ))
 }
 
-impl AsyncShard for Get {
-  type Compiled = GetCompiled;
-  type Op = IoTask;
-  const DESC: ShardDesc = GET_DESC;
+/// The request body: the input's String or Bytes, copied (the request owns
+/// it, so it can be cloned for a retry), or empty for none. The input type
+/// was checked at compose.
+fn body(name: &str, input: &Var) -> Result<Vec<u8>> {
+  match input {
+    Var::String(text) => Ok(text.as_bytes().to_vec()),
+    Var::Bytes(bytes) => Ok(bytes.to_vec()),
+    Var::None => Ok(Vec::new()),
+    other => Err(Error::Activation(format!(
+      "{name}: the body must be a String, Bytes or none, got {}",
+      other.type_of()
+    ))),
+  }
+}
 
-  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<GetCompiled>> {
+impl<const POST: bool> AsyncShard for Request<POST> {
+  type Compiled = RequestCompiled;
+  type Op = IoTask;
+  const DESC: ShardDesc = if POST { POST_DESC } else { GET_DESC };
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<RequestCompiled>> {
+    let shard = Self::DESC.name;
+    let compose_error =
+      |code, message, param: &str, index| compose_error(shard, code, message, param, index);
     // Names, positions, the default, forms and literal types were checked
     // by the shared decoder; compose resolves the binding and checks values.
     let url = match args.get("url").expect("decoded required URL") {
       ParamValue::Value(Var::String(url)) => Url::Const(url.to_string()),
       ParamValue::Var(name) => {
         let info = ctx
-          .read_var(name, GET_DESC.name)
+          .read_var(name, shard)
           .map_err(|e| e.with_param("url", args.param_index("url")))?;
         if info.ty != Type::string() {
           return Err(Error::Diagnostic(Box::new(
@@ -361,7 +432,7 @@ impl AsyncShard for Get {
               "wrong-variable-type",
               format!("URL variable {name} must be a String, got {}", info.ty),
             )
-            .shard(GET_DESC.name)
+            .shard(shard)
             .param("url", Some(args.param_index("url")))
             .types(
               Some(TypeRef::of(info.ty)),
@@ -371,7 +442,7 @@ impl AsyncShard for Get {
         }
         Url::Bound(info.binding)
       }
-      other => unreachable!("decoder accepted {other:?} for Http.Get URL"),
+      other => unreachable!("decoder accepted {other:?} for {shard} URL"),
     };
     let secs = args.int("timeout").expect("decoded Timeout");
     if secs <= 0 {
@@ -394,7 +465,7 @@ impl AsyncShard for Get {
       })?),
       Some(ParamValue::Var(name)) => {
         let info = ctx
-          .read_var(name, GET_DESC.name)
+          .read_var(name, shard)
           .map_err(|e| e.with_param("headers", args.param_index("headers")))?;
         // Every value must be able to hold a String; the values themselves
         // are checked at activation.
@@ -418,7 +489,7 @@ impl AsyncShard for Get {
         }
         Headers::Bound(info.binding)
       }
-      Some(other) => unreachable!("decoder accepted {other:?} for Http.Get headers"),
+      Some(other) => unreachable!("decoder accepted {other:?} for {shard} headers"),
     };
     let bytes = args.bool("bytes").expect("decoded bytes");
     let body = if bytes { Type::bytes() } else { Type::string() };
@@ -453,7 +524,7 @@ impl AsyncShard for Get {
     let backoff = match args.literal("backoff").expect("decoded backoff") {
       Var::Int(secs) => *secs as f64,
       Var::Float(secs) => *secs,
-      other => unreachable!("decoder accepted {other:?} for Http.Get backoff"),
+      other => unreachable!("decoder accepted {other:?} for {shard} backoff"),
     };
     let backoff = Duration::try_from_secs_f64(backoff).map_err(|_| {
       compose_error(
@@ -464,7 +535,7 @@ impl AsyncShard for Get {
       )
     })?;
     Ok(Composed {
-      compiled: GetCompiled {
+      compiled: RequestCompiled {
         url,
         timeout: Duration::from_secs(secs as u64),
         headers,
@@ -476,7 +547,7 @@ impl AsyncShard for Get {
     })
   }
 
-  fn start(c: &GetCompiled, ctx: &mut impl LeafCtx, _input: &Var) -> Result<IoTask> {
+  fn start(c: &RequestCompiled, ctx: &mut impl LeafCtx, input: &Var) -> Result<IoTask> {
     // Owned inputs only: nothing borrowed from the frames goes into the task.
     let url = match &c.url {
       Url::Const(url) => url.clone(),
@@ -484,7 +555,8 @@ impl AsyncShard for Get {
         Var::String(url) => url.to_string(),
         other => {
           return Err(Error::Activation(format!(
-            "Http.Get: URL is not a String: {other:?}"
+            "{}: URL is not a String: {other:?}",
+            Self::DESC.name
           )));
         }
       },
@@ -492,29 +564,35 @@ impl AsyncShard for Get {
     let client = client(&ClientConfig::default()).map_err(Error::Activation)?;
     let headers = match &c.headers {
       Headers::Const(map) => map.clone(),
-      Headers::Bound(binding) => {
-        header_map(&ctx.get(*binding)).map_err(|e| Error::Activation(format!("Http.Get: {e}")))?
-      }
+      Headers::Bound(binding) => header_map(&ctx.get(*binding))
+        .map_err(|e| Error::Activation(format!("{}: {e}", Self::DESC.name)))?,
     };
-    let request = client
-      .get(url)
+    // A POST always has a body, empty for none (sent with a zero
+    // Content-Length, which some servers require).
+    let request = if POST {
+      client.post(url).body(body(Self::DESC.name, input)?)
+    } else {
+      client.get(url)
+    };
+    let request = request
       .timeout(c.timeout)
       .headers(headers)
       .build()
-      .map_err(|e| Error::Activation(format!("Http.Get: invalid request: {e}")))?;
+      .map_err(|e| Error::Activation(format!("{}: invalid request: {e}", Self::DESC.name)))?;
     let (reply, retry, backoff) = (c.reply, c.retry, c.backoff);
 
     Ok(spawn(move |cancel| async move {
       let mut request = Some(request);
       let mut attempts = 0u32;
       loop {
-        // A GET has no body, so it can always be repeated.
+        // A GET has no body and a POST's is in memory, so a request can
+        // always be repeated. A retried POST may reach the server twice.
         let this = if attempts < retry {
           request.as_ref().and_then(reqwest::Request::try_clone)
         } else {
           request.take()
         }
-        .expect("a GET request can be repeated");
+        .expect("a request without a streamed body can be repeated");
         let message = match attempt(&client, this, reply, &cancel).await {
           Ok(value) => return Ok(value),
           Err(Failure::Cancelled) => return Err("Request cancelled".to_string()),
@@ -540,6 +618,13 @@ impl AsyncShard for Get {
 }
 
 pub static GET: ShardType = async_type::<Get>();
+pub static POST: ShardType = async_type::<Post>();
+
+/// `Http.Post` with any arguments (positional and/or named); the body is
+/// its input.
+pub fn post_args(args: Vec<Arg>) -> ShardDef {
+  ShardDef::with_args(&POST, args)
+}
 
 /// `Http.Get` with a constant URL.
 pub fn get(url: &str) -> ShardDef {

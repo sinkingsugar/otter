@@ -16,6 +16,7 @@ pub use runtime::{CancellationToken, IoTask};
 /// Every shard type in this crate, for building a `otter_core::Catalog`.
 pub static CATALOG: &[&otter_core::ShardType] = &[
   &http::GET,
+  &http::POST,
   &fs::READ,
   &fs::WRITE,
   &fs::EXISTS,

@@ -6,7 +6,7 @@ How a Rust program (the host) adds its own shards and runs Otter scripts on them
 
 - `otter-core`: values, types, the shard traits, compose, and the scheduler (`Mesh`).
 - `otter-lang`: source to wire definitions, `check` and `run`, sessions with hot reload (§5), and tools (§6).
-- `otter-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work, and the `Http.Get` and `FS.*` shards.
+- `otter-io` (native only): the shared Tokio runtime, `spawn` for async work and `spawn_blocking` for blocking work, and the `Http.Get`, `Http.Post` and `FS.*` shards.
 - `otter-text` (native and wasm): regular expressions, hashes, `UUID` and `NanoID`, the text shards that need third-party crates.
 - `otter-sqlite` (native only: desktop and iOS): `Db.Query`, read-only queries of existing SQLite databases (§3, "Databases while running"). It bundles SQLite through rusqlite 0.40 (`libsqlite3-sys` 0.38); a host that links rusqlite itself must use the same line, since two `libsqlite3-sys` versions cannot link into one binary. Building it needs a C compiler for the target (Xcode's for iOS).
 
@@ -87,7 +87,7 @@ Build one catalog from the core list and the host's list:
 Catalog::new(&[otter_core::shards::CATALOG, HOST_CATALOG])
 ```
 
-Add `otter_io::CATALOG` if scripts use `Http.Get` or the filesystem, and `otter_text::CATALOG` for `Regex.*`, `Hash.*`, `UUID` and `NanoID` (the `otter` command includes both). Then:
+Add `otter_io::CATALOG` if scripts use `Http.Get`, `Http.Post` or the filesystem, and `otter_text::CATALOG` for `Regex.*`, `Hash.*`, `UUID` and `NanoID` (the `otter` command includes both). Then:
 
 - **Check without running:** `otter_lang::check(Source::new(path, text), &catalog, &defines)`. It returns the 1.x `{ok, file, diagnostics}` JSON envelope (`to_json()`), and `otter_lang::render` prints a diagnostic for humans.
 - **Run:** `Program::load(source, &catalog, &defines)`, then `program.run()`. The report has each entry wire's outcome, plus failures of spawned instances.
