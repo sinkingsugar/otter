@@ -16,13 +16,20 @@ path = "src/main.rs"
 [features]
 # The command ships with TLS (rustls on ring): tools fetch https. A build
 # without it: `--no-default-features --features docs`.
-default = ["docs", "tls"]
-docs = ["otter-io/docs", "otter-text/docs"]
+default = ["docs", "tls", "sqlite"]
+docs = ["otter-io/docs", "otter-text/docs", "otter-sqlite?/docs"]
 tls = ["otter-io/rustls-ring"]
+# `Db.Query` (read-only SQLite, bundled: needs a C compiler).
+sqlite = ["dep:otter-sqlite"]
 
 [dependencies]
 otter-core = { path = "../otter-core" }
 otter-io = { path = "../otter-io", default-features = false }
 otter-lang = { path = "../otter-lang" }
+otter-sqlite = { path = "../otter-sqlite", default-features = false, optional = true }
 otter-text = { path = "../otter-text", default-features = false }
 tokio = { version = "1", features = ["signal"] }
+
+[dev-dependencies]
+# Builds the SQLite fixtures of the CLI tests (the version otter-sqlite uses).
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }

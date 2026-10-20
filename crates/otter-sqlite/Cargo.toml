@@ -1,0 +1,27 @@
+[package]
+name = "otter-sqlite"
+description = "Otter SQLite shards: read-only queries of existing databases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["docs"]
+# Documentation prose in shard descriptions; off for small builds.
+docs = ["otter-core/docs"]
+
+[dependencies]
+otter-core = { path = "../otter-core", default-features = false }
+# The shared runtime's blocking pool and its tasks.
+otter-io = { path = "../otter-io", default-features = false }
+# Must stay on the 0.40 line: a host linking rusqlite 0.40 (bundled) cannot
+# link a second libsqlite3-sys. `bundled` compiles SQLite with FTS5; `hooks`
+# is the authorizer, `limits` the attached-database limit.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "hooks", "limits"] }
+
+[dev-dependencies]
+otter-lang = { path = "../otter-lang", default-features = false }

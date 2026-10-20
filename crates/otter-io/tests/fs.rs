@@ -504,6 +504,101 @@ fn a_host_confines_scripts_to_a_directory() {
   );
 }
 
+/// Read grants: a file or directory outside the scope, readable and nothing
+/// more.
+#[test]
+fn read_grants_open_single_paths_outside_the_scope() {
+  let work = TempDir::new("grant-work");
+  let other = TempDir::new("grant-other");
+  std::fs::write(other.path().join("shared.txt"), "shared").unwrap();
+  std::fs::write(other.path().join("private.txt"), "private").unwrap();
+  std::fs::create_dir_all(other.path().join("docs")).unwrap();
+  std::fs::write(other.path().join("docs/a.txt"), "doc").unwrap();
+  let shared = other.join("shared.txt");
+  let private = other.join("private.txt");
+  let file_grant = || {
+    Some(
+      FsAccess::within(work.path())
+        .unwrap()
+        .grant_read(&shared)
+        .unwrap(),
+    )
+  };
+  assert_eq!(
+    call_tool(&format!(r#""{shared}" | FS.Read"#), file_grant()),
+    Ok("shared".to_string())
+  );
+  // `..` out of the root reaches it too: the grant is checked on the
+  // resolved path.
+  let relative = format!(
+    "{}/{}",
+    "../".repeat(work.path().components().count()),
+    shared.trim_start_matches('/')
+  );
+  assert_eq!(
+    call_tool(&format!(r#""{relative}" | FS.Read"#), file_grant()),
+    Ok("shared".to_string())
+  );
+  let message = call_tool(&format!(r#""{private}" | FS.Read"#), file_grant()).unwrap_err();
+  assert!(
+    message.ends_with("outside the allowed directory"),
+    "{message}"
+  );
+  // Never a write, nor a change through the grant.
+  for script in [
+    format!(r#""{shared}" | FS.Write(contents: "x" overwrite: true)"#),
+    format!(r#""{shared}" | FS.Remove | ToString"#),
+    format!(
+      r#""{shared}" | FS.Rename(new-name: "{}")"#,
+      other.join("moved.txt")
+    ),
+  ] {
+    let message = call_tool(&script, file_grant()).unwrap_err();
+    assert!(
+      message.ends_with("outside the allowed directory"),
+      "{script}: {message}"
+    );
+  }
+  assert_eq!(std::fs::read_to_string(&shared).unwrap(), "shared");
+  // Copying out of a grant into the root reads the grant and writes the root.
+  assert_eq!(
+    call_tool(
+      &format!(r#""{shared}" | FS.Copy(destination: "copy.txt") | FS.Read"#),
+      file_grant()
+    ),
+    Ok("shared".to_string())
+  );
+
+  // A directory grant covers what is under it; denied access reads grants
+  // only.
+  let dir_grant = Some(
+    FsAccess::denied()
+      .grant_read(other.path().join("docs"))
+      .unwrap(),
+  );
+  assert_eq!(
+    call_tool(
+      &format!(r#""{}" | FS.Read"#, other.join("docs/a.txt")),
+      dir_grant.clone()
+    ),
+    Ok("doc".to_string())
+  );
+  assert_eq!(
+    call_tool(&format!(r#""{shared}" | FS.Read"#), dir_grant.clone()).unwrap_err(),
+    format!("FS.Read: {shared}: file access is denied")
+  );
+  assert_eq!(
+    call_tool(r#""docs/a.txt" | FS.Read"#, dir_grant).unwrap_err(),
+    "FS.Read: docs/a.txt: file access is denied"
+  );
+  // A grant must exist when it is made.
+  assert!(
+    FsAccess::denied()
+      .grant_read(other.path().join("missing"))
+      .is_err()
+  );
+}
+
 /// `call_tool` with no policy, in `working_dir`.
 fn call_tool_in(body: &str, working_dir: &str) -> Result<String, String> {
   call_tool_with(body, None, working_dir)

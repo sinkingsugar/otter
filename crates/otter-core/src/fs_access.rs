@@ -20,6 +20,13 @@
 //! is the race every path check has: a directory swapped for a link between
 //! the check and the operation. A host that runs untrusted scripts next to
 //! untrusted writers of the same tree needs an OS sandbox as well.
+//!
+//! **Read grants** ([`FsAccess::grant_read`]) open single files or
+//! directories outside the scope for reading only: a tool confined to its
+//! working directory may still read one database the host names. A path
+//! outside the scope is resolved through the filesystem in full (every
+//! symbolic link followed) and allowed for reading when the result is a
+//! granted file or lies under a granted directory. Writes never use a grant.
 
 use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
@@ -33,6 +40,8 @@ use crate::service::Services;
 pub struct FsAccess {
   scope: Scope,
   read_only: bool,
+  /// Canonical files and directories readable outside the scope.
+  read_grants: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +60,7 @@ impl FsAccess {
     FsAccess {
       scope: Scope::Unrestricted,
       read_only: false,
+      read_grants: Vec::new(),
     }
   }
 
@@ -67,6 +77,7 @@ impl FsAccess {
     Ok(FsAccess {
       scope: Scope::Within(root),
       read_only: false,
+      read_grants: Vec::new(),
     })
   }
 
@@ -75,6 +86,7 @@ impl FsAccess {
     FsAccess {
       scope: Scope::Denied,
       read_only: false,
+      read_grants: Vec::new(),
     }
   }
 
@@ -83,6 +95,25 @@ impl FsAccess {
   pub fn read_only(mut self) -> FsAccess {
     self.read_only = true;
     self
+  }
+
+  /// The same access, and `path` (an existing file or directory, resolved
+  /// here) readable even when it lies outside the scope: a file by its own
+  /// path, a directory with everything under it. For an access confined by
+  /// [`FsAccess::within`] or [`FsAccess::denied`]; reaching a grant needs an
+  /// absolute path (or one leading out of the root with `..`), since relative
+  /// paths resolve against the root. Never allows writing.
+  pub fn grant_read(mut self, path: impl AsRef<Path>) -> io::Result<FsAccess> {
+    let path = std::fs::canonicalize(path)?;
+    if !self.read_grants.contains(&path) {
+      self.read_grants.push(path);
+    }
+    Ok(self)
+  }
+
+  /// The files and directories [`FsAccess::grant_read`] made readable.
+  pub fn read_grants(&self) -> &[PathBuf] {
+    &self.read_grants
   }
 
   /// The directory paths are confined to, for [`FsAccess::within`].
@@ -107,9 +138,26 @@ impl FsAccess {
     }
     match &self.scope {
       Scope::Unrestricted => Ok(path.to_path_buf()),
-      Scope::Denied => Err(denied("file access is denied")),
+      Scope::Denied => {
+        if !write
+          && path.is_absolute()
+          && let Some(granted) = self.granted(&normalize(path))?
+        {
+          return Ok(granted);
+        }
+        Err(denied("file access is denied"))
+      }
       Scope::Within(root) => {
-        let resolved = resolve_within(root, path)?;
+        let resolved = match resolve_within(root, path) {
+          Ok(resolved) => resolved,
+          Err(e) if e.kind() == ErrorKind::PermissionDenied && !write => {
+            match self.granted(&normalize(&root.join(path)))? {
+              Some(granted) => return Ok(granted),
+              None => return Err(e),
+            }
+          }
+          Err(e) => return Err(e),
+        };
         // The root holds everything allowed: removing or replacing it
         // (`"." | FS.RemoveAll`) would take the whole scope.
         if write && resolved == *root {
@@ -128,6 +176,21 @@ impl FsAccess {
         .get_or_init(|| Arc::new(FsAccess::unrestricted()))
         .clone()
     })
+  }
+}
+
+impl FsAccess {
+  /// `normal` (absolute, normalized) resolved through the filesystem, when
+  /// that lands on a read grant.
+  fn granted(&self, normal: &Path) -> io::Result<Option<PathBuf>> {
+    if self.read_grants.is_empty() {
+      return Ok(None);
+    }
+    // Every link followed, the last component's included: what the OS
+    // opens is what is checked.
+    let full = canonical_prefix(normal)?;
+    let allowed = self.read_grants.iter().any(|grant| full.starts_with(grant));
+    Ok(allowed.then_some(full))
   }
 }
 

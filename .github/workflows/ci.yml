@@ -29,6 +29,14 @@ jobs:
       # Small builds: shard documentation prose compiled out, contract kept.
       - run: cargo test -p otter-core -p otter-io -p otter-text --no-default-features --test metadata --test catalog
       - run: cargo test -p otter-lang --no-default-features
+      - run: cargo test -p otter-sqlite --no-default-features
+      # The sqlite module builds for iOS (device and simulator): bundled
+      # SQLite compiled by the Apple toolchain.
+      - if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          cargo build -p otter-sqlite --target aarch64-apple-ios
+          cargo build -p otter-sqlite --target aarch64-apple-ios-sim
       # Release builds must run flows nested to the compose limit (compose still recurses).
       - run: cargo test --release -p otter-lang --test lang nesting_up_to_the_limit
       # As in 1.x, TLS is an explicit feature; make sure the rustls-ring build works.

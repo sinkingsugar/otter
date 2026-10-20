@@ -45,6 +45,8 @@ fn catalog() -> Catalog {
     otter_core::shards::CATALOG,
     otter_io::CATALOG,
     otter_text::CATALOG,
+    #[cfg(feature = "sqlite")]
+    otter_sqlite::CATALOG,
   ])
   .expect("catalog")
 }

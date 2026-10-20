@@ -47,6 +47,7 @@ bench/http-concurrency/run.sh path/to/1.x/shards                              # 
 - `crates/otter-core`: the runtime core: compose, the scheduler (`stackless/`: frame arena, engine, mesh), lifecycle helpers, and the prototype shards (`LeafShard`/`AsyncShard` implementations, plus control flow).
 - `crates/otter-io`: I/O shards (`Http.Get`) on a shared Tokio runtime, following 1.x's HTTP module. Native only; TLS via the `rustls-ring` or `native-tls` feature.
 - `crates/otter-text`: text shards that need third-party crates: regular expressions (`Regex.Match`, `Regex.Search`, `Regex.Replace`, on the Rust `regex` engine), hashes (`Hash.Sha2-256`, `Hash.Sha1`, `Hash.Md5`, `Hash.Blake2-128`/`-256`, `Hash.Blake3`, `Hash.XXH3-64`/`-128`), `UUID` and `NanoID`. Native and wasm.
+- `crates/otter-sqlite`: SQLite shards: `Db.Query`, read-only queries of existing databases (WAL and FTS5 included), with pooled read-only connections and paths through the host's `FsAccess`. Native only (desktop and iOS); bundled SQLite.
 - `crates/otter-lang`: the language frontend: parser, lowering to wire definitions with a source map, `check`/`run`, and host-driven `Session` execution with state-preserving reload of edited functions.
 - `crates/otter-cli`: the `otter` command: `cargo run -p otter-cli -- check --json file.otr`, `run`, `watch`, `describe`, `search`, `tool`. File watching and warm host sessions are covered in [the embedding guide](docs/embedding.md#5-warm-sessions-and-hot-reload), tools a host loads and calls in [its §6](docs/embedding.md#6-tools).
 

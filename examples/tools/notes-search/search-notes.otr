@@ -1,0 +1,61 @@
+// Full-text search over a SQLite notes database through its FTS5 index: a
+// tool a host loads at run time (otter_lang::Tool, docs/embedding.md §6),
+// reading the database with Db.Query (crates/otter-sqlite), read-only.
+//
+// The database holds `notes_fts`, an FTS5 table with `title` and `body`
+// columns (README.md). Its path is the host's setting `env.database`,
+// relative to the working directory, or `notes.db` there. A database
+// outside the working directory needs the host's read grant
+// (FsAccess::grant_read); the call is confined to its working directory
+// otherwise.
+
+@fn(StringOr input: Any output: String params: {default: String} {
+  If({IsString} {ExpectString} {default})
+})
+@fn(IntOr input: Any output: Int params: {default: Int} {
+  If({IsInt} {ExpectInt} {default})
+})
+
+@fn(SearchNotes input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input = args
+  input.env = env
+  args.query | StringOr(default: "") = query
+  query | Is("") | When({Is(true)} {"query is required" | Fail})
+  args.limit | IntOr(default: 10) | Max(1) | Min(50) = limit
+  env.database | StringOr(default: "notes.db") = database
+
+  {q: query n: limit} | Db.Query(
+    "SELECT title, snippet(notes_fts, 1, '[', ']', '...', 12) AS hit FROM notes_fts WHERE notes_fts MATCH :q ORDER BY rank LIMIT :n"
+    database
+    max-rows: 50
+  ) = rows
+
+  rows | Count = found
+  [] | Var(lines)
+  found | If({Is(0)} {f"No notes match {query}.\n"} {f"{found} note(s) match {query}:\n"}) | Push(lines)
+  0 | Var(i)
+  Repeat({
+    rows | Take(i) = row
+    Inc(i)
+    row.title | StringOr(default: "(untitled)") = title
+    row.hit | StringOr(default: "") = hit
+    f"{i}. {title}: {hit}\n" | Push(lines)
+  } times: found)
+  lines | String.Join
+})
+
+{
+  definition: {
+    name: "search_notes"
+    description: "Searches the notes database by full text (SQLite FTS5) and lists the best matches with a snippet, matched words in [brackets]."
+    parameters: {
+      type: "object"
+      properties: {
+        query: {type: "string" description: "FTS5 query: words (all must match), \"exact phrases\", OR, NOT, prefix*"}
+        limit: {type: "integer" description: "At most this many notes (1 to 50, default 10)"}
+      }
+      required: ["query"]
+    }
+  }
+  use: "SearchNotes"
+}
