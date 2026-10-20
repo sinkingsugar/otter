@@ -412,6 +412,111 @@ fn every_extension_checks_runs_and_includes_the_others() {
   assert!(err.contains("ext-bad.otter:1:"), "{err}");
 }
 
+/// `Db.Query` from the command line, and the FTS5 example tool
+/// (examples/tools/notes-search), on a WAL database another connection
+/// holds open and writes.
+#[cfg(feature = "sqlite")]
+mod sqlite {
+  use std::process::Command;
+
+  fn notes_db(dir: &std::path::Path) -> rusqlite::Connection {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("notes.db");
+    let _ = std::fs::remove_file(&path);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let mode: String = conn
+      .pragma_update_and_check(None, "journal_mode", "wal", |r| r.get(0))
+      .unwrap();
+    assert_eq!(mode, "wal");
+    conn
+      .execute_batch(
+        "CREATE VIRTUAL TABLE notes_fts USING fts5(title, body);
+         INSERT INTO notes_fts VALUES ('Trip to Kyoto', 'We booked the ryokan near the station.');
+         INSERT INTO notes_fts VALUES ('Groceries', 'Milk, eggs and green tea.');
+         INSERT INTO notes_fts VALUES ('Kyoto again', 'Temples in the rain, then more green tea.');",
+      )
+      .unwrap();
+    conn
+  }
+
+  fn otter_in(dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_otter"))
+      .args(args)
+      .current_dir(dir)
+      .output()
+      .unwrap();
+    (
+      out.status.code().unwrap_or(-1),
+      String::from_utf8_lossy(&out.stdout).into_owned(),
+      String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+  }
+
+  fn dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("otter-cli-{}-{name}", std::process::id()))
+  }
+
+  #[test]
+  fn run_reads_an_fts5_match_from_a_wal_database() {
+    let dir = dir("sqlite-run");
+    let writer = notes_db(&dir);
+    // A write in progress: the query sees the last commit.
+    writer
+      .execute_batch("BEGIN IMMEDIATE; INSERT INTO notes_fts VALUES ('Draft', 'green tea draft');")
+      .unwrap();
+    std::fs::write(
+      dir.join("search.otr"),
+      r#"["green tea"] | Db.Query("SELECT title FROM notes_fts WHERE notes_fts MATCH ? ORDER BY title" "notes.db") = rows
+rows | Count | Log("matches")
+rows.0.title | ExpectString | Log("first")
+"#,
+    )
+    .unwrap();
+    let (code, out, err) = otter_in(&dir, &["run", "search.otr"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("matches: 2"), "{out}");
+    assert!(out.contains("first: Groceries"), "{out}");
+    writer.execute_batch("COMMIT").unwrap();
+    let (code, out, err) = otter_in(&dir, &["run", "search.otr"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains("matches: 3"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn the_notes_search_tool_finds_matches() {
+    let dir = dir("sqlite-tool");
+    let _writer = notes_db(&dir);
+    let tool = format!(
+      "{}/../../examples/tools/notes-search/search-notes.otr",
+      env!("CARGO_MANIFEST_DIR")
+    );
+    let (code, out, err) = otter_in(&dir, &["tool", &tool]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with(r#"{"name":"search_notes","#), "{out}");
+    assert!(out.contains(r#""required":["query"]"#), "{out}");
+
+    let (code, out, err) = otter_in(&dir, &["tool", &tool, r#"{"query": "green tea"}"#]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("2 note(s) match green tea:\n"), "{out}");
+    assert!(
+      out.contains("Groceries: Milk, eggs and [green] [tea]."),
+      "{out}"
+    );
+    assert!(out.contains("Kyoto again: "), "{out}");
+
+    let (code, out, err) = otter_in(&dir, &["tool", &tool, r#"{"query": "kyoto", "limit": 1}"#]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.starts_with("1 note(s) match kyoto:\n"), "{out}");
+    let (code, out, _) = otter_in(&dir, &["tool", &tool, r#"{"query": "sushi"}"#]);
+    assert_eq!((code, out.as_str()), (0, "No notes match sushi.\n"));
+    let (code, _, err) = otter_in(&dir, &["tool", &tool, "{}"]);
+    assert_eq!(code, 1);
+    assert!(err.contains("query is required"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+}
+
 #[test]
 fn tools_load_from_every_extension() {
   for ext in ["otr", "otter", "shs"] {
