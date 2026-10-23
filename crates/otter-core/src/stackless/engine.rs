@@ -15,7 +15,6 @@ use crate::shard::{ActivationCtx, CompiledNode, ControlStep, CustomControl, Step
 use crate::shards::control::{
   Condition, ConditionsCompiled, IfCompiled, MatchCompiled, RunCompiled,
 };
-use crate::shards::iterate::LoopCompiled;
 use crate::shards::{Predicated, RepeatCompiled};
 
 /// Immutable builtin control descriptions. Children are borrowed only during
@@ -44,9 +43,6 @@ pub enum Control<'a> {
   /// reference (to the node's box), so `Control` stays two words.
   #[allow(clippy::borrowed_box)]
   Custom(&'a Box<dyn CustomControl>),
-  /// `ForEach`, `Map`, `Filter`, `Reduce`: lowered to flat code at
-  /// compose, like `Repeat`.
-  Loop(&'a LoopCompiled),
 }
 
 impl Control<'_> {
@@ -56,7 +52,7 @@ impl Control<'_> {
       Self::Custom(c) => c.flows().len(),
       Self::Sub(_) | Self::Once(_) => 1,
       // Lowered to flat code at compose: never a node, never framed.
-      Self::When(_) | Self::While(_) | Self::Repeat(_) | Self::If(_) | Self::Loop(_) => 0,
+      Self::When(_) | Self::While(_) | Self::Repeat(_) | Self::If(_) => 0,
       Self::Match(c) => c.flows.len(),
       Self::Conditions(c) => c.flows.len(),
     }
@@ -101,11 +97,7 @@ fn child_flow<'a>(control: &Control<'a>, i: usize) -> &'a CompiledFlow {
     },
     Control::Run(_) => unreachable!("Run's frame runs a call's block"),
     Control::Custom(c) => &c.flows()[i],
-    Control::When(_)
-    | Control::While(_)
-    | Control::Repeat(_)
-    | Control::If(_)
-    | Control::Loop(_) => {
+    Control::When(_) | Control::While(_) | Control::Repeat(_) | Control::If(_) => {
       unreachable!("lowered to flat code at compose")
     }
   }
@@ -1918,11 +1910,7 @@ fn dispatch_once(
         enter(c, 0, 1)
       }
     }
-    Control::When(_)
-    | Control::While(_)
-    | Control::If(_)
-    | Control::Repeat(_)
-    | Control::Loop(_) => {
+    Control::When(_) | Control::While(_) | Control::If(_) | Control::Repeat(_) => {
       unreachable!("lowered to flat code at compose")
     }
     Control::Run(r) => match value {

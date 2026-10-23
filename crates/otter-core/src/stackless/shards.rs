@@ -324,6 +324,37 @@ macro_rules! composite {
     }
   };
 }
+/// `ForEach`, `Map`, `Filter`, `Reduce`: always lowered to flat code by
+/// compose (`ComposeCtx::flatten_loop`), through `Shard::iteration`.
+macro_rules! iteration {
+  ($name:ident, $desc:ident, $kind:ident) => {
+    pub struct $name;
+    impl Shard for $name {
+      type Compiled = iterate::LoopCompiled;
+      type State = ();
+      const NAME: &'static str = iterate::$desc.name;
+      const VERSION: u32 = iterate::$desc.version;
+      fn compose(args: &Args, ctx: Ctx) -> Result<Composed<Self::Compiled>> {
+        iterate::compose_loop(args, ctx, iterate::LoopKind::$kind)
+      }
+      fn instantiate(_: &Self::Compiled, _: &mut InstanceCtx) -> Result<()> {
+        Ok(())
+      }
+      fn iteration(c: &Self::Compiled) -> Option<&iterate::LoopCompiled> {
+        Some(c)
+      }
+      fn activate(
+        _: &Self::Compiled,
+        _: &mut (),
+        _: &mut ActivationCtx<'_>,
+        _: &Var,
+      ) -> Result<Step> {
+        unreachable!("lowered to flat code at compose")
+      }
+    }
+  };
+}
+
 // `When`, `While` and `Repeat` are lowered to flat code by compose
 // (`ComposeCtx::flatten`); their descriptions here compose the children.
 composite!(When, Predicated, WHEN_DESC, compose_when, When);
@@ -331,34 +362,10 @@ composite!(While, Predicated, WHILE_DESC, compose_while, While);
 composite!(Sub, CompiledFlow, SUB_DESC, compose_sub, Sub);
 composite!(Once, CompiledFlow, ONCE_DESC, compose_once, Once);
 composite!(Repeat, RepeatCompiled, REPEAT_DESC, compose_repeat, Repeat);
-composite!(
-  ForEach,
-  iterate::LoopCompiled,
-  iterate::FOR_EACH_DESC,
-  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::ForEach),
-  Loop
-);
-composite!(
-  Map,
-  iterate::LoopCompiled,
-  iterate::MAP_DESC,
-  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::Map),
-  Loop
-);
-composite!(
-  Filter,
-  iterate::LoopCompiled,
-  iterate::FILTER_DESC,
-  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::Filter),
-  Loop
-);
-composite!(
-  Reduce,
-  iterate::LoopCompiled,
-  iterate::REDUCE_DESC,
-  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::Reduce),
-  Loop
-);
+iteration!(ForEach, FOR_EACH_DESC, ForEach);
+iteration!(Map, MAP_DESC, Map);
+iteration!(Filter, FILTER_DESC, Filter);
+iteration!(Reduce, REDUCE_DESC, Reduce);
 composite!(
   If,
   control::IfCompiled,

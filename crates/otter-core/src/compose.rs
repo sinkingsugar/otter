@@ -1157,7 +1157,14 @@ impl ComposeCtx<'_> {
   fn flatten(&mut self, node: &Arc<dyn CompiledNode>, input: Type, flat: &mut Flat) -> bool {
     use crate::inline::Op;
     let Some(control) = node.control() else {
-      return false;
+      // The iteration shards, which have no `Control` of their own.
+      return match node.iteration() {
+        Some(l) => {
+          self.flatten_loop(l, flat);
+          true
+        }
+        None => false,
+      };
     };
     match control {
       Control::When(p) | Control::While(p) => {
@@ -1328,7 +1335,6 @@ impl ComposeCtx<'_> {
         flat_branches(flat, i, saved, input);
         flat.release(saved, input);
       }
-      Control::Loop(l) => self.flatten_loop(l, flat),
       _ => return false,
     }
     true

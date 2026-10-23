@@ -282,6 +282,14 @@ pub trait Shard: 'static {
     None
   }
 
+  /// An iteration shard (`ForEach`, `Map`, `Filter`, `Reduce`), which
+  /// compose always lowers to flat code. Not a `Control` variant: the
+  /// engine never sees one, and a variant more moved its dispatch.
+  #[doc(hidden)]
+  fn iteration(_compiled: &Self::Compiled) -> Option<&crate::shards::iterate::LoopCompiled> {
+    None
+  }
+
   /// Starts an activation, or continues one that returned [`Step::Suspend`].
   /// A directly suspending leaf keeps its pending operation in `state` and
   /// resets it on completion/error. Builtin composites instead expose their
@@ -485,6 +493,10 @@ pub trait CompiledNode: Send + Sync {
   fn inline(&self) -> Option<crate::inline::InlineOp> {
     None
   }
+  #[doc(hidden)]
+  fn iteration(&self) -> Option<&crate::shards::iterate::LoopCompiled> {
+    None
+  }
 
   fn name(&self) -> &'static str;
   /// The shard's declared lifetime: a `Stateless` node's state is not
@@ -508,6 +520,10 @@ impl<S: Shard> CompiledNode for Node<S> {
 
   fn inline(&self) -> Option<crate::inline::InlineOp> {
     S::inline(&self.0)
+  }
+
+  fn iteration(&self) -> Option<&crate::shards::iterate::LoopCompiled> {
+    S::iteration(&self.0)
   }
 
   fn name(&self) -> &'static str {
