@@ -266,22 +266,9 @@ impl<'a> Lexer<'a> {
         ));
         None
       }
-      b'.' if next.is_some_and(|n| n.is_ascii_digit()) => {
-        self.pos += 1;
-        while self.peek(0).is_some_and(|c| c.is_ascii_digit()) {
-          self.pos += 1;
-        }
-        let digits = self.text[start + 1..self.pos].to_string();
-        self.problems.push(
-          Problem::syntax(
-            Span::new(start, self.pos),
-            "number-form",
-            format!("a number cannot start with `.`: write 0.{digits}"),
-          )
-          .fix(format!("0.{digits}")),
-        );
-        None
-      }
+      // `.5` is a path step reading index 5 of the pipeline value; where a
+      // value is expected the parser reports it as a misspelled `0.5`
+      // (`Parser::element`).
       b'.' => single(self, Tok::Dot),
       b'"' => self.string(start),
       b'f' if next == Some(b'"') => self.fstring(start),
@@ -756,7 +743,9 @@ mod tests {
     assert_eq!(p.code, "semicolon");
     assert_eq!(p.span, Span::new(12, 13));
     assert_eq!(first_problem("1. | Log").fix.as_deref(), Some("1.0"));
-    assert_eq!(first_problem(".5").fix.as_deref(), Some("0.5"));
+    // `.5` lexes as a path step; the parser reports it where a value is
+    // expected (`lang.rs`).
+    assert_eq!(toks(".5"), [Tok::Dot, Tok::Int(5), Tok::Eof]);
     assert_eq!(first_problem("~5").code, "number-form");
     assert_eq!(first_problem("2x").code, "number-form");
     assert_eq!(first_problem("\"a\\qb\"").code, "string-escape");

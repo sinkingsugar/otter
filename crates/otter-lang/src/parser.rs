@@ -368,6 +368,7 @@ impl<'a> Parser<'a> {
           }
         }
       }
+      Tok::Dot => self.step_path(start)?,
       Tok::Int(i) => {
         self.bump();
         BlockKind::Literal(Literal::Int(i))
@@ -478,7 +479,91 @@ impl<'a> Parser<'a> {
       ));
       return None;
     }
+    if matches!(self.peek().tok, Tok::Dot) {
+      self.path_in_value();
+      return None;
+    }
     self.pipe()
+  }
+
+  /// A path step (`.key`, `.0.key`) reading the step's input; `start` is
+  /// the `.`. Out of line: rare, and kept out of `block_inner`.
+  #[inline(never)]
+  fn step_path(&mut self, start: Span) -> Option<BlockKind> {
+    // A path step: `.key`, `.0.key`, reading the step's input.
+    self.bump();
+    let k = self.peek().clone();
+    let key = match k.tok {
+      Tok::Ident(ref s) | Tok::Upper(ref s) if !k.spaced => PathKey::Key(s.clone()),
+      Tok::Int(i) if !k.spaced && i >= 0 => PathKey::Index(i),
+      _ => {
+        self.problem(
+          Problem::syntax(
+            start,
+            "path",
+            "`.` starting a step must be followed by a key or an index (`.key`, `.0`)".into(),
+          )
+          .help(
+            "a path step reads the pipeline value: `x | .a.b` is `x | Take(\"a\") | Take(\"b\")`",
+          ),
+        );
+        return None;
+      }
+    };
+    self.bump();
+    let mut path = vec![Spanned {
+      node: key,
+      span: k.span,
+    }];
+    path.extend(self.path());
+    Some(BlockKind::Path(path))
+  }
+
+  /// A path step where a value is expected: `.5` is a misspelled 0.5, a
+  /// path has no pipeline input there. Reports it and skips the pipe.
+  #[cold]
+  #[inline(never)]
+  fn path_in_value(&mut self) {
+    // A path step reads the pipeline input, and a value has none here.
+    let dot = self.peek().clone();
+    let next = self.peek_at(1).clone();
+    if let Tok::Int(_) = next.tok
+      && !next.spaced
+    {
+      // `.5`: a float written without its leading zero.
+      let span = dot.span.to(next.span);
+      let digits = &self.source.text[next.span.start..next.span.end];
+      let fix = format!("0.{digits}");
+      self.problem(
+        Problem::syntax(
+          span,
+          "number-form",
+          format!("a number cannot start with `.`: write {fix}"),
+        )
+        .fix(fix),
+      );
+      self.bump();
+      self.bump();
+      return;
+    }
+    let Some(block) = self.block() else {
+      return;
+    };
+    self.problem(
+      Problem::syntax(
+        block.span,
+        "path-in-value",
+        "a path step cannot stand for a value here: it has no pipeline input".into(),
+      )
+      .help("a path step reads the pipeline input; bind it first or use a variable path"),
+    );
+    // The rest of the pipe still parses (and reports its problems).
+    while self.at(&Tok::Pipe) {
+      self.bump();
+      if self.block().is_none() {
+        return;
+      }
+    }
   }
 
   fn nested_statements(&mut self, closer: Tok, what: &str, open: Span) -> (Vec<Statement>, Span) {
@@ -510,6 +595,7 @@ impl<'a> Parser<'a> {
   }
 
   /// `.key` / `.0` segments directly after a variable name.
+  #[inline(always)]
   fn path(&mut self) -> Vec<Spanned<PathKey>> {
     let mut path = Vec::new();
     while self.at(&Tok::Dot) && !self.peek().spaced {

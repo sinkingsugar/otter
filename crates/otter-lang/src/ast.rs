@@ -61,6 +61,8 @@ pub enum BlockKind {
     name: Name,
     path: Vec<Spanned<PathKey>>,
   },
+  /// `.key`, `.0.key`: a path on the step's input (the pipeline value).
+  Path(Vec<Spanned<PathKey>>),
   Seq(Vec<Pipe>),
   Table(Vec<(Spanned<TableKey>, Pipe)>),
   /// `{}`: an empty flow where a flow is expected, else an empty table.

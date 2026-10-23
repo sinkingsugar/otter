@@ -1413,6 +1413,8 @@ impl Lowerer<'_> {
         );
         self.take_path(out, prefix, path);
       }
+      // `.a.b`: the same Takes on the step's input.
+      BlockKind::Path(path) => self.take_path(out, prefix, path),
       // `(a | b)` in a flow runs in place.
       BlockKind::Expr(stmts) => self.statements_into(out, stmts.iter(), prefix),
       BlockKind::Func { name, params: None } => {

@@ -1516,6 +1516,55 @@ fn uppercase_path_keys_stay_one_segment() {
   assert_eq!(completed(&report, "root"), Var::Int(1));
 }
 
+/// A path as a step reads the pipeline value (docs/iteration-and-access.md §1).
+#[test]
+fn step_paths_read_the_pipeline_value() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let report = run(
+    "{a: [10 20] b: {c: \"deep\" Key: 3}} = t
+t | .a.1 = second
+t | .b | .c = deep
+// As a statement, a flow's first step and in a predicate.
+t
+.b.Key = upper
+{ok: true} | If({.ok} {1} {2}) = picked
+[{n: 7}] | Take(0) | .n = n
+[second deep upper picked n]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::Int(20),
+      Var::string("deep"),
+      Var::Int(3),
+      Var::Int(1),
+      Var::Int(7)
+    ])
+  );
+  // A fixed table's unknown key is a compose error at the segment.
+  let report = check("{name: 1 count: 2} | .cuont");
+  let d = &report.diagnostics[0];
+  assert_eq!((d.code, at(d)), ("unknown-key", (1, 23)));
+  assert_eq!(d.did_you_mean, ["count"]);
+  // `.5` in step position is a path; the types catch a float meant there.
+  let report = check("1 .5");
+  assert_eq!(report.diagnostics[0].code, "input-type-mismatch");
+  // Where a value is expected, `.5` stays a misspelled 0.5.
+  for text in ["1 | Add(.5)", "[.5]", "{a: .5}"] {
+    let d = load_errors(text);
+    assert_eq!(d[0].code, "number-form", "{text}");
+    assert!(d[0].message.contains("write 0.5"), "{text}");
+  }
+  // An argument has no pipeline input.
+  let d = load_errors("{a: 1} | Add(.a)");
+  assert_eq!((d[0].code, at(&d[0])), ("path-in-value", (1, 14)));
+  assert!(d[0].message.contains("bind it first"), "{}", d[0].message);
+  // A `.` with nothing after it.
+  let d = load_errors("{a: 1} | . a");
+  assert_eq!((d[0].code, at(&d[0])), ("path", (1, 10)));
+}
+
 #[test]
 fn unknown_dashed_names_explain_the_dash() {
   let report = check("5 = x\nx-1");
