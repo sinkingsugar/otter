@@ -146,7 +146,7 @@ The surveys' working files are not part of this repository; the numbers above ar
 
 ### H12. Language additions
 
-- **Iteration.** `$0` is removed and there is no shipped `ForEach`, `Map`, `Filter` or `Reduce`; today users write them as functions with flow parameters. They are among the most common operations in real scripts (230 `ForEach` sites). Proposal: core shards with an explicitly named element binding, flattened into the VM like `Repeat`. The binding syntax is the decision.
+- **Iteration.** `$0` is removed and there is no shipped `ForEach`, `Map`, `Filter` or `Reduce`; today users write them as functions with flow parameters. They are among the most common operations in real scripts (230 `ForEach` sites). Proposal: core shards with an explicitly named element binding, flattened into the VM like `Repeat`. The binding syntax is the decision. **Decision (2026-10-23):** `seq | ForEach(x i {...})`, names positional and optional, value first (`tbl | ForEach(v k {...})`), the body's input the element; with paths on the pipeline value (`| .a.b`), dynamic and lenient (`?`) paths, and destructuring (`= {a b}`, `= [a _ c]`) in the same milestone. Contract: [iteration-and-access.md](iteration-and-access.md).
 - **Macros.** `@define` and `@template` (383 sites) map to constants, functions, flow parameters, and M10 macros for the rest. Real hosts are a good source of M10's cases.
 - **Constructors** for vectors and colors (`@f3`, `@i2`, `@color`): small frontend work.
 - **`@include` options** (`Once: true` at almost every site): accept and ignore `once`, or report it with a fix-it, since 2.0 always includes once.

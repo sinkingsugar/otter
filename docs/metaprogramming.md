@@ -22,7 +22,7 @@ Reading rule: **`#( )` and `@` happen at compose time; nothing else does.** `@fn
 
 The surface is already reserved by the frontend: the parser accepts `#( ... )` (lowering reports "evaluation while loading is not supported yet") and `@Name(...)` (lowering reports "templates and builtins are not supported yet"), and the lexer reads `$name` as an identifier. These milestones give those forms their meaning; check the current lexer and lowering before adding new tokens.
 
-`$` followed by a digit (`$0`, `$1`) and `$i` are 1.x's implicit loop variables of `ForEach` and `Map`. 2.0 does not port them (they shadow each other in nested loops, and nothing declares them): a sequence's element is the block's input, a table's entries arrive as `{key value}`, and an index comes from `Seq.Enumerate`, which yields `{index value}`. From M8 on, `$<digit>` is a lexer error with help saying the element is the block's input; models trained on 1.x will write it. `$<letter>` keeps its current meaning until M10 (§4.3).
+`$` followed by a digit (`$0`, `$1`) and `$i` are 1.x's implicit loop variables of `ForEach` and `Map`. 2.0 does not port them (they shadow each other in nested loops, and nothing declares them): loops name what they bind, value first, `seq | ForEach(x i {...})` and `tbl | ForEach(v k {...})`, and the body's input is the element ([iteration-and-access.md §4](iteration-and-access.md#4-iteration), which supersedes the earlier `{key value}` entries and `Seq.Enumerate`). From M8 on, `$<digit>` is a lexer error with help saying the element is the block's input; models trained on 1.x will write it. `$<letter>` keeps its current meaning until M10 (§4.3).
 
 ## 2. M8: compose-time evaluation
 
