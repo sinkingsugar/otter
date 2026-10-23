@@ -1654,6 +1654,57 @@ j.data.n? = present
   );
 }
 
+/// `= {a b: x}` and `= [a _ c]` (docs/iteration-and-access.md §3).
+#[test]
+fn destructuring_binds_several_names() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let report = run(
+    "{title: \"t\" hit: \"h\" n: 3} = {title hit: snippet} | .n = n
+[10 20 30 40] = [_ code _ name] = [first]
+\"{\\\"a\\\": 1}\" | FromJson = {a missing}
+[title snippet n code name first a missing]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::string("t"),
+      Var::string("h"),
+      Var::Int(3),
+      Var::Int(20),
+      Var::Int(40),
+      Var::Int(10),
+      Var::Int(1),
+      Var::None
+    ])
+  );
+  // The names follow the binding rules.
+  let report = check("{a: 1 b: 2} = {a b}\n{a: 3} = {a}");
+  assert_eq!(report.diagnostics[0].code, "duplicate-binding");
+  // A fixed table's unknown key is a compose error at the field.
+  let report = check("{a: 1 b: 2} = {a c}");
+  let d = &report.diagnostics[0];
+  assert_eq!((d.code, at(d)), ("unknown-key", (1, 18)));
+  // A sequence too short fails at activation, at the element.
+  let report = run(
+    "@wire(w { [1 2] = [a b c] })\n@mesh(m) @schedule(m w) @run(m)",
+    &no_defines(),
+  );
+  match report.outcomes.iter().find(|(w, _)| w == "w") {
+    Some((_, Some(Outcome::Failed(e)))) => assert!(e.to_string().contains("out of range"), "{e}"),
+    other => panic!("{other:?}"),
+  }
+  // Flat patterns only; `_` only in a sequence pattern.
+  let d = load_errors("{a: [1 2]} = {a: [x y]}");
+  assert_eq!((d[0].code, at(&d[0])), ("nested-pattern", (1, 18)));
+  assert!(d[0].message.contains("two steps"), "{}", d[0].message);
+  assert_eq!(load_errors("{a: 1} = {_}")[0].code, "pattern");
+  assert_eq!(load_errors("[1] = []")[0].code, "pattern");
+  assert_eq!(load_errors("[1] = [_]")[0].code, "pattern");
+  assert_eq!(load_errors("[1] = [a")[0].code, "unclosed");
+  assert_eq!(load_errors("_")[0].code, "expected-value");
+}
+
 #[test]
 fn unknown_dashed_names_explain_the_dash() {
   let report = check("5 = x\nx-1");

@@ -218,6 +218,7 @@ impl<'a> Parser<'a> {
       self.bump();
       let v = self.peek().clone();
       return match v.tok {
+        Tok::LBrace | Tok::LBracket => self.pattern(t.span),
         Tok::Ident(name) => {
           self.bump();
           if self.at(&Tok::Pipe) {
@@ -253,6 +254,184 @@ impl<'a> Parser<'a> {
       self.bump();
     }
     self.pipe().map(Statement::Pipeline)
+  }
+
+  /// `= {a b: x}` or `= [a _ c]` (`=` consumed): a flat pattern.
+  #[inline(never)]
+  fn pattern(&mut self, op_span: Span) -> Option<Statement> {
+    let open = self.bump();
+    let table = open.tok == Tok::LBrace;
+    let closer = if table { Tok::RBrace } else { Tok::RBracket };
+    let mut fields = Vec::new();
+    let mut elements = Vec::new();
+    let mut ok = true;
+    let end = loop {
+      let t = self.peek().clone();
+      if t.tok == closer {
+        self.bump();
+        break t.span.end;
+      }
+      if t.tok == Tok::Eof || Self::is_closer(&t.tok) {
+        self.problem(Problem::syntax(
+          open.span,
+          "unclosed",
+          format!(
+            "missing {} for the pattern opened at {}",
+            closer.describe(),
+            self.position(open.span)
+          ),
+        ));
+        return None;
+      }
+      if matches!(t.tok, Tok::LBrace | Tok::LBracket) {
+        ok = false;
+        self.nested_pattern(t.span);
+        continue;
+      }
+      self.bump();
+      let name = |tok: &Tok| match tok {
+        Tok::Ident(n) => Some(n.clone()),
+        _ => None,
+      };
+      if table {
+        let key = match &t.tok {
+          Tok::Ident(k) | Tok::Upper(k) | Tok::Str(k) => k.clone(),
+          other => {
+            ok = false;
+            self.problem(Problem::syntax(
+              t.span,
+              "pattern",
+              format!(
+                "expected a field name in the pattern (`{{a b: x}}`), found {}",
+                other.describe()
+              ),
+            ));
+            continue;
+          }
+        };
+        let key = Spanned {
+          node: key,
+          span: t.span,
+        };
+        if self.at(&Tok::Colon) {
+          self.bump();
+          let b = self.peek().clone();
+          if matches!(b.tok, Tok::LBrace | Tok::LBracket) {
+            ok = false;
+            self.nested_pattern(b.span);
+            continue;
+          }
+          match name(&b.tok) {
+            Some(n) => {
+              self.bump();
+              fields.push((
+                key,
+                Spanned {
+                  node: n,
+                  span: b.span,
+                },
+              ));
+            }
+            None => {
+              ok = false;
+              self.problem(Problem::syntax(
+                b.span,
+                "pattern",
+                format!(
+                  "`{}:` in a pattern must be followed by the name it binds, found {}",
+                  key.node,
+                  b.tok.describe()
+                ),
+              ));
+            }
+          }
+        } else if let Some(n) = name(&t.tok) {
+          fields.push((
+            key,
+            Spanned {
+              node: n,
+              span: t.span,
+            },
+          ));
+        } else {
+          ok = false;
+          self.problem(Problem::syntax(
+            t.span,
+            "pattern",
+            format!(
+              "`{}` is not a name to bind: write `{}: name`",
+              key.node,
+              t.tok.describe().trim_matches('`')
+            ),
+          ));
+        }
+      } else {
+        match &t.tok {
+          Tok::Ident(n) => elements.push(Some(Spanned {
+            node: n.clone(),
+            span: t.span,
+          })),
+          Tok::Underscore => elements.push(None),
+          other => {
+            ok = false;
+            self.problem(Problem::syntax(
+              t.span,
+              "pattern",
+              format!(
+                "expected a name or `_` in the pattern (`[a _ c]`), found {}",
+                other.describe()
+              ),
+            ));
+          }
+        }
+      }
+    };
+    let span = open.span.to(Span::new(end, end));
+    if self.at(&Tok::Pipe) {
+      self.bump();
+    }
+    if ok && fields.is_empty() && elements.iter().all(Option::is_none) {
+      self.problem(Problem::syntax(
+        span,
+        "pattern",
+        "a pattern binds at least one name".into(),
+      ));
+      return None;
+    }
+    ok.then(|| Statement::Destructure {
+      op_span,
+      pattern: Box::new(Spanned {
+        node: if table {
+          Pattern::Table(fields)
+        } else {
+          Pattern::Seq(elements)
+        },
+        span,
+      }),
+    })
+  }
+
+  /// A pattern inside a pattern: reported, and skipped to its closer.
+  #[cold]
+  fn nested_pattern(&mut self, at: Span) {
+    self.problem(
+      Problem::syntax(at, "nested-pattern", "patterns do not nest".into())
+        .help("bind in two steps: `= {a: inner}`, then `inner = [x y]`"),
+    );
+    let mut depth = 0usize;
+    loop {
+      match self.bump().tok {
+        Tok::LBrace | Tok::LBracket => depth += 1,
+        Tok::RBrace | Tok::RBracket => {
+          depth -= 1;
+          if depth == 0 {
+            return;
+          }
+        }
+        Tok::Eof => return,
+        _ => {}
+      }
+    }
   }
 
   /// `Block (| Block)*`.

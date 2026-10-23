@@ -49,6 +49,8 @@ pub enum Tok {
   Dot,
   Assign(AssignOp),
   Eof,
+  /// `_` alone: skips a name in a `[...]` pattern or a loop's names.
+  Underscore,
 }
 
 impl Tok {
@@ -74,6 +76,7 @@ impl Tok {
       Tok::Dot => "`.`".into(),
       Tok::Assign(op) => format!("`{}`", op.text()),
       Tok::Eof => "the end of the source".into(),
+      Tok::Underscore => "`_`".into(),
     }
   }
 }
@@ -365,6 +368,7 @@ impl<'a> Lexer<'a> {
       }
       b'A'..=b'Z' => Some(self.upper(start)),
       b'_' if next.is_some_and(|n| n.is_ascii_uppercase()) => Some(self.upper(start)),
+      b'_' if !next.is_some_and(is_ident_continue) => single(self, Tok::Underscore),
       _ => {
         let c = self.text[start..].chars().next().unwrap_or('?');
         self.pos += c.len_utf8();

@@ -522,6 +522,7 @@ fn is_default(params: Option<&Params>) -> bool {
 fn statement_span(stmt: &Statement) -> Span {
   match stmt {
     Statement::Assign { op_span, var, .. } => op_span.to(var.span),
+    Statement::Destructure { op_span, pattern } => op_span.to(pattern.span),
     Statement::Pipeline(p) => p.span,
   }
 }
@@ -1364,6 +1365,9 @@ impl Lowerer<'_> {
             ShardDef::with_args(&BIND, vec![Arg::pos(ParamValue::Var(var.node.clone()))]),
           );
         }
+        Statement::Destructure { op_span, pattern } => {
+          self.destructure(out, prefix, op_span.to(pattern.span), &pattern.node)
+        }
         Statement::Pipeline(pipe) => {
           for block in &pipe.blocks {
             self.block(out, prefix, block);
@@ -1371,6 +1375,43 @@ impl Lowerer<'_> {
         }
       }
     }
+  }
+
+  /// `= {a b: x}`, `= [a _ c]`: the input bound to a temporary once, then
+  /// one path read and binding per name, then the input again (it passes
+  /// through), as writing it out would cost (docs/iteration-and-access.md
+  /// §3).
+  fn destructure(
+    &mut self,
+    out: &mut Vec<ShardDef>,
+    prefix: &[PathStep],
+    span: Span,
+    pattern: &Pattern,
+  ) {
+    let temp = self.temp();
+    let bind =
+      |name: &str| ShardDef::with_args(&BIND, vec![Arg::pos(ParamValue::Var(name.to_string()))]);
+    let get =
+      |name: &str| ShardDef::with_args(&GET, vec![Arg::pos(ParamValue::Var(name.to_string()))]);
+    let take = |key: Var| ShardDef::with_args(&TAKE, vec![Arg::pos(ParamValue::Value(key))]);
+    self.emit(out, prefix, span, bind(&temp));
+    let reads: Vec<(Var, &Name, Span)> = match pattern {
+      Pattern::Table(fields) => fields
+        .iter()
+        .map(|(key, name)| (Var::string(&key.node), name, key.span.to(name.span)))
+        .collect(),
+      Pattern::Seq(elements) => elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, name)| name.as_ref().map(|n| (Var::Int(i as i64), n, n.span)))
+        .collect(),
+    };
+    for (key, name, at) in reads {
+      self.emit(out, prefix, at, get(&temp));
+      self.emit(out, prefix, at, take(key));
+      self.emit(out, prefix, name.span, bind(&name.node));
+    }
+    self.emit(out, prefix, span, get(&temp));
   }
 
   fn emit(&mut self, out: &mut Vec<ShardDef>, prefix: &[PathStep], span: Span, def: ShardDef) {

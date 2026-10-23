@@ -25,7 +25,24 @@ pub enum Statement {
     op_span: Span,
     var: Name,
   },
+  /// `= {a b: x}`, `= [a _ c]`: binds several immutable names at once,
+  /// from fields or elements of the input, which passes through.
+  Destructure {
+    op_span: Span,
+    pattern: Box<Spanned<Pattern>>,
+  },
   Pipeline(Pipe),
+}
+
+/// What `=` binds from (docs/iteration-and-access.md §3). Flat: no
+/// nesting.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pattern {
+  /// `{a b: x}`: each field's key and the name it binds.
+  Table(Vec<(Spanned<String>, Name)>),
+  /// `[a _ c]`: the names of the first elements by position (`None`
+  /// skips one).
+  Seq(Vec<Option<Name>>),
 }
 
 /// Blocks joined by `|`. Inside `[...]`, table values and parameters, one
