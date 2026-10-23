@@ -33,14 +33,11 @@
   rows | Count = found
   [] | Var(lines)
   found | If({Is(0)} {f"No notes match {query}.\n"} {f"{found} note(s) match {query}:\n"}) | Push(lines)
-  0 | Var(i)
-  Repeat({
-    rows | Take(i) = row
-    Inc(i)
+  rows | ForEach(row i {
     row.title | StringOr(default: "(untitled)") = title
     row.hit | StringOr(default: "") = hit
-    f"{i}. {title}: {hit}\n" | Push(lines)
-  } times: found)
+    f"{i | Add(1)}. {title}: {hit}\n" | Push(lines)
+  })
   lines | String.Join
 })
 

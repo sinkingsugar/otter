@@ -29,14 +29,9 @@
 })
 
 // --- defensive reads of the positional payload ---
+// A lenient path (`row.0.9?`) reads a nested element, or none when a step
+// cannot apply (not a sequence, too short); these give it a type.
 
-// The element at `i` of a sequence, or none (not a sequence, too short).
-@fn(At input: Any output: Any params: {i: Int} {
-  If({IsSeq} {
-    ExpectSeq = s
-    If({s | Count | IsMore(i)} {s | Take(i)} {none})
-  } {none})
-})
 @fn(Last input: Any output: Any params: {} {
   If({IsSeq} {
     ExpectSeq = s
@@ -55,7 +50,7 @@
 })
 // A row's price: the last element of row[1][0], a number; `no-price` without one.
 @fn(Price input: Any output: Int params: {} {
-  At(i: 1) | At(i: 0) | Last = p
+  .1.0? | Last = p
   p | If({IsFloat} {ExpectFloat | ToInt} {p | IntOr(default: @no-price)})
 })
 
@@ -72,11 +67,11 @@
 @fn(FmtDateTime input: Any output: String params: {time: Any} {
   = date
   [
-    (date | At(i: 0) | IntOr(default: 0) | ToString) "-"
-    (date | At(i: 1) | IntOr(default: 0) | Pad2) "-"
-    (date | At(i: 2) | IntOr(default: 0) | Pad2) " "
-    (time | At(i: 0) | IntOr(default: 0) | Pad2) ":"
-    (time | At(i: 1) | IntOr(default: 0) | Pad2)
+    (date.0? | IntOr(default: 0) | ToString) "-"
+    (date.1? | IntOr(default: 0) | Pad2) "-"
+    (date.2? | IntOr(default: 0) | Pad2) " "
+    (time.0? | IntOr(default: 0) | Pad2) ":"
+    (time.1? | IntOr(default: 0) | Pad2)
   ] | String.Join
 })
 
