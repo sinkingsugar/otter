@@ -19,6 +19,9 @@ pub struct Parser<'a> {
   /// reported as unclosed.
   aborted: bool,
   pub problems: Vec<Problem>,
+  /// Tokens a `?` follows: the last segment of a lenient path (the
+  /// lexer's `tokenize_marked`).
+  lenient: Vec<usize>,
 }
 
 /// Parses a whole source. Problems include the lexer's.
@@ -29,8 +32,10 @@ pub fn parse(source: &Source) -> (Program, Vec<Problem>) {
 /// Parses one file of a source (`Source::add`): its spans are offsets in
 /// the whole source.
 pub fn parse_range(source: &Source, range: Span) -> (Program, Vec<Problem>) {
-  let (tokens, mut problems) = Lexer::new(&source.text, range.start, range.end).tokenize();
+  let (tokens, mut problems, lenient) =
+    Lexer::new(&source.text, range.start, range.end).tokenize_marked();
   let mut parser = Parser::new(source, tokens);
+  parser.lenient = lenient;
   let statements = parser.statements(None);
   problems.append(&mut parser.problems);
   problems.sort_by_key(|p| p.span.start);
@@ -47,6 +52,7 @@ impl<'a> Parser<'a> {
       depth: 0,
       aborted: false,
       problems: Vec::new(),
+      lenient: Vec::new(),
     }
   }
 
@@ -358,12 +364,14 @@ impl<'a> Parser<'a> {
           }
           _ => {
             let path = self.path();
+            let lenient = !path.is_empty() && self.marked();
             BlockKind::Var {
               name: Spanned {
                 node: name,
                 span: start,
               },
               path,
+              lenient,
             }
           }
         }
@@ -516,7 +524,14 @@ impl<'a> Parser<'a> {
       span: k.span,
     }];
     path.extend(self.path());
-    Some(BlockKind::Path(path))
+    let lenient = self.marked();
+    Some(BlockKind::Path { path, lenient })
+  }
+
+  /// Whether a `?` follows the token just consumed (a path's last
+  /// segment): the path is lenient.
+  fn marked(&self) -> bool {
+    !self.lenient.is_empty() && self.lenient.binary_search(&(self.pos - 1)).is_ok()
   }
 
   /// A path step where a value is expected: `.5` is a misspelled 0.5, a
@@ -837,9 +852,11 @@ impl<'a> Parser<'a> {
           if !buf.is_empty() {
             parts.push(FPart::Text(std::mem::take(&mut buf)));
           }
-          let (tokens, mut lex_problems) = Lexer::new(text, open + 1, close).tokenize();
+          let (tokens, mut lex_problems, lenient) =
+            Lexer::new(text, open + 1, close).tokenize_marked();
           self.problems.append(&mut lex_problems);
           let mut inner = Parser::new(self.source, tokens);
+          inner.lenient = lenient;
           inner.depth = self.depth;
           let stmts = inner.statements(None);
           self.problems.append(&mut inner.problems);

@@ -20,7 +20,8 @@ The workloads:
 - `table/CASE`: `bench_tables`' six VM cases (N = 1000);
 - `reload`: a preserving reload of an edited function, then two ticks (N = 10 cycles);
 - `object/assign`, `object/seq`, `object/table`: a host object copied between locals 8 times, into a 4-element sequence, into a 4-key record (N = 1000; docs/host-requirements.md H1);
-- `service/lookup`: 8 service lookups at activation by a host leaf (N = 1000; H3).
+- `service/lookup`: 8 service lookups at activation by a host leaf (N = 1000; H3);
+- `snippet/CASE`: a script's loop body from `crates/otter-lang/examples/common/snippets.rs` (N = 1000; docs/iteration-and-access.md): a path through a static table, through `Any` (checked at activation) and lenient (`?`); the iteration shards beside the hand-written `Repeat`+`Take` loop they replace.
 
 Every workload checks the work it did (results, iteration and resume counts) and fails otherwise. The workload definitions are shared with the examples (`otter_core::bench`) and the matched VM suite, not copied.
 

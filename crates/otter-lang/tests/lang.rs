@@ -1565,6 +1565,95 @@ t
   assert_eq!((d[0].code, at(&d[0])), ("path", (1, 10)));
 }
 
+/// Paths through Any and unions are checked at activation; `?` makes a
+/// path lenient (docs/iteration-and-access.md §2).
+#[test]
+fn dynamic_and_lenient_paths() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let json = r#"{\"data\": {\"a\": [1, [2, 3]], \"n\": 5}, \"list\": [{\"t\": \"x\"}]}"#;
+  let report = run(
+    &format!(
+      "\"{json}\" | FromJson = j
+j.data.a.1.0 = deep
+j | .list.0.t = title
+j.data.missing = missing
+j.data.a.7.0? = out-of-range
+j.data.n.x? = wrong-kind
+j.nothing.at.all? = through-none
+j.data.n? = present
+[deep title missing out-of-range wrong-kind through-none present]"
+    ),
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::Int(2),
+      Var::string("x"),
+      Var::None,
+      Var::None,
+      Var::None,
+      Var::None,
+      Var::Int(5)
+    ])
+  );
+  // A wrong kind at activation names the step and what arrived.
+  for (text, message) in [
+    ("j.data.n.x", "Take: .x needs a table, got Int"),
+    ("j.data.0", "Take: .0 needs a sequence, got a table"),
+    ("j.data.a.9", "out of range"),
+  ] {
+    let report = run(
+      &format!("@wire(w {{ \"{json}\" | FromJson = j {text} }})\n@mesh(m) @schedule(m w) @run(m)"),
+      &no_defines(),
+    );
+    match report.outcomes.iter().find(|(w, _)| w == "w") {
+      Some((_, Some(Outcome::Failed(e)))) => {
+        assert!(e.to_string().contains(message), "{text}: {e}")
+      }
+      other => panic!("{text}: {other:?}"),
+    }
+  }
+  // Unions: the members a Take applies to; the output is their union.
+  let report =
+    check("0 | Var(n)\nIf({n | IsMore(0)} {{c: 1}} {{c: \"s\" d: 2.0}}) = u\nu.c | IsMore(0)");
+  let d = &report.diagnostics[0];
+  assert!(d.message.contains("Int | String"), "{}", d.message);
+  let report = check("0 | Var(n)\nIf({n | IsMore(0)} {{c: 1}} {5}) = u\nu.c | Add(1)");
+  assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+  // A key no member can have, and a union no member of which applies.
+  let report = check("0 | Var(n)\nIf({n | IsMore(0)} {{c: 1}} {5}) = u\nu.d");
+  assert_eq!(report.diagnostics[0].code, "unknown-key");
+  let report = check("0 | Var(n)\nIf({n | IsMore(0)} {1} {\"s\"}) = u\nu.d");
+  assert_eq!(report.diagnostics[0].code, "input-type-mismatch");
+  // Static types keep their compose errors, lenient or not.
+  assert_eq!(
+    check("1 | Take(0)").diagnostics[0].code,
+    "input-type-mismatch"
+  );
+  assert_eq!(check("{a: 1} = t\nt.b?").diagnostics[0].code, "unknown-key");
+  // A lenient path's type is the strict path's or none.
+  let report = check("{a: [1 2]} = t\nt.a.5? | Add(1)");
+  assert!(
+    report.diagnostics[0].message.contains("Int | None"),
+    "{}",
+    report.diagnostics[0].message
+  );
+  assert_eq!(
+    completed(&run("{a: [1 2]} = t\nt.a.1?", &no_defines()), "root"),
+    Var::Int(2)
+  );
+  // `?` only right after a path.
+  for text in ["5 = x\nx?", "1?", "{a: 1} | Take(\"a\")?"] {
+    let d = load_errors(text);
+    assert_eq!(d[0].code, "unexpected-character", "{text}");
+  }
+  assert_eq!(
+    load_errors("{a: 1} = t\nt.a ?")[0].code,
+    "unexpected-character"
+  );
+}
+
 #[test]
 fn unknown_dashed_names_explain_the_dash() {
   let report = check("5 = x\nx-1");

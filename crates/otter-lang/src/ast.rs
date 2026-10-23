@@ -56,13 +56,18 @@ pub enum BlockKind {
     params: Option<Params>,
   },
   Literal(Literal),
-  /// `x`, `x.key`, `x.0.key`.
+  /// `x`, `x.key`, `x.0.key`; `x.key?` is lenient.
   Var {
     name: Name,
     path: Vec<Spanned<PathKey>>,
+    lenient: bool,
   },
-  /// `.key`, `.0.key`: a path on the step's input (the pipeline value).
-  Path(Vec<Spanned<PathKey>>),
+  /// `.key`, `.0.key`: a path on the step's input (the pipeline value);
+  /// `.key?` is lenient.
+  Path {
+    path: Vec<Spanned<PathKey>>,
+    lenient: bool,
+  },
   Seq(Vec<Pipe>),
   Table(Vec<(Spanned<TableKey>, Pipe)>),
   /// `{}`: an empty flow where a flow is expected, else an empty table.

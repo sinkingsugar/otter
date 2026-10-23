@@ -18,6 +18,10 @@
 //! - `object CASE ITERATIONS`: host objects (docs/host-requirements.md H1)
 //!   copied between locals (`assign`), into sequences (`seq`) and tables
 //!   (`table`), and a service looked up at activation (`lookup`, H3).
+//! - `snippet CASE ITERATIONS`: a script's loop body (`common/snippets.rs`):
+//!   paths through static, dynamic and lenient types, and the iteration
+//!   shards against the hand-written loop they replace
+//!   (docs/iteration-and-access.md).
 //!
 //! Every workload verifies the work it did, and fails otherwise.
 
@@ -414,6 +418,32 @@ fn object(case: &str, iterations: i64) {
   }
 }
 
+#[path = "common/snippets.rs"]
+mod snippets;
+
+fn snippet(case: &str, iterations: i64) {
+  let snippet = snippets::find(case);
+  let text = snippets::script(snippet, iterations);
+  let program = match Program::load(
+    Source::new("snippet.otr", text),
+    &catalog(),
+    &HashMap::new(),
+  ) {
+    Ok(p) => p,
+    Err((source, diagnostics)) => {
+      for d in &diagnostics {
+        eprint!("{}", render(d, &source));
+      }
+      panic!("{case} does not compose");
+    }
+  };
+  let report = program.run().unwrap_or_else(|d| panic!("{case}: {d:?}"));
+  match report.outcomes.iter().find(|(w, _)| w == "root") {
+    Some((_, Some(Outcome::Completed(v)))) if *v == (snippet.result)(iterations) => {}
+    other => panic!("{case}: {other:?}"),
+  }
+}
+
 fn main() {
   let args: Vec<String> = std::env::args().skip(1).collect();
   match args.first().map(String::as_str) {
@@ -433,9 +463,13 @@ fn main() {
       args.get(1).expect("object CASE ITERATIONS"),
       int(&args, 2, "ITERATIONS"),
     ),
+    Some("snippet") => snippet(
+      args.get(1).expect("snippet CASE ITERATIONS"),
+      int(&args, 2, "ITERATIONS"),
+    ),
     _ => {
       eprintln!(
-        "usage: bench_gate script PATH | entity INSTANCES TICKS | depth DEPTH INSTANCES TICKS | table CASE ITERATIONS | reload CYCLES | object CASE ITERATIONS"
+        "usage: bench_gate script PATH | entity INSTANCES TICKS | depth DEPTH INSTANCES TICKS | table CASE ITERATIONS | reload CYCLES | object CASE ITERATIONS | snippet CASE ITERATIONS"
       );
       std::process::exit(2);
     }

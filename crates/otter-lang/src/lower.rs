@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use otter_core::describe::{self, Forms, ParamDecl};
 use otter_core::diagnostic::{Diagnostic, PathStep};
-use otter_core::shards::data::{SEQ_MAKE, STRING_FORMAT, TABLE_MAKE, TAKE};
+use otter_core::shards::data::{SEQ_MAKE, STRING_FORMAT, TABLE_MAKE, TAKE, TAKE_PATH};
 use otter_core::shards::{BIND, CONST, GET, RUN, SUB};
 use otter_core::{
   Arg, Catalog, FunctionDef, FunctionParam, ParamValue, ShardDef, Type, Var, WireDef,
@@ -530,7 +530,7 @@ fn statement_span(stmt: &Statement) -> Span {
 fn name_of(pipe: &Pipe) -> Option<String> {
   match &pipe.blocks[..] {
     [b] => match &b.kind {
-      BlockKind::Var { name, path } if path.is_empty() => Some(name.node.clone()),
+      BlockKind::Var { name, path, .. } if path.is_empty() => Some(name.node.clone()),
       BlockKind::Literal(Literal::String(s)) => Some(s.clone()),
       _ => None,
     },
@@ -1396,7 +1396,7 @@ impl Lowerer<'_> {
     let span = block.span;
     match &block.kind {
       BlockKind::Shard { name, params } => self.shard(out, prefix, block, name, params.as_ref()),
-      BlockKind::Var { name, path } if path.is_empty() => {
+      BlockKind::Var { name, path, .. } if path.is_empty() => {
         self.emit(
           out,
           prefix,
@@ -1404,17 +1404,21 @@ impl Lowerer<'_> {
           ShardDef::with_args(&GET, vec![Arg::pos(ParamValue::Var(name.node.clone()))]),
         );
       }
-      BlockKind::Var { name, path } => {
+      BlockKind::Var {
+        name,
+        path,
+        lenient,
+      } => {
         self.emit(
           out,
           prefix,
           name.span,
           ShardDef::with_args(&GET, vec![Arg::pos(ParamValue::Var(name.node.clone()))]),
         );
-        self.take_path(out, prefix, path);
+        self.take_path(out, prefix, path, *lenient);
       }
       // `.a.b`: the same Takes on the step's input.
-      BlockKind::Path(path) => self.take_path(out, prefix, path),
+      BlockKind::Path { path, lenient } => self.take_path(out, prefix, path, *lenient),
       // `(a | b)` in a flow runs in place.
       BlockKind::Expr(stmts) => self.statements_into(out, stmts.iter(), prefix),
       BlockKind::Func { name, params: None } => {
@@ -1623,8 +1627,35 @@ impl Lowerer<'_> {
     Some(text)
   }
 
-  /// `.key` / `.0` segments as Take shards.
-  fn take_path(&mut self, out: &mut Vec<ShardDef>, prefix: &[PathStep], path: &[Spanned<PathKey>]) {
+  /// `.key` / `.0` segments as Take shards; a lenient path (`?`) as one
+  /// `TakePath`.
+  fn take_path(
+    &mut self,
+    out: &mut Vec<ShardDef>,
+    prefix: &[PathStep],
+    path: &[Spanned<PathKey>],
+    lenient: bool,
+  ) {
+    if lenient {
+      let keys: Vec<Var> = path
+        .iter()
+        .map(|segment| match &segment.node {
+          PathKey::Key(k) => Var::string(k),
+          PathKey::Index(i) => Var::Int(*i),
+        })
+        .collect();
+      let span = path[0].span.to(path[path.len() - 1].span);
+      self.emit(
+        out,
+        prefix,
+        span,
+        ShardDef::with_args(
+          &TAKE_PATH,
+          vec![Arg::pos(ParamValue::Value(Var::from_seq(Arc::new(keys))))],
+        ),
+      );
+      return;
+    }
     for segment in path {
       let key = match &segment.node {
         PathKey::Key(k) => Var::string(k),
@@ -1695,7 +1726,7 @@ impl Lowerer<'_> {
   ) -> Option<ParamValue> {
     if let [b] = &pipe.blocks[..] {
       match &b.kind {
-        BlockKind::Var { name, path } if path.is_empty() && !snapshot => {
+        BlockKind::Var { name, path, .. } if path.is_empty() && !snapshot => {
           return Some(ParamValue::Var(name.node.clone()));
         }
         // A literal holding a `#( )` is hoisted like a computed value: its
@@ -1891,7 +1922,7 @@ impl Lowerer<'_> {
     let name = match items {
       [n, _] if n.name.is_none() => match &n.value.blocks[..] {
         [b] => match &b.kind {
-          BlockKind::Var { name, path } if path.is_empty() => Some(name.clone()),
+          BlockKind::Var { name, path, .. } if path.is_empty() => Some(name.clone()),
           _ => None,
         },
         _ => None,
@@ -2521,7 +2552,7 @@ impl Lowerer<'_> {
       BlockKind::Flow(stmts) => Some(ParamValue::Flow(self.statements(stmts.iter(), nested))),
       BlockKind::EmptyBraces if flow_accepted => Some(ParamValue::Flow(Vec::new())),
       // A shard's flow argument naming a flow parameter runs its block.
-      BlockKind::Var { name, path }
+      BlockKind::Var { name, path, .. }
         if path.is_empty()
           && flow_accepted
           && !accepts(Forms::VARIABLE)
@@ -2532,7 +2563,7 @@ impl Lowerer<'_> {
         self.emit(&mut flow, nested, b.span, run);
         Some(ParamValue::Flow(flow))
       }
-      BlockKind::Var { name, path } if path.is_empty() => {
+      BlockKind::Var { name, path, .. } if path.is_empty() => {
         if accepts(Forms::WIRE) && !accepts(Forms::VARIABLE) {
           Some(ParamValue::Wire(name.node.clone()))
         } else if accepts(Forms::VARIABLE) || !flow_accepted {

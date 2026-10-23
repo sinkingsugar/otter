@@ -2311,3 +2311,67 @@ fn peek_reports_every_ending() {
     Some(Outcome::Completed(Var::None))
   );
 }
+
+/// Runs a one-shot wire and returns its outcome.
+fn outcome_of(flow: Vec<otter_core::ShardDef>) -> Outcome {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("w", false, flow));
+  let compiled = mesh.compile("w", Type::none()).expect("compiles");
+  let id = mesh.spawn(&compiled, Var::None).unwrap();
+  mesh.run(10);
+  mesh.outcome(id).cloned().expect("finished")
+}
+
+/// Take on Any checks the kind at activation; TakePath is lenient
+/// (docs/iteration-and-access.md §2).
+#[test]
+fn take_on_any_and_lenient_take_path() {
+  use otter_core::ShardDef;
+  use otter_core::shards::{checks, data};
+  use std::sync::Arc;
+  let any = || ShardDef::new(&checks::TO_ANY, vec![]);
+  let nested = Var::table([("a", Var::from_seq(Arc::new(vec![Var::Int(4)])))]);
+  let path =
+    |keys: Vec<Var>| ShardDef::new(&data::TAKE_PATH, vec![val(Var::from_seq(Arc::new(keys)))]);
+  assert_eq!(
+    outcome_of(vec![
+      konst(nested.clone()),
+      any(),
+      take(val(Var::string("a"))),
+      take(val(Var::Int(0)))
+    ]),
+    Outcome::Completed(Var::Int(4))
+  );
+  match outcome_of(vec![konst(nested.clone()), any(), take(val(Var::Int(0)))]) {
+    Outcome::Failed(e) => assert!(
+      e.to_string()
+        .contains("Take: .0 needs a sequence, got a table"),
+      "{e}"
+    ),
+    other => panic!("{other:?}"),
+  }
+  for (keys, expected) in [
+    (vec![Var::string("a"), Var::Int(0)], Var::Int(4)),
+    (vec![Var::string("a"), Var::Int(3)], Var::None),
+    (vec![Var::string("b"), Var::Int(0)], Var::None),
+    (vec![Var::Int(0)], Var::None),
+    (
+      vec![Var::string("a"), Var::Int(0), Var::string("c")],
+      Var::None,
+    ),
+  ] {
+    assert_eq!(
+      outcome_of(vec![konst(nested.clone()), any(), path(keys.clone())]),
+      Outcome::Completed(expected),
+      "{keys:?}"
+    );
+  }
+  // Statically typed input: the same, through the static rules.
+  assert_eq!(
+    outcome_of(vec![
+      konst(nested),
+      path(vec![Var::string("a"), Var::Int(9)])
+    ]),
+    Outcome::Completed(Var::None)
+  );
+}

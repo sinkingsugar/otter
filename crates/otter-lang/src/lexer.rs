@@ -92,6 +92,8 @@ pub struct Lexer<'a> {
   pos: usize,
   end: usize,
   pub problems: Vec<Problem>,
+  /// Where a `?` was, to check once every token is known (`marks`).
+  questions: Vec<usize>,
 }
 
 fn is_ident_continue(b: u8) -> bool {
@@ -107,10 +109,18 @@ impl<'a> Lexer<'a> {
       pos: start,
       end,
       problems: Vec::new(),
+      questions: Vec::new(),
     }
   }
 
-  pub fn tokenize(mut self) -> (Vec<Token>, Vec<Problem>) {
+  pub fn tokenize(self) -> (Vec<Token>, Vec<Problem>) {
+    let (tokens, problems, _) = self.tokenize_marked();
+    (tokens, problems)
+  }
+
+  /// Like [`Lexer::tokenize`], with the indices of the tokens a `?` follows
+  /// (sorted): the last segment of a lenient path (`t.a?`, `.0?`).
+  pub fn tokenize_marked(mut self) -> (Vec<Token>, Vec<Problem>, Vec<usize>) {
     let mut tokens: Vec<Token> = Vec::new();
     loop {
       let spaced = self.skip_trivia();
@@ -124,6 +134,7 @@ impl<'a> Lexer<'a> {
         break;
       }
       let prev = tokens.last();
+
       // A path index right after an adjacent `.` (`s.0.a`): digits only,
       // so `0.a` is not read as a malformed float.
       let path_index =
@@ -157,7 +168,44 @@ impl<'a> Lexer<'a> {
         });
       }
     }
-    (tokens, self.problems)
+    let marks = if self.questions.is_empty() {
+      Vec::new()
+    } else {
+      self.marks(&tokens)
+    };
+    (tokens, self.problems, marks)
+  }
+
+  /// The tokens each `?` marks lenient: one glued to a path segment (a name
+  /// or an index right after a `.`). Any other `?` is an unexpected
+  /// character. Out of the token loop: `?` is rare.
+  #[cold]
+  #[inline(never)]
+  fn marks(&mut self, tokens: &[Token]) -> Vec<usize> {
+    let mut marks = Vec::new();
+    for at in std::mem::take(&mut self.questions) {
+      let i = tokens.partition_point(|t| t.span.end <= at);
+      let segment = i
+        .checked_sub(1)
+        .filter(|&s| s >= 1)
+        .filter(|&s| tokens[s].span.end == at)
+        .filter(|&s| matches!(tokens[s].tok, Tok::Ident(_) | Tok::Int(_)))
+        .filter(|&s| tokens[s - 1].tok == Tok::Dot && !tokens[s].spaced);
+      match segment {
+        Some(s) => marks.push(s),
+        None => self.problems.push(
+          Problem::syntax(
+            Span::new(at, at + 1),
+            "unexpected-character",
+            "unexpected character `?`".into(),
+          )
+          .help(
+            "`?` right after a path makes it lenient: `t.a.0?` is none when a step cannot apply",
+          ),
+        ),
+      }
+    }
+    marks
   }
 
   fn peek(&self, ahead: usize) -> Option<u8> {
@@ -308,6 +356,12 @@ impl<'a> Lexer<'a> {
       b'$' if next.is_some_and(|n| n.is_ascii_alphanumeric()) => {
         self.pos += 1;
         Some(self.ident(start))
+      }
+      b'?' => {
+        // Checked once every token is known (`marks`).
+        self.pos += 1;
+        self.questions.push(start);
+        None
       }
       b'A'..=b'Z' => Some(self.upper(start)),
       b'_' if next.is_some_and(|n| n.is_ascii_uppercase()) => Some(self.upper(start)),

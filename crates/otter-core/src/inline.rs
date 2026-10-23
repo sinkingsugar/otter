@@ -94,6 +94,10 @@ pub(crate) enum Op {
   /// caller's next mutation of a collection it shared is not a copy. A
   /// value the accumulator still reads moves into it.
   Clear(Binding),
+  /// A lenient path (`t.a.0?`, `data::TakePath`): each key in turn, none
+  /// as soon as one cannot apply. The keys as a sequence value: an `Arc`
+  /// of its own would give `Op`'s drop another case.
+  TakePath(Var),
 }
 
 /// The tag of the last hot-tier operation: `run` sends every tag past it to
@@ -396,6 +400,7 @@ impl Op {
       Op::JumpIf(_) => "jump-if",
       Op::LoopTest(..) => "loop-test",
       Op::Clear(_) => "clear",
+      Op::TakePath(_) => "take-path",
     }
   }
 }
@@ -536,6 +541,7 @@ impl Instruction {
       | Op::Pass
       | Op::Count
       | Op::VmCall
+      | Op::TakePath(_)
       | Op::Jump(_)
       | Op::JumpIfNot(_)
       | Op::JumpIf(_) => {}
@@ -608,7 +614,8 @@ pub(crate) fn lower_scratch_releases(code: &mut [Instruction]) {
       | Op::VmCall
       | Op::AddFloat4Const(_)
       | Op::AddFloat4Bound(_)
-      | Op::Clear(_) => may_own = true,
+      | Op::Clear(_)
+      | Op::TakePath(_) => may_own = true,
       Op::Const(_)
       | Op::GetLocal(_)
       | Op::GetMesh(_)
@@ -660,6 +667,8 @@ pub(crate) fn leaf<L: LeafShard>(c: &L::Compiled, output: Type) -> Option<Inline
       data::TakeCode::Key(key) => Op::Take(key.clone()),
       data::TakeCode::Slot(index) => Op::TakeSlot(*index),
     }
+  } else if id == TypeId::of::<data::TakePath>() {
+    Op::TakePath(c.downcast_ref::<Var>()?.clone())
   } else if id == TypeId::of::<data::SeqMake>() {
     Op::SeqMake(c.downcast_ref::<Vec<Operand>>()?.clone())
   } else if id == TypeId::of::<data::TableMake>() {
@@ -1123,7 +1132,9 @@ pub(crate) fn run<C: VmCalls>(
             }
             value = numeric;
           }
-          Op::Push(_) | Op::Equal(..) | Op::Count | Op::VmCall | Op::Clear(_) => break 'slow,
+          Op::Push(_) | Op::Equal(..) | Op::Count | Op::VmCall | Op::Clear(_) | Op::TakePath(_) => {
+            break 'slow;
+          }
         }
         #[cfg(any(debug_assertions, feature = "output-checks"))]
         leaf::check_output(instruction.check.0, instruction.check.1, &*value)?;
@@ -1414,6 +1425,7 @@ unsafe fn slow_op<C: VmCalls>(
         number!(Var::Bool(values::values_equal(&*value, rhs) != *negate));
       }
       Op::Count => number!(Var::Int(tri!(count(&*value, calls.meter())))),
+      Op::TakePath(keys) => own!(data::take_lenient(&*value, keys.as_seq().unwrap_or(&[]))),
       Op::Clear(b) => {
         if let Some(moved) = clear_slot(frames.slot(*b), value) {
           own!(moved);
