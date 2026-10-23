@@ -95,3 +95,14 @@ object/assign 399.00 0.00 0.00 0.00 0.00 6.00
 object/seq 1301.00 2.00 168.00 0.00 0.00 10.00
 object/table 1262.00 1.00 144.00 -0.00 0.00 10.00
 service/lookup 2161.00 0.00 0.00 0.00 0.00 7.00
+snippet/path-static 513.00 0.00 0.00 0.00 0.00 8.00
+snippet/path-dynamic 1037.00 0.00 0.00 0.00 -0.00 9.00
+snippet/path-lenient 912.00 0.00 0.00 0.00 0.00 8.00
+snippet/repeat-take 66071.00 0.00 0.00 0.00 0.00 1809.00
+snippet/foreach-sum 60415.00 0.00 0.00 0.00 0.00 1807.00
+snippet/foreach-named 74751.00 0.00 0.00 0.00 0.00 2320.00
+snippet/repeat-push 74645.00 8.00 16296.00 92.00 0.00 1833.00
+snippet/map-256 68588.01 8.00 16296.00 6.00 0.00 1826.00
+snippet/filter-256 83051.04 7.00 8104.00 0.00 -0.00 2341.00
+snippet/reduce-256 74855.00 0.00 0.00 0.00 0.00 2322.00
+snippet/table-foreach 11212.00 0.00 0.00 0.00 0.00 256.00
