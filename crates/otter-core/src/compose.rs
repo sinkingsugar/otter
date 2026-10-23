@@ -1068,6 +1068,13 @@ impl ComposeCtx<'_> {
             ),
           );
         }
+        if name == "_" {
+          return variable_error(
+            "misplaced-underscore",
+            "`_` skips a name (in a `[...]` pattern or among a loop's names); it is not a value"
+              .into(),
+          );
+        }
         let near = crate::diagnostic::closest(name, self.visible_names(), 3);
         let message = if self.evaluating() {
           format!(
@@ -1321,9 +1328,154 @@ impl ComposeCtx<'_> {
         flat_branches(flat, i, saved, input);
         flat.release(saved, input);
       }
+      Control::Loop(l) => self.flatten_loop(l, flat),
       _ => return false,
     }
     true
+  }
+
+  /// Lowers `ForEach`, `Map`, `Filter` or `Reduce` (docs/iteration-and-
+  /// access.md §4.2): the collection in a hidden slot, read once; a
+  /// counted loop (`LoopTest`, as `Repeat`) over its length with an index
+  /// counting up; per iteration the element loaded (a sequence's through
+  /// `Take`, exactly the hand-written loop's code) into the value's slot
+  /// and the body's input; then what the shard collects (`Push` into an
+  /// output under construction, the accumulator). A table's entries, and
+  /// an input checked at activation, go through the slow-tier `Element`,
+  /// `EntryKey` and `Rebuild`.
+  fn flatten_loop(&mut self, l: &crate::shards::iterate::LoopCompiled, flat: &mut Flat) {
+    use crate::inline::Op;
+    use crate::shards::iterate::{LoopKind, Source};
+    let any = Type::any();
+    let kind = l.kind;
+    let static_seq = l.source == Source::Seq;
+    let saved = Binding::Local(self.declare_hidden(l.input));
+    flat.op(Op::Set(saved), l.input);
+    // The length, into the counter.
+    let counter = Binding::Local(self.declare_hidden(Type::int()));
+    if static_seq {
+      flat.op(Op::Count, Type::int());
+    } else {
+      flat.op(Op::IterLen(kind), Type::int());
+    }
+    flat.op(Op::Set(counter), Type::int());
+    // The index: the index name's slot when it is the sequence's index.
+    let index = match l.index {
+      Some(b) if static_seq => b,
+      _ => Binding::Local(self.declare_hidden(Type::int())),
+    };
+    flat.op(Op::Const(Var::Int(0)), Type::int());
+    flat.op(Op::Set(index), Type::int());
+    // The element's slot: the value name's, or hidden when Filter needs it
+    // again after the predicate.
+    let collects_element = kind == LoopKind::Filter && static_seq;
+    let element = match l.value {
+      Some(b) => Some(b),
+      None if collects_element => Some(Binding::Local(self.declare_hidden(l.element))),
+      None => None,
+    };
+    let collected_type = match kind {
+      LoopKind::Map => Type::seq(l.body.output),
+      LoopKind::Filter if static_seq => l.input,
+      LoopKind::Filter => Type::seq(Type::int()),
+      _ => any,
+    };
+    let out = matches!(kind, LoopKind::Map | LoopKind::Filter).then(|| {
+      let out = Binding::Local(self.declare_hidden(collected_type));
+      flat.op(Op::Const(Var::seq(Vec::new())), collected_type);
+      flat.op(Op::Set(out), collected_type);
+      out
+    });
+    let acc = (kind == LoopKind::Reduce).then(|| {
+      let acc = l
+        .acc
+        .unwrap_or_else(|| Binding::Local(self.declare_hidden(l.acc_type)));
+      match &l.init {
+        Some(Operand::Const(v)) => {
+          flat.op(Op::Const(v.clone()), l.acc_type);
+        }
+        Some(Operand::Bound(b)) => {
+          flat.op(Op::get(*b), l.acc_type);
+        }
+        None => {
+          // The first element starts it (an empty input fails here); the
+          // loop runs over the rest.
+          flat.op(Op::get(saved), l.input);
+          flat.op(Op::Element(index, kind), l.element);
+          flat.op(Op::Set(acc), l.acc_type);
+          flat.op(Op::Inc(index), Type::int());
+          flat.op(Op::get(counter), Type::int());
+          flat.op(Op::AddIntConst(-1), Type::int());
+        }
+      }
+      if l.init.is_none() {
+        flat.op(Op::Set(counter), Type::int());
+      } else {
+        flat.op(Op::Set(acc), l.acc_type);
+      }
+      acc
+    });
+    let top = flat.here();
+    let exit = flat.op(Op::LoopTest(counter, 0), any);
+    if let Some(key) = l.index
+      && !static_seq
+    {
+      flat.op(Op::get(saved), l.input);
+      flat.op(Op::EntryKey(index), any);
+      flat.op(Op::Set(key), any);
+    }
+    flat.op(Op::get(saved), l.input);
+    if static_seq {
+      flat.op(Op::Take(Operand::Bound(index)), l.element);
+    } else {
+      flat.op(Op::Element(index, kind), l.element);
+    }
+    if let Some(element) = element {
+      flat.op(Op::Set(element), l.element);
+    }
+    flat.append(&l.body);
+    match kind {
+      LoopKind::ForEach => {}
+      LoopKind::Map => {
+        flat.op(Op::Push(out.expect("Map's output")), any);
+      }
+      LoopKind::Filter => {
+        let skip = flat.op(Op::JumpIfNot(0), any);
+        match element {
+          Some(element) if static_seq => flat.op(Op::get(element), l.element),
+          _ => flat.op(Op::get(index), Type::int()),
+        };
+        flat.op(Op::Push(out.expect("Filter's output")), any);
+        flat.target(skip);
+      }
+      LoopKind::Reduce => {
+        flat.op(Op::Set(acc.expect("Reduce's accumulator")), l.acc_type);
+      }
+    }
+    flat.op(Op::Inc(index), Type::int());
+    flat.op(Op::Jump(top), any);
+    flat.target(exit);
+    // The output, and the values the loop held released.
+    match (kind, out, acc) {
+      (LoopKind::Reduce, _, Some(acc)) => {
+        flat.op(Op::get(acc), l.output);
+        flat.release(acc, l.acc_type);
+      }
+      (_, Some(out), _) => {
+        flat.op(Op::get(out), collected_type);
+        flat.release(out, collected_type);
+        if !static_seq {
+          flat.op(Op::Rebuild(saved, kind == LoopKind::Filter), l.output);
+        }
+      }
+      _ => {
+        flat.op(Op::get(saved), l.input);
+      }
+    }
+    if let Some(element) = element {
+      flat.release(element, l.element);
+    }
+    flat.release(saved, l.input);
   }
 
   /// Records that the shard being composed assigns this variable. Inside a
@@ -1439,6 +1591,32 @@ impl ComposeCtx<'_> {
       self.analysis.include(&flow.analysis, &prefix);
     }
     result
+  }
+
+  /// Like [`ComposeCtx::compose_flow`], with `names` declared (immutable)
+  /// at the start of the block, before its first shard: a loop's element
+  /// and index names. Returns their bindings, in order.
+  pub(crate) fn compose_flow_declaring(
+    &mut self,
+    flow: &[ShardDef],
+    input: Type,
+    names: &[(&str, Type)],
+  ) -> Result<(CompiledFlow, Vec<Binding>)> {
+    let child = Child::Flow(flow.as_ptr());
+    let block = self.scopes.mark();
+    self.blocks += 1;
+    let bindings = names
+      .iter()
+      .map(|(name, ty)| self.declare_local(name, *ty, false).binding)
+      .collect();
+    let result = self.compose_flow_unscoped(flow, input);
+    self.blocks -= 1;
+    self.scopes.close(&mut self.locals, block);
+    if let Ok(flow) = &result {
+      let prefix = self.child_prefix(&child);
+      self.analysis.include(&flow.analysis, &prefix);
+    }
+    result.map(|flow| (flow, bindings))
   }
 
   /// Composes a flow whose declarations stay visible after it: a wire or

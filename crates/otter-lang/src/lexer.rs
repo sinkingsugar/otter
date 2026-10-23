@@ -49,8 +49,6 @@ pub enum Tok {
   Dot,
   Assign(AssignOp),
   Eof,
-  /// `_` alone: skips a name in a `[...]` pattern or a loop's names.
-  Underscore,
 }
 
 impl Tok {
@@ -76,7 +74,6 @@ impl Tok {
       Tok::Dot => "`.`".into(),
       Tok::Assign(op) => format!("`{}`", op.text()),
       Tok::Eof => "the end of the source".into(),
-      Tok::Underscore => "`_`".into(),
     }
   }
 }
@@ -351,7 +348,7 @@ impl<'a> Lexer<'a> {
             ),
           )
           .help(
-            "in 2.0 the element is the block's input: bind it with `= item` if you need a name",
+            "name the element instead: `items | ForEach(x {...})` (value first, then the index: `ForEach(x i {...})`); the body's input is the element",
           ),
         );
         Some(tok)
@@ -368,7 +365,12 @@ impl<'a> Lexer<'a> {
       }
       b'A'..=b'Z' => Some(self.upper(start)),
       b'_' if next.is_some_and(|n| n.is_ascii_uppercase()) => Some(self.upper(start)),
-      b'_' if !next.is_some_and(is_ident_continue) => single(self, Tok::Underscore),
+      // `_` alone: the name that skips one, in a `[...]` pattern or among
+      // a loop's names; compose refuses to declare or read it elsewhere.
+      b'_' if !next.is_some_and(is_ident_continue) => {
+        self.pos += 1;
+        Some(Tok::Ident("_".into()))
+      }
       _ => {
         let c = self.text[start..].chars().next().unwrap_or('?');
         self.pos += c.len_utf8();

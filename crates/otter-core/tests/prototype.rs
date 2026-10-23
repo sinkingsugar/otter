@@ -2375,3 +2375,110 @@ fn take_on_any_and_lenient_take_path() {
     Outcome::Completed(Var::None)
   );
 }
+
+/// The iteration shards on the core API: suspension inside a body, nested
+/// loops, mutation of the iterated variable, errors and the release of the
+/// collection on failure (docs/iteration-and-access.md §4).
+#[test]
+fn iteration_shards_suspend_nest_and_release() {
+  use otter_core::ShardDef;
+  use otter_core::shards::{FILTER, FOR_EACH, MAP, text};
+  use std::sync::Arc;
+  let ints = |v: &[i64]| Var::from_seq(Arc::new(v.iter().map(|i| Var::Int(*i)).collect()));
+  // A body that suspends resumes at the same element, across ticks.
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire(
+    "w",
+    false,
+    vec![
+      konst(ints(&[1, 2, 3])),
+      iterate(
+        &MAP,
+        vec![pause(), get("x"), add(var("i"))],
+        &[("value", "x"), ("index", "i")],
+      ),
+    ],
+  ));
+  let compiled = mesh.compile("w", Type::none()).unwrap();
+  let id = mesh.spawn(&compiled, Var::None).unwrap();
+  let mut ticks = 0;
+  while mesh.outcome(id).is_none() {
+    mesh.tick();
+    ticks += 1;
+  }
+  assert_eq!(ticks, 4, "one tick per element, then the end");
+  assert_eq!(
+    mesh.outcome(id),
+    Some(&Outcome::Completed(ints(&[1, 3, 5])))
+  );
+  // Nested loops, the inner one over the outer element.
+  assert_eq!(
+    outcome_of(vec![
+      konst(Var::from_seq(Arc::new(vec![ints(&[1, 2]), ints(&[3])]))),
+      iterate(
+        &MAP,
+        vec![iterate(&FILTER, vec![is_more_equal(val(Var::Int(2)))], &[])],
+        &[("value", "row")],
+      ),
+    ]),
+    Outcome::Completed(Var::from_seq(Arc::new(vec![ints(&[2]), ints(&[3])])))
+  );
+  // Pushing to the iterated variable does not change the iteration.
+  assert_eq!(
+    outcome_of(vec![
+      konst(ints(&[1, 2, 3])),
+      declare("xs"),
+      konst(Var::Int(0)),
+      declare("n"),
+      get("xs"),
+      iterate(&FOR_EACH, vec![push("xs"), inc("n")], &[]),
+      get("n"),
+    ]),
+    Outcome::Completed(Var::Int(3))
+  );
+  // A failure in the body ends the loop; the collection it held is
+  // released with the frame.
+  let held = ints(&[1, 2, 3]);
+  let mut mesh = Mesh::new();
+  mesh.declare_var("xs", held.clone(), false);
+  mesh.add_wire(wire(
+    "w",
+    false,
+    vec![
+      get("xs"),
+      iterate(
+        &FOR_EACH,
+        vec![
+          konst(Var::string("stop here")),
+          ShardDef::new(&text::FAIL, vec![]),
+        ],
+        &[("value", "x")],
+      ),
+    ],
+  ));
+  let compiled = mesh.compile("w", Type::none()).unwrap();
+  let id = mesh.spawn(&compiled, Var::None).unwrap();
+  mesh.run(10);
+  match mesh.outcome(id) {
+    Some(Outcome::Failed(e)) => assert!(e.to_string().contains("stop here"), "{e}"),
+    other => panic!("{other:?}"),
+  }
+  drop(compiled);
+  drop(mesh);
+  let Var::Seq(items) = &held else {
+    unreachable!()
+  };
+  assert_eq!(
+    Arc::strong_count(items),
+    1,
+    "the loop released its snapshot"
+  );
+  // Reduce with init over a typed sequence.
+  assert_eq!(
+    outcome_of(vec![
+      konst(ints(&[1, 2, 3])),
+      reduce(vec![add(var("acc"))], &[("acc", "acc")], val(Var::Int(10))),
+    ]),
+    Outcome::Completed(Var::Int(16))
+  );
+}

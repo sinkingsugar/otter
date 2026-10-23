@@ -65,7 +65,8 @@ HOST = Path("<host target>")
 
 
 # The snippets the gate runs, by name (`common/snippets.rs`).
-SNIPPETS = ("path-static", "path-dynamic", "path-lenient")
+SNIPPETS = ("path-static", "path-dynamic", "path-lenient", "repeat-take", "foreach-sum", "foreach-named",
+            "repeat-push", "map-256", "filter-256", "reduce-256", "table-foreach")
 
 
 class Workload:

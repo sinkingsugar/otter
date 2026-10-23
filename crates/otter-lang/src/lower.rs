@@ -1436,7 +1436,21 @@ impl Lowerer<'_> {
   fn block(&mut self, out: &mut Vec<ShardDef>, prefix: &[PathStep], block: &Block) {
     let span = block.span;
     match &block.kind {
-      BlockKind::Shard { name, params } => self.shard(out, prefix, block, name, params.as_ref()),
+      BlockKind::Shard { name, params } => {
+        // A loop's names before its flow are declarations.
+        let named;
+        let params = match params {
+          Some(p) if is_loop_name(&name.node) => {
+            named = self.loop_params(&name.node, p);
+            match &named {
+              Some(p) => Some(p),
+              None => return,
+            }
+          }
+          p => p.as_ref(),
+        };
+        self.shard(out, prefix, block, name, params)
+      }
       BlockKind::Var { name, path, .. } if path.is_empty() => {
         self.emit(
           out,
@@ -2677,6 +2691,107 @@ impl Lowerer<'_> {
       cases.push((value, flow));
     }
     Some(ParamValue::Cases(cases))
+  }
+}
+
+/// Whether `name` is an iteration shard's (checked for every shard
+/// lowered: the length first).
+#[inline(always)]
+fn is_loop_name(name: &str) -> bool {
+  matches!(name.len(), 3 | 6 | 7) && loop_names(name).is_some()
+}
+
+/// The names an iteration shard takes before its flow, in order.
+fn loop_names(shard: &str) -> Option<&'static [&'static str]> {
+  match shard {
+    "ForEach" | "Map" | "Filter" => Some(&["value", "index"]),
+    "Reduce" => Some(&["acc", "value", "index"]),
+    _ => None,
+  }
+}
+
+impl Lowerer<'_> {
+  /// An iteration shard's parameters with the names before its flow as
+  /// named declarations: `ForEach(x i {...})` is `ForEach({...} value: x
+  /// index: i)`; `_` skips one (docs/iteration-and-access.md §4.1). The
+  /// flow is the last positional argument, unless given as `action:`.
+  #[inline(never)]
+  fn loop_params(&mut self, shard: &str, params: &Params) -> Option<Params> {
+    let names = loop_names(shard).expect("an iteration shard");
+    let positional: Vec<usize> = (0..params.items.len())
+      .filter(|&i| params.items[i].name.is_none())
+      .collect();
+    let action_named = params
+      .items
+      .iter()
+      .any(|p| p.name.as_ref().is_some_and(|n| n.node == "action"));
+    let given = if action_named {
+      &positional[..]
+    } else {
+      &positional[..positional.len().saturating_sub(1)]
+    };
+    if given.len() > names.len() {
+      let extra = &params.items[given[names.len()]];
+      self.problem(
+        Problem::construct(
+          extra.value.span,
+          "generic",
+          "too-many-names",
+          format!(
+            "{shard} takes at most {} names ({}), before its flow",
+            names.len(),
+            names.join(", ")
+          ),
+        )
+        .shard(shard),
+      );
+      return None;
+    }
+    // The flow (when positional) first, then the names, then what was
+    // named in the source.
+    let mut items: Vec<Param> = params
+      .items
+      .iter()
+      .enumerate()
+      .filter(|(i, p)| p.name.is_none() && !given.contains(i))
+      .map(|(_, p)| p.clone())
+      .collect();
+    let mut ok = true;
+    for (n, &i) in given.iter().enumerate() {
+      let item = &params.items[i];
+      match &item.value.blocks[..] {
+        [b] if matches!(&b.kind, BlockKind::Var { name, path, .. } if path.is_empty() && name.node == "_") =>
+          {}
+        [b] if matches!(&b.kind, BlockKind::Var { path, .. } if path.is_empty()) => {
+          items.push(Param {
+            name: Some(Spanned {
+              node: names[n].to_string(),
+              span: b.span,
+            }),
+            value: item.value.clone(),
+          })
+        }
+        _ => {
+          ok = false;
+          self.problem(
+            Problem::construct(
+              item.value.span,
+              "generic",
+              "expected-variable-name",
+              format!(
+                "{shard}'s arguments before its flow are names to bind (`{shard}(x i {{...}})`), or `_` to skip one"
+              ),
+            )
+            .shard(shard),
+          );
+        }
+      }
+    }
+    items.extend(params.items.iter().filter(|p| p.name.is_some()).cloned());
+    ok.then_some(Params {
+      items,
+      span: params.span,
+    })
   }
 }
 

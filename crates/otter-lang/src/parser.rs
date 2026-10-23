@@ -367,11 +367,11 @@ impl<'a> Parser<'a> {
         }
       } else {
         match &t.tok {
+          Tok::Ident(n) if n == "_" => elements.push(None),
           Tok::Ident(n) => elements.push(Some(Spanned {
             node: n.clone(),
             span: t.span,
           })),
-          Tok::Underscore => elements.push(None),
           other => {
             ok = false;
             self.problem(Problem::syntax(

@@ -332,6 +332,34 @@ composite!(Sub, CompiledFlow, SUB_DESC, compose_sub, Sub);
 composite!(Once, CompiledFlow, ONCE_DESC, compose_once, Once);
 composite!(Repeat, RepeatCompiled, REPEAT_DESC, compose_repeat, Repeat);
 composite!(
+  ForEach,
+  iterate::LoopCompiled,
+  iterate::FOR_EACH_DESC,
+  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::ForEach),
+  Loop
+);
+composite!(
+  Map,
+  iterate::LoopCompiled,
+  iterate::MAP_DESC,
+  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::Map),
+  Loop
+);
+composite!(
+  Filter,
+  iterate::LoopCompiled,
+  iterate::FILTER_DESC,
+  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::Filter),
+  Loop
+);
+composite!(
+  Reduce,
+  iterate::LoopCompiled,
+  iterate::REDUCE_DESC,
+  |args, ctx| iterate::compose_loop(args, ctx, iterate::LoopKind::Reduce),
+  Loop
+);
+composite!(
   If,
   control::IfCompiled,
   control::IF_DESC,

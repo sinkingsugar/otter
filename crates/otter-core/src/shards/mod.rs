@@ -15,6 +15,7 @@ pub mod control;
 pub mod data;
 pub mod date;
 pub mod instances;
+pub mod iterate;
 pub mod leaf;
 pub mod math;
 pub mod seqs;
@@ -67,6 +68,11 @@ pub static RUN: ShardType = ShardType::new(control::RUN_DESC).implemented_by::<s
 pub static SUB: ShardType = ShardType::new(SUB_DESC).implemented_by::<sl::Sub>();
 pub static ONCE: ShardType = ShardType::new(ONCE_DESC).composed_by(compose_once_node);
 pub static REPEAT: ShardType = ShardType::new(REPEAT_DESC).implemented_by::<sl::Repeat>();
+pub static FOR_EACH: ShardType =
+  ShardType::new(iterate::FOR_EACH_DESC).implemented_by::<sl::ForEach>();
+pub static MAP: ShardType = ShardType::new(iterate::MAP_DESC).implemented_by::<sl::Map>();
+pub static FILTER: ShardType = ShardType::new(iterate::FILTER_DESC).implemented_by::<sl::Filter>();
+pub static REDUCE: ShardType = ShardType::new(iterate::REDUCE_DESC).implemented_by::<sl::Reduce>();
 pub static WHILE: ShardType = ShardType::new(WHILE_DESC).implemented_by::<sl::While>();
 pub static PAUSE: ShardType = ShardType::new(PAUSE_DESC).composed_by(compose_pause_node);
 pub static SPAWN: ShardType = ShardType::new(SPAWN_DESC).implemented_by::<sl::Spawn>();
@@ -216,6 +222,10 @@ pub static CATALOG: &[&ShardType] = &[
   &date::DATE_PARSE,
   &date::DATE_FORMAT,
   &REPEAT,
+  &FOR_EACH,
+  &MAP,
+  &FILTER,
+  &REDUCE,
   &WHILE,
   &PAUSE,
   &SPAWN,
@@ -389,7 +399,17 @@ pub(crate) fn compose_const(args: &Args) -> Result<Composed<Var>> {
 /// `input`, and not a name already visible (no shadowing, golden-path.md
 /// §3.2). Frontend temporaries (`%` names) are exempt.
 pub(crate) fn check_declaration(args: &Args, ctx: &mut ComposeCtx<'_>, shard: &str) -> Result<()> {
-  let name = variable(args, "variable");
+  check_declaration_of(args, ctx, shard, "variable")
+}
+
+/// [`check_declaration`] for the name in parameter `param`.
+pub(crate) fn check_declaration_of(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+  shard: &str,
+  param: &str,
+) -> Result<()> {
+  let name = variable(args, param);
   if name.starts_with('%') {
     return Ok(());
   }
@@ -397,17 +417,27 @@ pub(crate) fn check_declaration(args: &Args, ctx: &mut ComposeCtx<'_>, shard: &s
     return Err(param_error(
       args,
       shard,
-      "variable",
+      param,
       "compose-error",
       "duplicate-binding",
       format!("{name} is already a flow parameter of this function; pick another name"),
+    ));
+  }
+  if name == "_" {
+    return Err(param_error(
+      args,
+      shard,
+      param,
+      "compose-error",
+      "misplaced-underscore",
+      "`_` skips a name, only in a `[...]` pattern or among a loop's names (`ForEach(_ i {...})`); pick a name".into(),
     ));
   }
   if name == "input" {
     return Err(param_error(
       args,
       shard,
-      "variable",
+      param,
       "compose-error",
       "reserved-name",
       "`input` is reserved: it names the entry value of the wire or function; pick another name"
@@ -432,7 +462,7 @@ pub(crate) fn check_declaration(args: &Args, ctx: &mut ComposeCtx<'_>, shard: &s
     let mut err = param_error(
       args,
       shard,
-      "variable",
+      param,
       "compose-error",
       "duplicate-binding",
       format!("{message}; {help}"),
@@ -2015,6 +2045,28 @@ pub mod defs {
   }
   pub fn repeat(body: Vec<ShardDef>, times: ParamValue) -> ShardDef {
     ShardDef::new(&REPEAT, vec![ParamValue::Flow(body), times])
+  }
+  /// `ForEach`, `Map`, `Filter` or `Reduce` (`shard`) with `body` and the
+  /// names given as `(parameter, name)`: `("value", "x")`, `("index",
+  /// "i")`, and `Reduce`'s `("acc", "a")`.
+  pub fn iterate(
+    shard: &'static ShardType,
+    body: Vec<ShardDef>,
+    names: &[(&str, &str)],
+  ) -> ShardDef {
+    let mut args = vec![Arg::pos(ParamValue::Flow(body))];
+    args.extend(
+      names
+        .iter()
+        .map(|(param, name)| Arg::named(param, var(name))),
+    );
+    ShardDef::with_args(shard, args)
+  }
+  /// `Reduce` with `init`.
+  pub fn reduce(body: Vec<ShardDef>, names: &[(&str, &str)], init: ParamValue) -> ShardDef {
+    let mut def = iterate(&REDUCE, body, names);
+    def.args.push(Arg::named("init", init));
+    def
   }
   pub fn pause() -> ShardDef {
     ShardDef::new(&PAUSE, vec![])

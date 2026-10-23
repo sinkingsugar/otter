@@ -1698,11 +1698,176 @@ fn destructuring_binds_several_names() {
   let d = load_errors("{a: [1 2]} = {a: [x y]}");
   assert_eq!((d[0].code, at(&d[0])), ("nested-pattern", (1, 18)));
   assert!(d[0].message.contains("two steps"), "{}", d[0].message);
-  assert_eq!(load_errors("{a: 1} = {_}")[0].code, "pattern");
+  assert_eq!(
+    check("{_: 1} = {_}").diagnostics[0].code,
+    "misplaced-underscore"
+  );
   assert_eq!(load_errors("[1] = []")[0].code, "pattern");
   assert_eq!(load_errors("[1] = [_]")[0].code, "pattern");
   assert_eq!(load_errors("[1] = [a")[0].code, "unclosed");
-  assert_eq!(load_errors("_")[0].code, "expected-value");
+  assert_eq!(check("_").diagnostics[0].code, "misplaced-underscore");
+  assert_eq!(check("1 = _").diagnostics[0].code, "misplaced-underscore");
+}
+
+/// ForEach, Map, Filter and Reduce (docs/iteration-and-access.md §4).
+#[test]
+fn iteration_shards() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let ints = |v: &[i64]| seq(v.iter().map(|i| Var::Int(*i)).collect());
+  let report = run(
+    "[1 2 3 4] = xs
+0 | Var(sum)
+xs | ForEach(x i { x | Add(sum) | Add(i) | Update(sum) }) | Count = passed
+xs | Map(x { x | Math.Multiply(10) }) = tens
+xs | Map({Add(1)}) = plus
+xs | Filter({IsMore(2)}) = big
+xs | Filter(_ i { i | IsLess(2) }) = first-two
+xs | Reduce(acc x { x | Add(acc) } init: 100) = total
+xs | Reduce(acc x { x | Add(acc) }) = total2
+xs | Reduce(acc _ i { i | Add(acc) } init: 0) = indices
+[{name: \"a\" age: 30} {name: \"b\" age: 12}] = people
+people | Map({.name}) = names
+people | Filter({.age | IsMore(17)}) | Map(p { p = {name} name }) = adults
+[sum passed tens plus big first-two total total2 indices names adults]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::Int(16),
+      Var::Int(4),
+      ints(&[10, 20, 30, 40]),
+      ints(&[2, 3, 4, 5]),
+      ints(&[3, 4]),
+      ints(&[1, 2]),
+      Var::Int(110),
+      Var::Int(10),
+      Var::Int(6),
+      seq(vec![Var::string("a"), Var::string("b")]),
+      seq(vec![Var::string("a")]),
+    ])
+  );
+  // Tables: value then key, in key order.
+  let report = run(
+    "{b: 2 a: 1 c: 3} = t
+[] | Var(keys)
+t | ForEach(v k { k | Push(keys) })
+t | Map(v k { v | Add(1) }) = plus
+t | Filter(v { v | IsMore(1) }) = big
+t | Reduce(acc v { v | Add(acc) }) = total
+[keys plus big total]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      seq(vec![Var::string("a"), Var::string("b"), Var::string("c")]),
+      Var::table([("a", Var::Int(2)), ("b", Var::Int(3)), ("c", Var::Int(4))]),
+      Var::table([("b", Var::Int(2)), ("c", Var::Int(3))]),
+      Var::Int(6),
+    ])
+  );
+  // Any (parsed JSON): checked when the loop starts.
+  let report = run(
+    "\"[{\\\"n\\\": 1}, {\\\"n\\\": 2}]\" | FromJson = j
+j | Map({.n | ExpectInt | Add(1)}) = ns
+0 | Var(rows)
+j | ForEach(row i { row = {n} Inc(rows) })
+\"{\\\"x\\\": 5}\" | FromJson | Map(v k { k }) = keys
+[ns rows keys]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      seq(vec![Var::Int(2), Var::Int(3)]),
+      Var::Int(2),
+      Var::table([("x", Var::string("x"))]),
+    ])
+  );
+  let report = run(
+    "@wire(w { \"5\" | FromJson | ForEach({Pass}) })\n@mesh(m) @schedule(m w) @run(m)",
+    &no_defines(),
+  );
+  match report.outcomes.iter().find(|(w, _)| w == "w") {
+    Some((_, Some(Outcome::Failed(e)))) => assert!(
+      e.to_string()
+        .contains("ForEach needs a sequence or a table, got Int"),
+      "{e}"
+    ),
+    other => panic!("{other:?}"),
+  }
+  // The collection is read once: pushing to its variable in the body does
+  // not change the iteration.
+  let report = run(
+    "[1 2] | Var(xs)\n0 | Var(n)\nxs | ForEach({ 9 | Push(xs) Inc(n) })\n[n xs | Count]",
+    &no_defines(),
+  );
+  assert_eq!(completed(&report, "root"), ints(&[2, 4]));
+  // Nested loops pick other names; names are block-local.
+  let report = run(
+    "[[1 2] [3]] | Map(row { row | Map(x { x | Add(1) }) })",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![ints(&[2, 3]), ints(&[4])])
+  );
+  let report = check("[[1]] | ForEach(x { x | ForEach(x {Pass}) })");
+  assert_eq!(report.diagnostics[0].code, "duplicate-binding");
+  let report = check("[1] | ForEach(x {Pass})\nx");
+  assert_eq!(report.diagnostics[0].code, "unknown-variable");
+  // Compose errors.
+  assert_eq!(
+    check("[1] | Filter({Add(1)})").diagnostics[0].code,
+    "predicate-not-bool"
+  );
+  assert_eq!(
+    check("[1] | Reduce(acc x { \"s\" } init: 0)").diagnostics[0].code,
+    "wrong-output-type"
+  );
+  let d = &check("\"abc\" | ForEach({Pass})").diagnostics[0];
+  assert_eq!(d.code, "input-type-mismatch");
+  assert!(d.message.contains("String.Split"), "{}", d.message);
+  assert_eq!(
+    check("[1] | ForEach(x x {Pass})").diagnostics[0].code,
+    "duplicate-binding"
+  );
+  let d = load_errors("[1] | ForEach(a b c {Pass})");
+  assert_eq!((d[0].code, at(&d[0])), ("too-many-names", (1, 19)));
+  assert_eq!(
+    load_errors("[1] | ForEach(1 {Pass})")[0].code,
+    "expected-variable-name"
+  );
+  assert_eq!(check("_ | Log").diagnostics[0].code, "misplaced-underscore");
+  assert_eq!(
+    check("1 | Var(_)").diagnostics[0].code,
+    "misplaced-underscore"
+  );
+  // An empty input without init.
+  let report = run(
+    "@wire(w { [] | ExpectIntSeq | Reduce(acc x { x }) })\n@mesh(m) @schedule(m w) @run(m)",
+    &no_defines(),
+  );
+  match report.outcomes.iter().find(|(w, _)| w == "w") {
+    Some((_, Some(Outcome::Failed(e)))) => assert!(e.to_string().contains("init:"), "{e}"),
+    other => panic!("{other:?}"),
+  }
+}
+
+/// A body may suspend; the loop resumes at the same element.
+#[test]
+fn iteration_bodies_suspend_and_resume() {
+  let report = run(
+    "[] | Var(seen)\n[1 2 3] | ForEach(x i { Pause x | Push(seen) }) | Map(x { Pause x | Add(1) }) = after\n[seen after]",
+    &no_defines(),
+  );
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let ints = |v: &[i64]| seq(v.iter().map(|i| Var::Int(*i)).collect());
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![ints(&[1, 2, 3]), ints(&[2, 3, 4])])
+  );
 }
 
 #[test]
@@ -3213,7 +3378,7 @@ fn implicit_loop_variables_are_rejected_with_the_1x_help() {
   assert_eq!(at(&d[0]), (1, 23));
   assert!(d[0].message.contains("`$0`"), "{}", d[0].message);
   assert!(
-    d[0].message.contains("the element is the block's input"),
+    d[0].message.contains("ForEach(x {...})"),
     "{}",
     d[0].message
   );

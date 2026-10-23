@@ -549,6 +549,10 @@ static SAFE: &[(&ShardType, u32)] = {
     (&SUB, 1),
     (&REPEAT, 1),
     (&WHILE, 1),
+    (&FOR_EACH, 1),
+    (&MAP, 1),
+    (&FILTER, 1),
+    (&REDUCE, 1),
     // Runs the block its call passed, which composes (and is checked)
     // at the call site like any other code there.
     (&RUN, 1),
