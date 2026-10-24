@@ -7,9 +7,10 @@
 //! (`IsInt`, `IsFloat`, `IsBool`, `IsString`, `IsBytes`, `IsSeq`,
 //! `IsTable`), `Fail` and `Sort`, then `String.CodePoints`,
 //! `String.FromCodePoints`, `String.CleanUTF8`, `HexToBytes`,
-//! `BytesToInts` and `IntsToBytes`. All leaf shards. The first group does
-//! not run at compose time (not on the audited list in `compose_time.rs`,
-//! its work not charged to the meter); the second does, charged by size.
+//! `BytesToInts`, `IntsToBytes`, `String.PadStart` and `String.PadEnd`.
+//! All leaf shards. The first group does not run at compose time (not on
+//! the audited list in `compose_time.rs`, its work not charged to the
+//! meter); the second does, charged by size.
 //!
 //! Strings are measured in characters, as `Count` does: `Slice` on a
 //! string takes characters, never a part of one.
@@ -57,6 +58,8 @@ pub static STRING_CLEAN_UTF8: ShardType = leaf_type::<Pure<CleanUtf8Op>>();
 pub static HEX_TO_BYTES: ShardType = leaf_type::<Pure<HexToBytesOp>>();
 pub static BYTES_TO_INTS: ShardType = leaf_type::<Pure<BytesToIntsOp>>();
 pub static INTS_TO_BYTES: ShardType = leaf_type::<Pure<IntsToBytesOp>>();
+pub static STRING_PAD_START: ShardType = leaf_type::<Pad<false>>();
+pub static STRING_PAD_END: ShardType = leaf_type::<Pad<true>>();
 
 const STRING: &[TypeName] = &[TypeName::String];
 const SEQ: &[TypeName] = &[TypeName::Seq];
@@ -1375,6 +1378,149 @@ impl PureOp for IntsToBytesOp {
       }
     }
     Ok(Var::from_bytes(Arc::from(out)))
+  }
+}
+
+// --- String.PadStart, String.PadEnd ---
+
+static PAD_PARAMS: &[ParamDecl] = &[
+  decl(
+    "width",
+    crate::shard_doc!(
+      "The length to pad to, in characters: an Int literal or variable. A string already this long or longer is unchanged."
+    ),
+    Forms::LITERAL.or(Forms::VARIABLE),
+    &[TypeName::Int],
+    Requirement::Required,
+  ),
+  decl(
+    "with",
+    crate::shard_doc!(
+      "The character to pad with: a String of exactly one character, literal or variable."
+    ),
+    TEXT,
+    STRING,
+    Requirement::Default(DefaultValue::Str(" ")),
+  ),
+];
+
+pub struct PadCompiled {
+  width: Operand,
+  with: Operand,
+}
+
+/// `String.PadStart` (`END` false) and `String.PadEnd`.
+pub struct Pad<const END: bool>;
+impl<const END: bool> Pad<END> {
+  const NAME: &'static str = if END {
+    "String.PadEnd"
+  } else {
+    "String.PadStart"
+  };
+}
+
+/// The one character of a padding string, if it is one.
+fn pad_char(text: &str) -> Option<char> {
+  let mut chars = text.chars();
+  match (chars.next(), chars.next()) {
+    (Some(c), None) => Some(c),
+    _ => None,
+  }
+}
+
+impl<const END: bool> LeafShard for Pad<END> {
+  type Compiled = PadCompiled;
+  no_state!(PadCompiled);
+  const DESC: ShardDesc = desc(
+    Self::NAME,
+    if END {
+      crate::shard_doc!("Pads a string at the end to a width in characters.")
+    } else {
+      crate::shard_doc!("Pads a string at the start to a width in characters.")
+    },
+    crate::shard_doc!(
+      "Characters are Unicode scalar values, as `Count` counts them. `with` must be exactly one character: a literal of another length is a compose error, a variable's an activation error. A string already `width` characters long or longer is output unchanged, never cut. `5 | ToString | String.PadStart(width: 2 with: \"0\")` is `\"05\"`."
+    ),
+    PAD_PARAMS,
+    InputDesc::Types(STRING),
+    OutputDesc::Fixed(TypeName::String),
+  );
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<PadCompiled>> {
+    input_one_of(ctx, Self::NAME, STRING)?;
+    let (width, _) = Operand::compose_arg(args, "width", Self::NAME, ctx)?;
+    let (with, _) = Operand::compose_arg(args, "with", Self::NAME, ctx)?;
+    if let Operand::Const(Var::String(s)) = &with
+      && pad_char(s).is_none()
+    {
+      return Err(param_error(
+        args,
+        Self::NAME,
+        "with",
+        "compose-error",
+        "invalid-argument-value",
+        format!(
+          "`with` must be exactly one character, got {} (\"{}\")",
+          s.chars().count(),
+          **s
+        ),
+      ));
+    }
+    Ok(Composed {
+      compiled: PadCompiled { width, with },
+      output: Type::string(),
+    })
+  }
+  fn activate(c: &PadCompiled, _: &mut (), ctx: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
+    let width = match c.width.get(ctx) {
+      Var::Int(i) => i,
+      other => {
+        return Err(fail(
+          Self::NAME,
+          &format!("width is {}, not an Int", other.type_of()),
+        ));
+      }
+    };
+    let with = text_of(&c.with, ctx);
+    let Some(fill) = pad_char(&with) else {
+      return Err(fail(
+        Self::NAME,
+        &format!(
+          "`with` must be exactly one character, got {}",
+          with.chars().count()
+        ),
+      ));
+    };
+    let text = input.as_str().unwrap_or("");
+    let len = text.chars().count();
+    let Some(missing) = usize::try_from(width)
+      .ok()
+      .and_then(|w| w.checked_sub(len))
+      .filter(|m| *m > 0)
+    else {
+      return Ok(Flow::Next(input.clone()));
+    };
+    let bytes = missing
+      .checked_mul(fill.len_utf8())
+      .and_then(|b| b.checked_add(text.len()));
+    if let Some(meter) = ctx.meter() {
+      meter_bytes(input, meter)?;
+      meter.allocate(bytes.unwrap_or(usize::MAX))?;
+    }
+    let mut out = String::new();
+    if bytes.is_none_or(|b| out.try_reserve_exact(b).is_err()) {
+      return Err(fail(
+        Self::NAME,
+        &format!("padding to {width} characters needs more memory than there is"),
+      ));
+    }
+    if END {
+      out.push_str(text);
+    }
+    out.extend(std::iter::repeat_n(fill, missing));
+    if !END {
+      out.push_str(text);
+    }
+    Ok(Flow::Next(Var::from_string(Arc::from(out))))
   }
 }
 

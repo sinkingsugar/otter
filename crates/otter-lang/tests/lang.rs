@@ -5663,6 +5663,44 @@ fn first_and_last_read_the_ends_of_a_sequence() {
 }
 
 #[test]
+fn pad_start_and_end_pad_by_characters() {
+  let v = root_value(
+    r#"
+3 = three
+"*" = star
+[
+  (5 | ToString | String.PadStart(width: 2 with: "0"))
+  ("ab" | String.PadEnd(width: three with: star))
+  ("héé" | String.PadStart(width: 5))
+  ("x" | String.PadStart(width: 3 with: "é"))
+  ("long" | String.PadStart(width: 2))
+  ("long" | String.PadEnd(width: 4 with: "-"))
+  ("x" | String.PadEnd(width: -1))
+  #( "7" | String.PadStart(width: 3 with: "0") )
+]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"["05" "ab*" "  héé" "ééx" "long" "long" "x" "007"]"#
+  );
+  assert!(
+    root_failure(r#""" = w  "a" | String.PadStart(width: 3 with: w)"#)
+      .contains("exactly one character")
+  );
+  for (script, param) in [
+    (r#""a" | String.PadStart(width: 3 with: "ab")"#, "with"),
+    (r#""a" | String.PadEnd(width: 3 with: "")"#, "with"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, "invalid-argument-value", "{script}");
+    assert_eq!(d[0].param.as_deref(), Some(param), "{script}");
+  }
+  let d = load_or_compose_errors("1 | String.PadStart(width: 2)");
+  assert_eq!(d[0].code, "input-type-mismatch");
+}
+
+#[test]
 fn checks_assertions_and_type_changes() {
   let v = root_value(
     r#"

@@ -194,6 +194,8 @@ pub static CATALOG: &[&ShardType] = &[
   &text::HEX_TO_BYTES,
   &text::BYTES_TO_INTS,
   &text::INTS_TO_BYTES,
+  &text::STRING_PAD_START,
+  &text::STRING_PAD_END,
   &checks::IS_TRUE,
   &checks::IS_FALSE,
   &checks::PASS,
