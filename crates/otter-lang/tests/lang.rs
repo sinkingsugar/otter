@@ -5554,6 +5554,74 @@ fn reverse_and_index_of() {
 }
 
 #[test]
+fn expect_with_a_default_gives_it_for_another_type() {
+  let v = root_value(
+    r#"
+"{\"limit\": \"x\", \"runs\": [1, 2], \"mixed\": [1, \"a\"], \"rate\": 0.5}" | FromJson | ExpectTable = args
+7 = seven
+[] | ExpectIntSeq = no-runs
+[1 2 3] | ToFloat3 = f3
+[
+  (args.limit | ExpectInt(default: 30) | Add(1))
+  (args.missing | ExpectInt(default: seven))
+  (args.rate | ExpectFloat(default: 1.0))
+  (args.limit | ExpectString(default: "") | String.ToUpper)
+  (args.rate | ExpectBool(default: false))
+  (args.runs | ExpectSeq(default: []) | Count)
+  (args.limit | ExpectTable(default: {}) | Count)
+  (args.runs | ExpectIntSeq(default: []))
+  (args.mixed | ExpectIntSeq(default: no-runs))
+  (args.limit | ExpectStringSeq(default: ["none"]))
+  (args.limit | ExpectFloat3(default: f3))
+  (args.limit | ExpectFloat2Seq(default: []) | Count)
+  (args.runs.5? | ExpectInt(default: 0))
+  #( none | ToAny | ExpectInt(default: 4) )
+]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[31 7 0.5 "X" false 2 0 [1 2] [] ["none"] @f3(1.0 2.0 3.0) 0 0 4]"#
+  );
+  // Without a default, a value of another type still fails.
+  assert!(root_failure(r#""[1]" | FromJson | ExpectInt"#).contains("expected Int"));
+  // The default must be of the expected type: a literal by value, a
+  // variable by type, located on the argument.
+  for (script, code) in [
+    (
+      r#"none | ToAny | ExpectInt(default: "a")"#,
+      "invalid-argument-value",
+    ),
+    (
+      "none | ToAny | ExpectInt(default: 1.5)",
+      "invalid-argument-value",
+    ),
+    (
+      "none | ToAny | ExpectIntSeq(default: [\"a\"])",
+      "invalid-argument-value",
+    ),
+    (
+      r#""a" = s  none | ToAny | ExpectInt(default: s)"#,
+      "wrong-variable-type",
+    ),
+    (
+      "[1] = xs  none | ToAny | ExpectStringSeq(default: xs)",
+      "wrong-variable-type",
+    ),
+    // The input must still be able to hold the type.
+    (r#""a" | ExpectInt(default: 1)"#, "input-type-mismatch"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+    if code != "input-type-mismatch" {
+      assert_eq!(d[0].param.as_deref(), Some("default"), "{script}");
+    }
+  }
+  // The output is the expected type: typed use composes.
+  assert!(check("none | ToAny | ExpectString(default: \"\") | String.Trim").ok());
+}
+
+#[test]
 fn checks_assertions_and_type_changes() {
   let v = root_value(
     r#"
