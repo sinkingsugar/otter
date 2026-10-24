@@ -21,29 +21,29 @@
 
 @fn(SearchFlights input: {input: {} env: {} working-dir: String} output: String params: {} {
   input.input = args
-  args.from | StringOr(default: "") | String.ToUpper = from
-  args.to | StringOr(default: "") | String.ToUpper = to
-  args.date | StringOr(default: "") = date
+  args.from | ExpectString(default: "") | String.ToUpper = from
+  args.to | ExpectString(default: "") | String.ToUpper = to
+  args.date | ExpectString(default: "") = date
   All({from | IsNot("")} {to | IsNot("")} {date | IsNot("")}) | When({Not} {
     "from, to and date are required" | Fail
   })
-  args.return-date | StringOr(default: "") = return-date
+  args.return-date | ExpectString(default: "") = return-date
   return-date | IsNot("") = round-trip
   round-trip | If({Is(true)} {1} {2}) = trip-type
   // Google takes at most 9 passengers per search.
-  args.adults | IntOr(default: 1) | Max(1) | Min(9) = adults
+  args.adults | ExpectInt(default: 1) | Max(1) | Min(9) = adults
   9 | Sub(adults) = seats-left
-  args.children | IntOr(default: 0) | Max(0) | Min(seats-left) = children
-  args.currency | StringOr(default: "USD") | String.ToUpper = currency
-  args.seat | StringOr(default: "economy") | Match([
+  args.children | ExpectInt(default: 0) | Max(0) | Min(seats-left) = children
+  args.currency | ExpectString(default: "USD") | String.ToUpper = currency
+  args.seat | ExpectString(default: "economy") | Match([
     "economy" {1}
     "premium-economy" {2}
     "business" {3}
     "first" {4}
   ] default: {1}) = seat
   // -1: any number of stops; else at most this many (filtered here).
-  args.max-stops | IntOr(default: -1) = max-stops
-  args.sort | StringOr(default: "best") = sort-mode
+  args.max-stops | ExpectInt(default: -1) = max-stops
+  args.sort | ExpectString(default: "best") = sort-mode
 
   // The tfs itinerary token.
   [] | Var(info)
@@ -76,11 +76,11 @@
   })
 
   // Flight rows are data[3][0]; order them as asked (stable).
-  data.3.0? | SeqOr = rows
+  data.3.0? | ExpectSeq(default: []) = rows
   rows | Map(row i {
     sort-mode | Match([
       "cheapest" {row | Price}
-      "duration" {row.0.9? | IntOr(default: @no-price)}
+      "duration" {row.0.9? | ExpectInt(default: @no-price)}
     ] default: {i}) = key
     [key i]
   }) | Sort = order
@@ -91,24 +91,24 @@
     Maybe({
       rows | Take(index) = row
       row.0? = detail
-      detail.2? | SeqOr = legs
+      detail.2? | ExpectSeq(default: []) = legs
       legs | Count | Sub(1) | Max(0) = stops
       All({shown | IsLess(12)} {legs | Count | IsMore(0)} {Any({max-stops | Is(-1)} {stops | IsLessEqual(max-stops)})}) | When({Is(true)} {
         row | Price = price
         price | If({Is(@no-price)} {"n/a"} {price | ToString}) = price-text
-        detail.9? | IntOr(default: 0) = total
+        detail.9? | ExpectInt(default: 0) = total
         stops | If({Is(0)} {"nonstop"} {f"{stops} stop(s)"}) = stops-text
         Inc(shown)
         f"\n{shown}. {price-text} {currency} - {total | FmtMins} - {stops-text}\n" | Push(lines)
 
         legs | ForEach(leg {
-          leg.3? | StringOr(default: "?") = leg-from
-          leg.6? | StringOr(default: "?") = leg-to
-          leg.22.0? | StringOr(default: "") = airline-code
-          leg.22.1? | StringOr(default: "") = flight-number
-          leg.22.3? | StringOr(default: "") = airline-name
-          leg.17? | StringOr(default: "") = aircraft
-          leg.11? | IntOr(default: 0) = leg-mins
+          leg.3? | ExpectString(default: "?") = leg-from
+          leg.6? | ExpectString(default: "?") = leg-to
+          leg.22.0? | ExpectString(default: "") = airline-code
+          leg.22.1? | ExpectString(default: "") = flight-number
+          leg.22.3? | ExpectString(default: "") = airline-name
+          leg.17? | ExpectString(default: "") = aircraft
+          leg.11? | ExpectInt(default: 0) = leg-mins
           leg.20? | FmtDateTime(time: leg.8?) = departs
           leg.21? | FmtDateTime(time: leg.10?) = arrives
           aircraft | If({Is("")} {""} {f", {aircraft}"}) = aircraft-text
@@ -116,10 +116,10 @@
         })
 
         // Layovers, detail[13]: [minutes IATA IATA none airport-name city ...].
-        detail.13? | SeqOr | ForEach(layover {
-          layover.0? | IntOr(default: 0) = layover-mins
-          layover.1? | StringOr(default: "?") = layover-code
-          layover.4? | StringOr(default: "") = layover-name
+        detail.13? | ExpectSeq(default: []) | ForEach(layover {
+          layover.0? | ExpectInt(default: 0) = layover-mins
+          layover.1? | ExpectString(default: "?") = layover-code
+          layover.4? | ExpectString(default: "") = layover-name
           layover-name | If({Is("")} {""} {f" ({layover-name})"}) = layover-name-text
           f"   layover: {layover-mins | FmtMins} at {layover-code}{layover-name-text}\n" | Push(lines)
         })

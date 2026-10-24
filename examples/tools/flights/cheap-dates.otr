@@ -17,28 +17,28 @@
 
 // The cheapest price among a page's rows, or `no-price`.
 @fn(Cheapest input: Any output: Int params: {} {
-  .3.0? | SeqOr | Reduce(best row { row | Price | Min(best) } init: @no-price)
+  .3.0? | ExpectSeq(default: []) | Reduce(best row { row | Price | Min(best) } init: @no-price)
 })
 
 @fn(CheapDates input: {input: {} env: {} working-dir: String} output: String params: {} {
   input.input = args
-  args.from | StringOr(default: "") | String.ToUpper = from
-  args.to | StringOr(default: "") | String.ToUpper = to
-  args.from-date | StringOr(default: "") = from-date
-  args.to-date | StringOr(default: "") = to-date
+  args.from | ExpectString(default: "") | String.ToUpper = from
+  args.to | ExpectString(default: "") | String.ToUpper = to
+  args.from-date | ExpectString(default: "") = from-date
+  args.to-date | ExpectString(default: "") = to-date
   All({from | IsNot("")} {to | IsNot("")} {from-date | IsNot("")} {to-date | IsNot("")}) | When({Not} {
     "from, to, from-date and to-date are required" | Fail
   })
   // Google takes at most 9 passengers per search.
-  args.adults | IntOr(default: 1) | Max(1) | Min(9) = adults
-  args.currency | StringOr(default: "USD") | String.ToUpper = currency
-  args.seat | StringOr(default: "economy") | Match([
+  args.adults | ExpectInt(default: 1) | Max(1) | Min(9) = adults
+  args.currency | ExpectString(default: "USD") | String.ToUpper = currency
+  args.seat | ExpectString(default: "economy") | Match([
     "economy" {1}
     "premium-economy" {2}
     "business" {3}
     "first" {4}
   ] default: {1}) = seat
-  args.duration | IntOr(default: 0) | Max(0) = duration
+  args.duration | ExpectInt(default: 0) | Max(0) = duration
   duration | IsMore(0) = round-trip
   round-trip | If({Is(true)} {1} {2}) = trip-type
 
