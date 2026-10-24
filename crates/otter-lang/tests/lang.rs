@@ -5554,6 +5554,195 @@ fn reverse_and_index_of() {
 }
 
 #[test]
+fn expect_with_a_default_gives_it_for_another_type() {
+  let v = root_value(
+    r#"
+"{\"limit\": \"x\", \"runs\": [1, 2], \"mixed\": [1, \"a\"], \"rate\": 0.5}" | FromJson | ExpectTable = args
+7 = seven
+[] | ExpectIntSeq = no-runs
+[1 2 3] | ToFloat3 = f3
+[
+  (args.limit | ExpectInt(default: 30) | Add(1))
+  (args.missing | ExpectInt(default: seven))
+  (args.rate | ExpectFloat(default: 1.0))
+  (args.limit | ExpectString(default: "") | String.ToUpper)
+  (args.rate | ExpectBool(default: false))
+  (args.runs | ExpectSeq(default: []) | Count)
+  (args.limit | ExpectTable(default: {}) | Count)
+  (args.runs | ExpectIntSeq(default: []))
+  (args.mixed | ExpectIntSeq(default: no-runs))
+  (args.limit | ExpectStringSeq(default: ["none"]))
+  (args.limit | ExpectFloat3(default: f3))
+  (args.limit | ExpectFloat2Seq(default: []) | Count)
+  (args.runs.5? | ExpectInt(default: 0))
+  #( none | ToAny | ExpectInt(default: 4) )
+]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"[31 7 0.5 "X" false 2 0 [1 2] [] ["none"] @f3(1.0 2.0 3.0) 0 0 4]"#
+  );
+  // Without a default, a value of another type still fails.
+  assert!(root_failure(r#""[1]" | FromJson | ExpectInt"#).contains("expected Int"));
+  // The default must be of the expected type: a literal by value, a
+  // variable by type, located on the argument.
+  for (script, code) in [
+    (
+      r#"none | ToAny | ExpectInt(default: "a")"#,
+      "invalid-argument-value",
+    ),
+    (
+      "none | ToAny | ExpectInt(default: 1.5)",
+      "invalid-argument-value",
+    ),
+    (
+      "none | ToAny | ExpectIntSeq(default: [\"a\"])",
+      "invalid-argument-value",
+    ),
+    (
+      r#""a" = s  none | ToAny | ExpectInt(default: s)"#,
+      "wrong-variable-type",
+    ),
+    (
+      "[1] = xs  none | ToAny | ExpectStringSeq(default: xs)",
+      "wrong-variable-type",
+    ),
+    // The input must still be able to hold the type.
+    (r#""a" | ExpectInt(default: 1)"#, "input-type-mismatch"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, code, "{script}: {}", d[0].message);
+    if code != "input-type-mismatch" {
+      assert_eq!(d[0].param.as_deref(), Some("default"), "{script}");
+    }
+  }
+  // The output is the expected type: typed use composes.
+  assert!(check("none | ToAny | ExpectString(default: \"\") | String.Trim").ok());
+}
+
+#[test]
+fn first_and_last_read_the_ends_of_a_sequence() {
+  let v = root_value(
+    r#"
+[1 2 3] = xs
+[] | ExpectIntSeq = empty
+"[1, \"a\"]" | FromJson = j
+5 | ToAny = five
+0 = zero
+[
+  (xs | First | Add(10)) (xs | Last)
+  (empty | First(default: 0) | Add(1)) (empty | Last(default: zero))
+  (j | First) (j | Last(default: 9))
+  (five | First(default: "not a sequence"))
+  (xs | Last(default: "unused"))
+  #( [4 5] | Last )
+]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"[11 3 1 0 1 "a" "not a sequence" 3 5]"#);
+  assert_eq!(
+    root_failure("[] | ExpectIntSeq | First"),
+    "activation error: First: the sequence is empty"
+  );
+  assert_eq!(
+    root_failure("5 | ToAny | Last"),
+    "activation error: Last: needs a sequence, got Int"
+  );
+  // A default of another type joins the element type.
+  let d = load_or_compose_errors(r#"[1] | First(default: "x") | Add(1)"#);
+  assert_eq!(d[0].code, "input-type-mismatch", "{}", d[0].message);
+  for script in ["1 | First", r#""ab" | Last(default: "")"#] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(
+      d[0].code, "input-type-mismatch",
+      "{script}: {}",
+      d[0].message
+    );
+  }
+}
+
+#[test]
+fn pad_start_and_end_pad_by_characters() {
+  let v = root_value(
+    r#"
+3 = three
+"*" = star
+[
+  (5 | ToString | String.PadStart(width: 2 with: "0"))
+  ("ab" | String.PadEnd(width: three with: star))
+  ("héé" | String.PadStart(width: 5))
+  ("x" | String.PadStart(width: 3 with: "é"))
+  ("long" | String.PadStart(width: 2))
+  ("long" | String.PadEnd(width: 4 with: "-"))
+  ("x" | String.PadEnd(width: -1))
+  #( "7" | String.PadStart(width: 3 with: "0") )
+]
+"#,
+  );
+  assert_eq!(
+    v.to_string(),
+    r#"["05" "ab*" "  héé" "ééx" "long" "long" "x" "007"]"#
+  );
+  assert!(
+    root_failure(r#""" = w  "a" | String.PadStart(width: 3 with: w)"#)
+      .contains("exactly one character")
+  );
+  for (script, param) in [
+    (r#""a" | String.PadStart(width: 3 with: "ab")"#, "with"),
+    (r#""a" | String.PadEnd(width: 3 with: "")"#, "with"),
+  ] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(d[0].code, "invalid-argument-value", "{script}");
+    assert_eq!(d[0].param.as_deref(), Some(param), "{script}");
+  }
+  let d = load_or_compose_errors("1 | String.PadStart(width: 2)");
+  assert_eq!(d[0].code, "input-type-mismatch");
+}
+
+/// Review astra-f8c2#F1: padding counts the string's characters, so a
+/// compose-time evaluation charges that traversal even when nothing is
+/// padded, as `Count` does.
+#[test]
+fn padding_at_compose_time_charges_the_string_it_reads() {
+  // Charged, 200 reads pass the platform's fuel (10M, the device's 8,000);
+  // uncharged, they stay far below it.
+  let text = "x".repeat(if cfg!(target_os = "espidf") {
+    2048
+  } else {
+    1 << 20
+  });
+  for shard in [
+    "Count",
+    "String.PadStart(width: 3)",
+    "String.PadEnd(width: 3)",
+  ] {
+    let source = format!("#( \"{text}\" = s  Repeat({{s | {shard}}} times: 200) 1 )");
+    let d = compose_errors(&source);
+    assert_eq!(d[0].code, "expansion-budget", "{shard}: {}", d[0].message);
+  }
+  // A width of zero or less reads nothing: no traversal to charge.
+  let source = format!("#( \"{text}\" = s  Repeat({{s | String.PadEnd(width: 0)}} times: 200) 1 )");
+  assert!(check(&source).ok());
+}
+
+/// Review astra-f8c2#F2: a width the target cannot represent (past
+/// `usize` on 32-bit WASI and ESP32) is an activation error, never the
+/// input unchanged; on 64-bit the same width fails its allocation.
+#[test]
+fn padding_to_an_unrepresentable_width_fails() {
+  for shard in ["String.PadStart", "String.PadEnd"] {
+    let failure = root_failure(&format!("\"x\" | {shard}(width: {})", i64::MAX));
+    assert!(failure.contains(shard), "{failure}");
+    #[cfg(target_pointer_width = "32")]
+    {
+      let failure = root_failure(&format!("\"x\" | {shard}(width: 4294967296)"));
+      assert!(failure.contains("too large"), "{failure}");
+    }
+  }
+}
+
+#[test]
 fn checks_assertions_and_type_changes() {
   let v = root_value(
     r#"

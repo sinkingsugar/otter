@@ -9,20 +9,13 @@
 // (FsAccess::grant_read); the call is confined to its working directory
 // otherwise.
 
-@fn(StringOr input: Any output: String params: {default: String} {
-  If({IsString} {ExpectString} {default})
-})
-@fn(IntOr input: Any output: Int params: {default: Int} {
-  If({IsInt} {ExpectInt} {default})
-})
-
 @fn(SearchNotes input: {input: {} env: {} working-dir: String} output: String params: {} {
   input.input = args
   input.env = env
-  args.query | StringOr(default: "") = query
+  args.query | ExpectString(default: "") = query
   query | Is("") | When({Is(true)} {"query is required" | Fail})
-  args.limit | IntOr(default: 10) | Max(1) | Min(50) = limit
-  env.database | StringOr(default: "notes.db") = database
+  args.limit | ExpectInt(default: 10) | Max(1) | Min(50) = limit
+  env.database | ExpectString(default: "notes.db") = database
 
   {q: query n: limit} | Db.Query(
     "SELECT title, snippet(notes_fts, 1, '[', ']', '...', 12) AS hit FROM notes_fts WHERE notes_fts MATCH :q ORDER BY rank LIMIT :n"
@@ -34,8 +27,8 @@
   [] | Var(lines)
   found | If({Is(0)} {f"No notes match {query}.\n"} {f"{found} note(s) match {query}:\n"}) | Push(lines)
   rows | ForEach(row i {
-    row.title | StringOr(default: "(untitled)") = title
-    row.hit | StringOr(default: "") = hit
+    row.title | ExpectString(default: "(untitled)") = title
+    row.hit | ExpectString(default: "") = hit
     f"{i | Add(1)}. {title}: {hit}\n" | Push(lines)
   })
   lines | String.Join

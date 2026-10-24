@@ -1,6 +1,7 @@
 //! Sequence shards (docs/host-requirements.md §3): the ones that change a
 //! variable (`AppendTo`, `PrependTo`, `Extend`, `Clear`, `PopFront`,
-//! `DropFront`, `Remove`) and the ones over a value (`Reverse`, `IndexOf`).
+//! `DropFront`, `Remove`) and the ones over a value (`Reverse`, `IndexOf`,
+//! `First`, `Last`).
 //!
 //! A shard that changes a variable follows `Push`'s rules (`data.rs`): the
 //! variable is declared, mutable and of a type that takes the change, all
@@ -30,6 +31,8 @@ pub static POP_FRONT: ShardType = leaf_type::<Front<true>>();
 pub static DROP_FRONT: ShardType = leaf_type::<Front<false>>();
 pub static REVERSE: ShardType = leaf_type::<Pure<ReverseOp>>();
 pub static INDEX_OF: ShardType = leaf_type::<IndexOf>();
+pub static FIRST: ShardType = leaf_type::<End<false>>();
+pub static LAST: ShardType = leaf_type::<End<true>>();
 pub static REMOVE: ShardType = ShardType::new(REMOVE_DESC).controlled_by::<Remove>();
 
 const SEQ: &[TypeName] = &[TypeName::Seq];
@@ -674,6 +677,117 @@ impl LeafShard for IndexOf {
     } else {
       Var::Int(candidates.into_iter().find(found).map_or(-1, |i| i as i64))
     }))
+  }
+}
+
+// --- First, Last ---
+
+static END_PARAMS: &[ParamDecl] = &[decl(
+  "default",
+  crate::shard_doc!(
+    "Output this instead of failing when the sequence is empty, or (on Any or a union) the value is not a sequence: a literal or a variable."
+  ),
+  OPERAND,
+  NONE_TYPES,
+  Requirement::Optional,
+)];
+
+/// `First` (`LAST` false) and `Last`: one end of a sequence, or the
+/// default.
+pub struct End<const LAST: bool>;
+impl<const LAST: bool> End<LAST> {
+  const NAME: &'static str = if LAST { "Last" } else { "First" };
+}
+
+impl<const LAST: bool> LeafShard for End<LAST> {
+  type Compiled = Option<Operand>;
+  type State = ();
+  const DESC: ShardDesc = desc(
+    Self::NAME,
+    if LAST {
+      crate::shard_doc!("Outputs the last element of a sequence.")
+    } else {
+      crate::shard_doc!("Outputs the first element of a sequence.")
+    },
+    crate::shard_doc!(
+      "The output has the sequence's element type. An empty sequence is an activation error, unless `default` is given: then it outputs the default, and the output type is the element type or the default's (`xs | Last(default: 0)`). On Any, or a union with a sequence member, the kind is checked at activation, as for Take: a value that is not a sequence is an activation error, or gives the default."
+    ),
+    END_PARAMS,
+    InputDesc::Types(&[TypeName::Seq, TypeName::Any]),
+    OutputDesc::Dynamic(crate::shard_doc!(
+      "the element type; with `default`, the element type or the default's"
+    )),
+  );
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Option<Operand>>> {
+    let input = ctx.input();
+    let element = match input.desc() {
+      TypeDesc::Seq(e) => *e,
+      TypeDesc::Any => Type::any(),
+      TypeDesc::Union(members) => {
+        let elements: Vec<Type> = members
+          .iter()
+          .filter_map(|m| match m.desc() {
+            TypeDesc::Seq(e) => Some(*e),
+            TypeDesc::Any => Some(Type::any()),
+            _ => None,
+          })
+          .collect();
+        if elements.is_empty() {
+          return Err(super::values::mismatch(Self::NAME, input, SEQ));
+        }
+        Type::union(elements)
+      }
+      _ => return Err(super::values::mismatch(Self::NAME, input, SEQ)),
+    };
+    let Some((default, ty)) = Operand::compose_optional_arg(args, "default", Self::NAME, ctx)?
+    else {
+      return Ok(Composed {
+        compiled: None,
+        output: element,
+      });
+    };
+    // A literal the element type admits keeps it (`[1 2] | Last(default:
+    // 0)` is an Int); otherwise the default's type joins it.
+    let fits = match &default {
+      Operand::Const(v) => element.admits(v),
+      Operand::Bound(_) => element.accepts(ty),
+    };
+    let output = if fits || element == Type::any() {
+      element
+    } else {
+      Type::union([element, ty])
+    };
+    Ok(Composed {
+      compiled: Some(default),
+      output,
+    })
+  }
+
+  fn instantiate(_: &Option<Operand>, _: &mut InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+
+  fn activate(
+    default: &Option<Operand>,
+    _: &mut (),
+    ctx: &mut impl LeafCtx,
+    input: &Var,
+  ) -> Result<Flow> {
+    let items = input.as_seq();
+    if let Some(item) = items.and_then(|items| if LAST { items.last() } else { items.first() }) {
+      return Ok(Flow::Next(item.clone()));
+    }
+    if let Some(default) = default {
+      return Ok(Flow::Next(default.get(ctx)));
+    }
+    Err(match items {
+      Some(_) => fail(Self::NAME, "the sequence is empty"),
+      None => fail(
+        Self::NAME,
+        &format!("needs a sequence, got {}", super::data::kind_name(input)),
+      ),
+    })
   }
 }
 

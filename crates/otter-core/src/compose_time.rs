@@ -601,6 +601,8 @@ static SAFE: &[(&ShardType, u32)] = {
     (&text::HEX_TO_BYTES, 1),
     (&text::BYTES_TO_INTS, 1),
     (&text::INTS_TO_BYTES, 1),
+    (&text::STRING_PAD_START, 1),
+    (&text::STRING_PAD_END, 1),
     (&seqs::APPEND_TO, 1),
     (&seqs::PREPEND_TO, 1),
     (&seqs::EXTEND, 1),
@@ -608,6 +610,8 @@ static SAFE: &[(&ShardType, u32)] = {
     (&seqs::DROP_FRONT, 1),
     (&seqs::REVERSE, 1),
     (&seqs::INDEX_OF, 1),
+    (&seqs::FIRST, 1),
+    (&seqs::LAST, 1),
   ]
 };
 

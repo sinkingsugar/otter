@@ -5,7 +5,9 @@
 //! constant or charged by size.
 
 use super::leaf::{LeafShard, leaf_type};
-use super::values::{Pure, PureOp, comparable, fail, one_of, pure_desc, values_equal};
+use super::values::{
+  Narrowing, Pure, PureOp, comparable, expect_type, fail, one_of, pure_desc, values_equal,
+};
 use super::*;
 use crate::compose_time::Meter;
 use crate::instance::{InstanceCtx, LeafCtx};
@@ -16,15 +18,15 @@ pub static IS_FALSE: ShardType = leaf_type::<Pure<BoolTest<false>>>();
 pub static PASS: ShardType = leaf_type::<Pass>();
 pub static TO_ANY: ShardType = leaf_type::<Pure<ToAnyOp>>();
 pub static TO_ANY_TABLE: ShardType = leaf_type::<Pure<ToAnyTableOp>>();
-pub static EXPECT_INT_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<IntSeqK>>>();
-pub static EXPECT_FLOAT_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<FloatSeqK>>>();
-pub static EXPECT_BOOL_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<BoolSeqK>>>();
-pub static EXPECT_STRING_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<StringSeqK>>>();
-pub static EXPECT_BYTES_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<BytesSeqK>>>();
-pub static EXPECT_TABLE_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<TableSeqK>>>();
-pub static EXPECT_FLOAT2_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<Float2SeqK>>>();
-pub static EXPECT_FLOAT3_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<Float3SeqK>>>();
-pub static EXPECT_FLOAT4_SEQ: ShardType = leaf_type::<Pure<ExpectSeqOf<Float4SeqK>>>();
+pub static EXPECT_INT_SEQ: ShardType = expect_type::<ExpectSeqOf<IntSeqK>>();
+pub static EXPECT_FLOAT_SEQ: ShardType = expect_type::<ExpectSeqOf<FloatSeqK>>();
+pub static EXPECT_BOOL_SEQ: ShardType = expect_type::<ExpectSeqOf<BoolSeqK>>();
+pub static EXPECT_STRING_SEQ: ShardType = expect_type::<ExpectSeqOf<StringSeqK>>();
+pub static EXPECT_BYTES_SEQ: ShardType = expect_type::<ExpectSeqOf<BytesSeqK>>();
+pub static EXPECT_TABLE_SEQ: ShardType = expect_type::<ExpectSeqOf<TableSeqK>>();
+pub static EXPECT_FLOAT2_SEQ: ShardType = expect_type::<ExpectSeqOf<Float2SeqK>>();
+pub static EXPECT_FLOAT3_SEQ: ShardType = expect_type::<ExpectSeqOf<Float3SeqK>>();
+pub static EXPECT_FLOAT4_SEQ: ShardType = expect_type::<ExpectSeqOf<Float4SeqK>>();
 pub static ASSERT_IS: ShardType = leaf_type::<Assert<true>>();
 pub static ASSERT_IS_NOT: ShardType = leaf_type::<Assert<false>>();
 
@@ -137,6 +139,9 @@ impl PureOp for ToAnyTableOp {
 pub trait SeqKind: 'static {
   const NAME: &'static str;
   const ELEMENT: TypeName;
+  /// Whether a value is an element: its kind alone decides (the elements
+  /// are scalars or any table).
+  fn is(value: &Var) -> bool;
 }
 
 macro_rules! seq_kind {
@@ -145,6 +150,10 @@ macro_rules! seq_kind {
     impl SeqKind for $kind {
       const NAME: &'static str = $name;
       const ELEMENT: TypeName = TypeName::$element;
+      #[inline(always)]
+      fn is(value: &Var) -> bool {
+        matches!(value, Var::$element(..))
+      }
     }
   };
 }
@@ -176,7 +185,7 @@ fn may_be(actual: Type, target: Type) -> bool {
 
 pub struct ExpectSeqOf<K>(std::marker::PhantomData<K>);
 impl<K: SeqKind> ExpectSeqOf<K> {
-  fn target() -> Type {
+  fn seq_type() -> Type {
     Type::seq(K::ELEMENT.to_type())
   }
 }
@@ -187,13 +196,13 @@ impl<K: SeqKind> PureOp for ExpectSeqOf<K> {
       "Narrows the input to a sequence of one element type, failing at activation if it is not one."
     ),
     crate::shard_doc!(
-      "The input's type must be able to hold such a sequence: Any, a sequence whose element type can hold the element (`[Any]`, `[Int | String]`), or a union with such a member. Every element is checked at activation; a value of another type, or an element of another type, is an activation error."
+      "The input's type must be able to hold such a sequence: Any, a sequence whose element type can hold the element (`[Any]`, `[Int | String]`), or a union with such a member. Every element is checked at activation; a value of another type, or an element of another type, is an activation error. With `default` (a literal or variable of the expected sequence type), such a value, none included, outputs the default instead: `v.runs? | ExpectIntSeq(default: [])`."
     ),
     InputDesc::Any,
     OutputDesc::Dynamic(crate::shard_doc!("the expected sequence type")),
   );
   fn output(input: Type) -> std::result::Result<Type, &'static [TypeName]> {
-    let target = Self::target();
+    let target = Self::seq_type();
     if target.accepts(input) {
       Ok(input)
     } else if may_be(input, target) {
@@ -206,26 +215,47 @@ impl<K: SeqKind> PureOp for ExpectSeqOf<K> {
     meter.charge(input.as_seq().map_or(0, <[Var]>::len) as u64)
   }
   fn apply(input: &Var) -> Result<Var> {
+    if Self::admits(input) {
+      Ok(input.clone())
+    } else {
+      Err(Self::reject(input))
+    }
+  }
+}
+
+impl<K: SeqKind> Narrowing for ExpectSeqOf<K> {
+  fn target() -> Type {
+    Self::seq_type()
+  }
+  fn admits(input: &Var) -> bool {
     let Some(items) = input.as_seq() else {
-      return Err(fail(
+      return false;
+    };
+    items.iter().all(K::is)
+  }
+  fn reject(input: &Var) -> Error {
+    let Some(items) = input.as_seq() else {
+      return fail(
         K::NAME,
         &format!("expected a sequence, got {}", input.type_of()),
-      ));
+      );
     };
     let element = K::ELEMENT.to_type();
-    for (i, item) in items.iter().enumerate() {
-      if !element.admits(item) {
-        return Err(fail(
-          K::NAME,
-          &format!(
-            "element {i} is {}, not {}",
-            item.type_of(),
-            K::ELEMENT.name()
-          ),
-        ));
-      }
+    match items
+      .iter()
+      .enumerate()
+      .find(|(_, item)| !element.admits(item))
+    {
+      Some((i, item)) => fail(
+        K::NAME,
+        &format!(
+          "element {i} is {}, not {}",
+          item.type_of(),
+          K::ELEMENT.name()
+        ),
+      ),
+      None => fail(K::NAME, "the sequence's elements changed type"),
     }
-    Ok(input.clone())
   }
 }
 
@@ -310,5 +340,77 @@ impl<const EQUAL: bool> LeafShard for Assert<EQUAL> {
         format!("expected anything but {value}")
       },
     ))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::super::values::{self, ExpectKind};
+  use super::*;
+
+  fn samples() -> Vec<Var> {
+    vec![
+      Var::None,
+      Var::Bool(true),
+      Var::Int(1),
+      Var::Float(1.5),
+      Var::float2(1.0, 2.0),
+      Var::float3(1.0, 2.0, 3.0),
+      Var::float4(1.0, 2.0, 3.0, 4.0),
+      Var::string("a"),
+      Var::bytes(b"a"),
+      Var::seq(vec![]),
+      Var::seq(vec![Var::Int(1), Var::string("a")]),
+      Var::table([("a", Var::Int(1))]),
+      Var::table(Vec::<(&str, Var)>::new()),
+    ]
+  }
+
+  fn expect_agrees<K: ExpectKind>() {
+    for v in samples() {
+      assert_eq!(
+        K::is(&v),
+        K::TARGET.to_type().admits(&v),
+        "{} on {v}",
+        K::NAME
+      );
+    }
+  }
+
+  fn seq_agrees<K: SeqKind>() {
+    let mut values = samples();
+    values.extend(samples().into_iter().map(|v| Var::seq(vec![v])));
+    values.push(Var::seq(samples()));
+    for v in values {
+      assert_eq!(
+        ExpectSeqOf::<K>::admits(&v),
+        ExpectSeqOf::<K>::seq_type().admits(&v),
+        "{} on {v}",
+        K::NAME
+      );
+    }
+  }
+
+  /// The kind checks the narrowing shards run say what `Type::admits` says.
+  #[test]
+  fn kind_checks_agree_with_admits() {
+    expect_agrees::<values::ExpectIntK>();
+    expect_agrees::<values::ExpectFloatK>();
+    expect_agrees::<values::ExpectBoolK>();
+    expect_agrees::<values::ExpectStringK>();
+    expect_agrees::<values::ExpectSeqK>();
+    expect_agrees::<values::ExpectTableK>();
+    expect_agrees::<values::ExpectFloat2K>();
+    expect_agrees::<values::ExpectFloat3K>();
+    expect_agrees::<values::ExpectFloat4K>();
+    seq_agrees::<IntSeqK>();
+    seq_agrees::<FloatSeqK>();
+    seq_agrees::<BoolSeqK>();
+    seq_agrees::<StringSeqK>();
+    seq_agrees::<BytesSeqK>();
+    seq_agrees::<TableSeqK>();
+    seq_agrees::<Float2SeqK>();
+    seq_agrees::<Float3SeqK>();
+    seq_agrees::<Float4SeqK>();
   }
 }

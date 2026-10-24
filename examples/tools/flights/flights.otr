@@ -30,48 +30,30 @@
 
 // --- defensive reads of the positional payload ---
 // A lenient path (`row.0.9?`) reads a nested element, or none when a step
-// cannot apply (not a sequence, too short); these give it a type.
+// cannot apply (not a sequence, too short); `ExpectInt(default: 0)`,
+// `ExpectSeq(default: [])` and `Last(default: none)` give it a type.
 
-@fn(Last input: Any output: Any params: {} {
-  If({IsSeq} {
-    ExpectSeq = s
-    s | Count | Sub(1) = j
-    If({j | IsMoreEqual(0)} {s | Take(j)} {none})
-  } {none})
-})
-@fn(IntOr input: Any output: Int params: {default: Int} {
-  If({IsInt} {ExpectInt} {default})
-})
-@fn(StringOr input: Any output: String params: {default: String} {
-  If({IsString} {ExpectString} {default})
-})
-@fn(SeqOr input: Any output: [Any] params: {} {
-  If({IsSeq} {ExpectSeq} {[]})
-})
 // A row's price: the last element of row[1][0], a number; `no-price` without one.
 @fn(Price input: Any output: Int params: {} {
-  .1.0? | Last = p
-  p | If({IsFloat} {ExpectFloat | ToInt} {p | IntOr(default: @no-price)})
+  .1.0? | Last(default: none) = p
+  p | If({IsFloat} {ExpectFloat | ToInt} {p | ExpectInt(default: @no-price)})
 })
 
 // --- formatting ---
 
-@fn(Pad2 input: Int output: String params: {} {
-  Add(100) | ToString | Slice(from: 1)
-})
 @fn(FmtMins input: Int output: String params: {} {
   = mins
-  f"{mins | Div(60)}h{mins | Mod(60) | Pad2}m"
+  f"{mins | Div(60)}h{mins | Mod(60) | ToString | String.PadStart(width: 2 with: "0")}m"
 })
 // [y m d] and [h m] as "2026-08-20 07:35".
 @fn(FmtDateTime input: Any output: String params: {time: Any} {
   = date
   [
-    (date.0? | IntOr(default: 0) | ToString) "-"
-    (date.1? | IntOr(default: 0) | Pad2) "-"
-    (date.2? | IntOr(default: 0) | Pad2) " "
-    (time.0? | IntOr(default: 0) | Pad2) ":"
-    (time.1? | IntOr(default: 0) | Pad2)
+    (date.0? | ExpectInt(default: 0) | ToString) "-"
+    (date.1? | ExpectInt(default: 0) | ToString | String.PadStart(width: 2 with: "0")) "-"
+    (date.2? | ExpectInt(default: 0) | ToString | String.PadStart(width: 2 with: "0")) " "
+    (time.0? | ExpectInt(default: 0) | ToString | String.PadStart(width: 2 with: "0")) ":"
+    (time.1? | ExpectInt(default: 0) | ToString | String.PadStart(width: 2 with: "0"))
   ] | String.Join
 })
 
@@ -96,7 +78,7 @@
       } timeout: 60) | String.Split("AF_initDataCallback({key: 'ds:1'") = parts
       parts | Count | When({IsMoreEqual(2)} {
         parts | Take(1) | String.Split("', data:") | Take(1) | String.Split(", sideChannel") | Take(0) = text
-        text | FromJson | SeqOr | Count | When({IsMore(3)} {text | Update(payload)})
+        text | FromJson | ExpectSeq(default: []) | Count | When({IsMore(3)} {text | Update(payload)})
       })
     } {= reason  f"google-flights: request failed: {reason}" | Log} error: true silent: true)
   } until: {Any({payload | IsNot("")} {attempt | IsMoreEqual(tries)})})

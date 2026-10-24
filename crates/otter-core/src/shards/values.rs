@@ -39,15 +39,15 @@ pub static PARSE_FLOAT: ShardType = leaf_type::<Pure<ParseFloatOp>>();
 pub static TO_FLOAT2: ShardType = leaf_type::<Pure<ToVector<2>>>();
 pub static TO_FLOAT3: ShardType = leaf_type::<Pure<ToVector<3>>>();
 pub static TO_FLOAT4: ShardType = leaf_type::<Pure<ToVector<4>>>();
-pub static EXPECT_INT: ShardType = leaf_type::<Pure<Expect<ExpectIntK>>>();
-pub static EXPECT_FLOAT: ShardType = leaf_type::<Pure<Expect<ExpectFloatK>>>();
-pub static EXPECT_BOOL: ShardType = leaf_type::<Pure<Expect<ExpectBoolK>>>();
-pub static EXPECT_STRING: ShardType = leaf_type::<Pure<Expect<ExpectStringK>>>();
-pub static EXPECT_SEQ: ShardType = leaf_type::<Pure<Expect<ExpectSeqK>>>();
-pub static EXPECT_TABLE: ShardType = leaf_type::<Pure<Expect<ExpectTableK>>>();
-pub static EXPECT_FLOAT2: ShardType = leaf_type::<Pure<Expect<ExpectFloat2K>>>();
-pub static EXPECT_FLOAT3: ShardType = leaf_type::<Pure<Expect<ExpectFloat3K>>>();
-pub static EXPECT_FLOAT4: ShardType = leaf_type::<Pure<Expect<ExpectFloat4K>>>();
+pub static EXPECT_INT: ShardType = expect_type::<Expect<ExpectIntK>>();
+pub static EXPECT_FLOAT: ShardType = expect_type::<Expect<ExpectFloatK>>();
+pub static EXPECT_BOOL: ShardType = expect_type::<Expect<ExpectBoolK>>();
+pub static EXPECT_STRING: ShardType = expect_type::<Expect<ExpectStringK>>();
+pub static EXPECT_SEQ: ShardType = expect_type::<Expect<ExpectSeqK>>();
+pub static EXPECT_TABLE: ShardType = expect_type::<Expect<ExpectTableK>>();
+pub static EXPECT_FLOAT2: ShardType = expect_type::<Expect<ExpectFloat2K>>();
+pub static EXPECT_FLOAT3: ShardType = expect_type::<Expect<ExpectFloat3K>>();
+pub static EXPECT_FLOAT4: ShardType = expect_type::<Expect<ExpectFloat4K>>();
 
 pub(crate) fn mismatch(name: &str, input: Type, expected: &[TypeName]) -> Error {
   let names: Vec<&str> = expected.iter().map(|t| t.name()).collect();
@@ -1253,6 +1253,10 @@ pub trait ExpectKind: 'static {
   const TARGET: TypeName;
   /// `[TARGET]`, for diagnostics.
   const TARGETS: &'static [TypeName];
+  /// Whether a value has the type: its kind alone decides, since every
+  /// target is a scalar, any sequence or any table (what `admits` would
+  /// say, without walking the elements).
+  fn is(value: &Var) -> bool;
 }
 
 macro_rules! expect_kind {
@@ -1262,6 +1266,10 @@ macro_rules! expect_kind {
       const NAME: &'static str = $name;
       const TARGET: TypeName = TypeName::$target;
       const TARGETS: &'static [TypeName] = &[TypeName::$target];
+      #[inline(always)]
+      fn is(value: &Var) -> bool {
+        matches!(value, Var::$target(..))
+      }
     }
   };
 }
@@ -1283,7 +1291,7 @@ impl<K: ExpectKind> PureOp for Expect<K> {
     K::NAME,
     crate::shard_doc!("Narrows the input to one type, failing at activation if it has another."),
     crate::shard_doc!(
-      "The input's type must be able to hold the expected type: Any, or a union with a member of it. The output has the narrowed type; a value of another type is an activation error. Shards that output fixed types need no Expect."
+      "The input's type must be able to hold the expected type: Any, or a union with a member of it. The output has the narrowed type; a value of another type is an activation error. With `default` (a literal or variable of the expected type), a value of another type, none included, outputs the default instead, as `Get(default:)` does: `args.limit | ExpectInt(default: 30)`. Shards that output fixed types need no Expect."
     ),
     InputDesc::Any,
     OutputDesc::Dynamic(crate::shard_doc!("the expected type")),
@@ -1320,15 +1328,162 @@ impl<K: ExpectKind> PureOp for Expect<K> {
     meter.charge(len as u64)
   }
   fn apply(input: &Var) -> Result<Var> {
+    narrowed(Self::admits, Self::reject, input)
+  }
+}
+
+impl<K: ExpectKind> Narrowing for Expect<K> {
+  fn target() -> Type {
+    K::TARGET.to_type()
+  }
+  #[inline(always)]
+  fn admits(input: &Var) -> bool {
     // Checked on the value: interning its type on every activation would
     // grow the type registry with every new shape.
-    if K::TARGET.to_type().admits(input) {
+    K::is(input)
+  }
+  fn reject(input: &Var) -> Error {
+    fail(
+      K::NAME,
+      &format!("expected {}, got {}", K::TARGET.name(), input.type_of()),
+    )
+  }
+}
+
+/// `apply` of a narrowing shard: the input when it is admitted.
+#[inline(always)]
+fn narrowed(admits: fn(&Var) -> bool, reject: fn(&Var) -> Error, input: &Var) -> Result<Var> {
+  if admits(input) {
+    Ok(input.clone())
+  } else {
+    Err(reject(input))
+  }
+}
+
+/// A shard that narrows its input to one type (`Expect*`, `Expect*Seq`):
+/// [`PureOp::output`] gives the narrowed type, `admits` checks a value.
+pub trait Narrowing: PureOp {
+  /// The expected type, which a `default:` must have.
+  fn target() -> Type;
+  fn admits(input: &Var) -> bool;
+  /// The activation error for a value it does not admit.
+  fn reject(input: &Var) -> Error;
+}
+
+pub static EXPECT_PARAMS: &[ParamDecl] = &[decl(
+  "default",
+  crate::shard_doc!(
+    "Output this instead of failing when the value has another type (none included): a literal or a variable of the expected type."
+  ),
+  OPERAND,
+  NONE_TYPES,
+  Requirement::Optional,
+)];
+
+/// The shard type of a narrowing shard: without `default:` it composes to
+/// the strict check's own node (`Pure<P>`, with nothing on its path for the
+/// default), with one to [`Expecting`].
+pub(crate) const fn expect_type<P: Narrowing>() -> ShardType {
+  ShardType::new(Expecting::<P>::DESC).composed_by(compose_expect::<P>)
+}
+
+fn compose_expect<P: Narrowing>(
+  args: &Args,
+  ctx: &mut ComposeCtx<'_>,
+  lifetime: crate::signature::Lifetime,
+) -> Result<Composed<Arc<dyn crate::shard::CompiledNode>>> {
+  if args.get("default").is_none() {
+    crate::shard::compose_erased::<super::leaf::Leaf<Pure<P>>>(args, ctx, lifetime)
+  } else {
+    crate::shard::compose_erased::<super::leaf::Leaf<Expecting<P>>>(args, ctx, lifetime)
+  }
+}
+
+/// A narrowing shard with a `default:` (as `Get(default:)`: a value of
+/// another type gives the default).
+pub struct Expecting<P>(std::marker::PhantomData<P>);
+
+impl<P: Narrowing> LeafShard for Expecting<P> {
+  type Compiled = Option<Operand>;
+  type State = ();
+  const DESC: ShardDesc = ShardDesc {
+    params: Params::Declared(EXPECT_PARAMS),
+    ..P::DESC
+  };
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Option<Operand>>> {
+    let name = P::DESC.name;
+    let input = ctx.input();
+    let output = P::output(input).map_err(|expected| mismatch(name, input, expected))?;
+    let Some((default, ty)) = Operand::compose_optional_arg(args, "default", name, ctx)? else {
+      return Ok(Composed {
+        compiled: None,
+        output,
+      });
+    };
+    // A literal is checked by value (`[]` is a sequence of any element,
+    // which `ExpectIntSeq` still takes), a variable by its type.
+    let fits = |t: Type| match &default {
+      Operand::Const(v) => t.admits(v),
+      Operand::Bound(_) => t.accepts(ty),
+    };
+    let target = P::target();
+    if !fits(target) {
+      let (code, what) = match &default {
+        Operand::Const(_) => ("invalid-argument-value", "the default"),
+        Operand::Bound(_) => ("wrong-variable-type", "the default's variable"),
+      };
+      return Err(param_error(
+        args,
+        name,
+        "default",
+        "compose-error",
+        code,
+        format!("{name} needs a default of type {target}, but {what} is {ty}"),
+      ));
+    }
+    // The narrowed type when it holds the default too, else the expected.
+    let output = if fits(output) { output } else { target };
+    Ok(Composed {
+      compiled: Some(default),
+      output,
+    })
+  }
+
+  fn instantiate(_: &Option<Operand>, _: &mut InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+
+  fn activate(
+    default: &Option<Operand>,
+    _: &mut (),
+    ctx: &mut impl LeafCtx,
+    input: &Var,
+  ) -> Result<Flow> {
+    if let Some(meter) = ctx.meter() {
+      P::meter(input, meter)?;
+    }
+    // Shaped as `Pure`'s `apply`, so the admitted path compiles as it did.
+    if P::admits(input) {
       Ok(input.clone())
     } else {
-      Err(fail(
-        K::NAME,
-        &format!("expected {}, got {}", K::TARGET.name(), input.type_of()),
-      ))
+      not_admitted::<P>(default, ctx, input)
     }
+    .map(Flow::Next)
+  }
+}
+
+/// A narrowing shard's value of another type: the default, or the error.
+/// Out of line, so the admitted path keeps its registers.
+#[cold]
+#[inline(never)]
+fn not_admitted<P: Narrowing>(
+  default: &Option<Operand>,
+  ctx: &impl LeafCtx,
+  input: &Var,
+) -> Result<Var> {
+  match default {
+    Some(default) => Ok(default.get(ctx)),
+    None => Err(P::reject(input)),
   }
 }

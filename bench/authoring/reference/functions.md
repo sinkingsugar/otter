@@ -11,7 +11,7 @@ A program is a pipeline of **shards**. Each shard receives the previous shard's 
 
 - `Int` (`42`, `-3`), `Float` (`1.5`, `2.0`, `1e3`; write `1.0`, never `1.`), `Bool` (`true`, `false`), `String` (`"text"`), `none`.
 - Sequences: `[1 2 3]`. Commas are optional.
-- Tables: `{name: "ann" age: 41}`. Reading a missing key with a constant key (`t.missing`, `Take("missing")`) is a compile error. `Take` with a key in a variable outputs the value or `none` (`Int | None` here), so narrow it with `ExpectInt` and friends before arithmetic.
+- Tables: `{name: "ann" age: 41}`. Reading a missing key with a constant key (`t.missing`, `Take("missing")`) is a compile error. `Take` with a key in a variable outputs the value or `none` (`Int | None` here), so narrow it with `ExpectInt` and friends before arithmetic; `ExpectInt(default: 0)` gives `0` instead of failing when the value is `none` or of another type.
 - Float vectors: `[1.0 2.0] | ToFloat2`, `[1.0 2.0 3.0] | ToFloat3`.
 - A literal on its own is a shard that outputs that value.
 - Arithmetic on two Ints gives an Int, and integer division truncates (`7 | Math.Divide(2)` is `3`); an Int mixed with a Float gives a Float. Convert with `ToFloat` and `ToInt`.
