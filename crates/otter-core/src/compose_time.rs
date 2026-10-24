@@ -530,6 +530,8 @@ static SAFE: &[(&ShardType, u32)] = {
     (&values::TO_FLOAT3, 1),
     (&values::TO_FLOAT4, 1),
     (&data::TAKE, 1),
+    (&data::TAKE_PATH, 1),
+    (&data::SEQ_PATTERN, 1),
     (&checks::IS_TRUE, 1),
     (&checks::IS_FALSE, 1),
     (&checks::PASS, 1),
@@ -548,6 +550,10 @@ static SAFE: &[(&ShardType, u32)] = {
     (&SUB, 1),
     (&REPEAT, 1),
     (&WHILE, 1),
+    (&FOR_EACH, 1),
+    (&MAP, 1),
+    (&FILTER, 1),
+    (&REDUCE, 1),
     // Runs the block its call passed, which composes (and is checked)
     // at the call site like any other code there.
     (&RUN, 1),

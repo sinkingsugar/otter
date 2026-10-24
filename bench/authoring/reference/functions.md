@@ -34,14 +34,17 @@ Variable names are lowercase and may contain `-` (`max-speed`), so `a-1` is a na
 | `Keep(x 0)` | declare persistent mutable state `x` with a literal initial value, kept across iterations (only at the top level of a wire or a stateful function) |
 | `x` | read a variable: outputs its value |
 | `x.key`, `xs.0`, `t.a.1` | read a table key or sequence index |
+| `\| .key`, `\| .0.name` | the same on the pipeline value: `rows \| Take(0) \| .name` |
+| `j.data.3?`, `\| .a.b?` | a lenient path: `none` when a step cannot apply (wrong kind, missing key, index out of range); for parsed JSON (`Any`) |
+| `value = {a b: x}` | bind several names from a table's fields (`a`, and `x` from `b`); the value passes through |
+| `value = [first _ third]` | bind a sequence's elements by position; `_` skips one |
 
 Assignments pass their input through. A name cannot be declared twice while visible (no shadowing); a variable declared inside a flow is visible only inside it. `input` is reserved: it names the entry value of the enclosing function or wire.
 
 ```shards
 0 | Var(total)
 [3 8 1] = xs
-0 | Var(i)
-Repeat({ xs | Take(i) | Math.Add(total) | Update(total)  Inc(i) } times: 3)
+xs | ForEach(x { x | Math.Add(total) | Update(total) })
 total | Log   // logs 12
 ```
 
@@ -49,6 +52,7 @@ total | Log   // logs 12
 
 - `If({predicate} {then} {else})`, or labeled: `If(predicate: {...} then: {...} else: {...})`. The predicate flow outputs a Bool.
 - `When({predicate} {action})`, `While({predicate} {action})`, `Repeat({action} times: n)`, `Repeat({action} until: {condition})`, `Repeat({action} forever: true)`.
+- Iteration over a sequence or a table: `xs | ForEach(x i {...})` (the names come first, value then index, both optional; a table gives value then key), `xs | Map(x {x | Math.Multiply(2)})`, `xs | Filter({IsMore(2)})`, `xs | Reduce(acc x {x | Math.Add(acc)} init: 0)`. The body's input is the element, so `rows | Map({.name})` works; `_` skips a name (`ForEach(_ i {...})`). There is no `$0`.
 - `All(a b)` and `Any(a b)` combine conditions (Bool variables, literals or flows), with short-circuit; `Not` negates a Bool.
 - `Match([1 {"one"} 2 {"two"}] default: {"other"})`: runs the first case equal to the input. `Match` must cover every value of its input type, or have `default:`; `default: {}` outputs the input.
 - `Maybe({action} {fallback} silent: true)`: runs the fallback flow if the action fails.

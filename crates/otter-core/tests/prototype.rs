@@ -2311,3 +2311,244 @@ fn peek_reports_every_ending() {
     Some(Outcome::Completed(Var::None))
   );
 }
+
+/// Runs a one-shot wire and returns its outcome.
+fn outcome_of(flow: Vec<otter_core::ShardDef>) -> Outcome {
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire("w", false, flow));
+  let compiled = mesh.compile("w", Type::none()).expect("compiles");
+  let id = mesh.spawn(&compiled, Var::None).unwrap();
+  mesh.run(10);
+  mesh.outcome(id).cloned().expect("finished")
+}
+
+/// Take on Any checks the kind at activation; TakePath is lenient
+/// (docs/iteration-and-access.md §2).
+#[test]
+fn take_on_any_and_lenient_take_path() {
+  use otter_core::ShardDef;
+  use otter_core::shards::{checks, data};
+  use std::sync::Arc;
+  let any = || ShardDef::new(&checks::TO_ANY, vec![]);
+  let nested = Var::table([("a", Var::from_seq(Arc::new(vec![Var::Int(4)])))]);
+  let path =
+    |keys: Vec<Var>| ShardDef::new(&data::TAKE_PATH, vec![val(Var::from_seq(Arc::new(keys)))]);
+  assert_eq!(
+    outcome_of(vec![
+      konst(nested.clone()),
+      any(),
+      take(val(Var::string("a"))),
+      take(val(Var::Int(0)))
+    ]),
+    Outcome::Completed(Var::Int(4))
+  );
+  match outcome_of(vec![konst(nested.clone()), any(), take(val(Var::Int(0)))]) {
+    Outcome::Failed(e) => assert!(
+      e.to_string()
+        .contains("Take: .0 needs a sequence, got a table"),
+      "{e}"
+    ),
+    other => panic!("{other:?}"),
+  }
+  for (keys, expected) in [
+    (vec![Var::string("a"), Var::Int(0)], Var::Int(4)),
+    (vec![Var::string("a"), Var::Int(3)], Var::None),
+    (vec![Var::string("b"), Var::Int(0)], Var::None),
+    (vec![Var::Int(0)], Var::None),
+    (
+      vec![Var::string("a"), Var::Int(0), Var::string("c")],
+      Var::None,
+    ),
+  ] {
+    assert_eq!(
+      outcome_of(vec![konst(nested.clone()), any(), path(keys.clone())]),
+      Outcome::Completed(expected),
+      "{keys:?}"
+    );
+  }
+  // Statically typed input: the same, through the static rules.
+  assert_eq!(
+    outcome_of(vec![
+      konst(nested),
+      path(vec![Var::string("a"), Var::Int(9)])
+    ]),
+    Outcome::Completed(Var::None)
+  );
+}
+
+/// The iteration shards on the core API: suspension inside a body, nested
+/// loops, mutation of the iterated variable, errors and the release of the
+/// collection on failure (docs/iteration-and-access.md §4).
+#[test]
+fn iteration_shards_suspend_nest_and_release() {
+  use otter_core::ShardDef;
+  use otter_core::shards::{FILTER, FOR_EACH, MAP, text};
+  use std::sync::Arc;
+  let ints = |v: &[i64]| Var::from_seq(Arc::new(v.iter().map(|i| Var::Int(*i)).collect()));
+  // A body that suspends resumes at the same element, across ticks.
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire(
+    "w",
+    false,
+    vec![
+      konst(ints(&[1, 2, 3])),
+      iterate(
+        &MAP,
+        vec![pause(), get("x"), add(var("i"))],
+        &[("value", "x"), ("index", "i")],
+      ),
+    ],
+  ));
+  let compiled = mesh.compile("w", Type::none()).unwrap();
+  let id = mesh.spawn(&compiled, Var::None).unwrap();
+  let mut ticks = 0;
+  while mesh.outcome(id).is_none() {
+    mesh.tick();
+    ticks += 1;
+  }
+  assert_eq!(ticks, 4, "one tick per element, then the end");
+  assert_eq!(
+    mesh.outcome(id),
+    Some(&Outcome::Completed(ints(&[1, 3, 5])))
+  );
+  // Nested loops, the inner one over the outer element.
+  assert_eq!(
+    outcome_of(vec![
+      konst(Var::from_seq(Arc::new(vec![ints(&[1, 2]), ints(&[3])]))),
+      iterate(
+        &MAP,
+        vec![iterate(&FILTER, vec![is_more_equal(val(Var::Int(2)))], &[])],
+        &[("value", "row")],
+      ),
+    ]),
+    Outcome::Completed(Var::from_seq(Arc::new(vec![ints(&[2]), ints(&[3])])))
+  );
+  // Pushing to the iterated variable does not change the iteration.
+  assert_eq!(
+    outcome_of(vec![
+      konst(ints(&[1, 2, 3])),
+      declare("xs"),
+      konst(Var::Int(0)),
+      declare("n"),
+      get("xs"),
+      iterate(&FOR_EACH, vec![push("xs"), inc("n")], &[]),
+      get("n"),
+    ]),
+    Outcome::Completed(Var::Int(3))
+  );
+  // A failure in the body ends the loop; the collection it held is
+  // released with the frame.
+  let held = ints(&[1, 2, 3]);
+  let mut mesh = Mesh::new();
+  mesh.declare_var("xs", held.clone(), false);
+  mesh.add_wire(wire(
+    "w",
+    false,
+    vec![
+      get("xs"),
+      iterate(
+        &FOR_EACH,
+        vec![
+          konst(Var::string("stop here")),
+          ShardDef::new(&text::FAIL, vec![]),
+        ],
+        &[("value", "x")],
+      ),
+    ],
+  ));
+  let compiled = mesh.compile("w", Type::none()).unwrap();
+  let id = mesh.spawn(&compiled, Var::None).unwrap();
+  mesh.run(10);
+  match mesh.outcome(id) {
+    Some(Outcome::Failed(e)) => assert!(e.to_string().contains("stop here"), "{e}"),
+    other => panic!("{other:?}"),
+  }
+  drop(compiled);
+  drop(mesh);
+  let Var::Seq(items) = &held else {
+    unreachable!()
+  };
+  assert_eq!(
+    Arc::strong_count(items),
+    1,
+    "the loop released its snapshot"
+  );
+  // Reduce with init over a typed sequence.
+  assert_eq!(
+    outcome_of(vec![
+      konst(ints(&[1, 2, 3])),
+      reduce(vec![add(var("acc"))], &[("acc", "acc")], val(Var::Int(10))),
+    ]),
+    Outcome::Completed(Var::Int(16))
+  );
+}
+
+/// Review 2026-10-24-11f8b5c-astra-cw75#F1: Filter on a table type with
+/// required keys and a rest type keeps none of them required: a filtered
+/// key may be missing.
+#[test]
+fn filter_on_a_mixed_open_table_erases_required_keys() {
+  use otter_core::shards::FILTER;
+  let mixed = Type::table([("a", Type::int())], Some(Type::string()));
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire(
+    "w",
+    false,
+    vec![
+      iterate(&FILTER, vec![konst(Var::Bool(false))], &[]),
+      take(val(Var::string("a"))),
+    ],
+  ));
+  let compiled = mesh.compile("w", mixed).expect("compiles");
+  assert!(
+    compiled.flow.output.accepts(Type::none()),
+    "a filtered key's type includes None, got {}",
+    compiled.flow.output
+  );
+  let id = mesh
+    .spawn(
+      &compiled,
+      Var::table([("a", Var::Int(1)), ("b", Var::string("text"))]),
+    )
+    .unwrap();
+  mesh.run(10);
+  assert_eq!(mesh.outcome(id), Some(&Outcome::Completed(Var::None)));
+}
+
+/// Review 2026-10-24-11f8b5c-gemini-4-argon-review-thread-a4f19c#F2: a
+/// Map over a table in a compose-time evaluation is charged a table entry
+/// per output entry, not a sequence element.
+#[test]
+fn rebuild_charges_table_entries_at_compose_time() {
+  use otter_core::ShardDef;
+  use otter_core::shards::{MAP, values};
+  let n = 16;
+  let table = Var::table((0..n).map(|i| (format!("k{i:02}"), Var::Int(i))));
+  let entry = std::mem::size_of::<(std::sync::Arc<str>, Var)>();
+  let run = |value_bytes: usize| {
+    let mut mesh = Mesh::new();
+    mesh.set_eval_limits(otter_core::EvalLimits {
+      value_bytes,
+      ..Default::default()
+    });
+    mesh.add_wire(wire(
+      "w",
+      false,
+      vec![
+        konst(Var::Int(0)),
+        ShardDef::new(
+          &otter_core::shards::CONST,
+          vec![ParamValue::Eval(vec![
+            konst(table.clone()),
+            iterate(&MAP, vec![add(val(Var::Int(1)))], &[]),
+            ShardDef::new(&values::COUNT, vec![]),
+          ])],
+        ),
+      ],
+    ));
+    mesh.compile("w", Type::none()).map(|_| ())
+  };
+  assert!(run(n as usize * entry).is_ok(), "enough for the entries");
+  let err = run(n as usize * entry - 1).expect_err("the entries exceed the limit");
+  assert!(err.to_string().contains("value limit"), "{err}");
+}

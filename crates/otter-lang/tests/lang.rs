@@ -1516,6 +1516,426 @@ fn uppercase_path_keys_stay_one_segment() {
   assert_eq!(completed(&report, "root"), Var::Int(1));
 }
 
+/// A path as a step reads the pipeline value (docs/iteration-and-access.md §1).
+#[test]
+fn step_paths_read_the_pipeline_value() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let report = run(
+    "{a: [10 20] b: {c: \"deep\" Key: 3}} = t
+t | .a.1 = second
+t | .b | .c = deep
+// As a statement, a flow's first step and in a predicate.
+t
+.b.Key = upper
+{ok: true} | If({.ok} {1} {2}) = picked
+[{n: 7}] | Take(0) | .n = n
+[second deep upper picked n]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::Int(20),
+      Var::string("deep"),
+      Var::Int(3),
+      Var::Int(1),
+      Var::Int(7)
+    ])
+  );
+  // A fixed table's unknown key is a compose error at the segment.
+  let report = check("{name: 1 count: 2} | .cuont");
+  let d = &report.diagnostics[0];
+  assert_eq!((d.code, at(d)), ("unknown-key", (1, 23)));
+  assert_eq!(d.did_you_mean, ["count"]);
+  // `.5` in step position is a path; the types catch a float meant there.
+  let report = check("1 .5");
+  assert_eq!(report.diagnostics[0].code, "input-type-mismatch");
+  // Where a value is expected, `.5` stays a misspelled 0.5.
+  for text in ["1 | Add(.5)", "[.5]", "{a: .5}"] {
+    let d = load_errors(text);
+    assert_eq!(d[0].code, "number-form", "{text}");
+    assert!(d[0].message.contains("write 0.5"), "{text}");
+  }
+  // An argument has no pipeline input.
+  let d = load_errors("{a: 1} | Add(.a)");
+  assert_eq!((d[0].code, at(&d[0])), ("path-in-value", (1, 14)));
+  assert!(d[0].message.contains("bind it first"), "{}", d[0].message);
+  // A `.` with nothing after it.
+  let d = load_errors("{a: 1} | . a");
+  assert_eq!((d[0].code, at(&d[0])), ("path", (1, 10)));
+}
+
+/// Paths through Any and unions are checked at activation; `?` makes a
+/// path lenient (docs/iteration-and-access.md §2).
+#[test]
+fn dynamic_and_lenient_paths() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let json = r#"{\"data\": {\"a\": [1, [2, 3]], \"n\": 5}, \"list\": [{\"t\": \"x\"}]}"#;
+  let report = run(
+    &format!(
+      "\"{json}\" | FromJson = j
+j.data.a.1.0 = deep
+j | .list.0.t = title
+j.data.missing = missing
+j.data.a.7.0? = out-of-range
+j.data.n.x? = wrong-kind
+j.nothing.at.all? = through-none
+j.data.n? = present
+[deep title missing out-of-range wrong-kind through-none present]"
+    ),
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::Int(2),
+      Var::string("x"),
+      Var::None,
+      Var::None,
+      Var::None,
+      Var::None,
+      Var::Int(5)
+    ])
+  );
+  // A wrong kind at activation names the step and what arrived.
+  for (text, message) in [
+    ("j.data.n.x", "Take: .x needs a table, got Int"),
+    ("j.data.0", "Take: .0 needs a sequence, got a table"),
+    ("j.data.a.9", "out of range"),
+  ] {
+    let report = run(
+      &format!("@wire(w {{ \"{json}\" | FromJson = j {text} }})\n@mesh(m) @schedule(m w) @run(m)"),
+      &no_defines(),
+    );
+    match report.outcomes.iter().find(|(w, _)| w == "w") {
+      Some((_, Some(Outcome::Failed(e)))) => {
+        assert!(e.to_string().contains(message), "{text}: {e}")
+      }
+      other => panic!("{text}: {other:?}"),
+    }
+  }
+  // Unions: the members a Take applies to; the output is their union.
+  let report =
+    check("0 | Var(n)\nIf({n | IsMore(0)} {{c: 1}} {{c: \"s\" d: 2.0}}) = u\nu.c | IsMore(0)");
+  let d = &report.diagnostics[0];
+  assert!(d.message.contains("Int | String"), "{}", d.message);
+  let report = check("0 | Var(n)\nIf({n | IsMore(0)} {{c: 1}} {5}) = u\nu.c | Add(1)");
+  assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+  // A key no member can have, and a union no member of which applies.
+  let report = check("0 | Var(n)\nIf({n | IsMore(0)} {{c: 1}} {5}) = u\nu.d");
+  assert_eq!(report.diagnostics[0].code, "unknown-key");
+  let report = check("0 | Var(n)\nIf({n | IsMore(0)} {1} {\"s\"}) = u\nu.d");
+  assert_eq!(report.diagnostics[0].code, "input-type-mismatch");
+  // Static types keep their compose errors, lenient or not.
+  assert_eq!(
+    check("1 | Take(0)").diagnostics[0].code,
+    "input-type-mismatch"
+  );
+  assert_eq!(check("{a: 1} = t\nt.b?").diagnostics[0].code, "unknown-key");
+  // A lenient path's type is the strict path's or none.
+  let report = check("{a: [1 2]} = t\nt.a.5? | Add(1)");
+  assert!(
+    report.diagnostics[0].message.contains("Int | None"),
+    "{}",
+    report.diagnostics[0].message
+  );
+  assert_eq!(
+    completed(&run("{a: [1 2]} = t\nt.a.1?", &no_defines()), "root"),
+    Var::Int(2)
+  );
+  // `?` only right after a path.
+  for text in ["5 = x\nx?", "1?", "{a: 1} | Take(\"a\")?"] {
+    let d = load_errors(text);
+    assert_eq!(d[0].code, "unexpected-character", "{text}");
+  }
+  assert_eq!(
+    load_errors("{a: 1} = t\nt.a ?")[0].code,
+    "unexpected-character"
+  );
+}
+
+/// `= {a b: x}` and `= [a _ c]` (docs/iteration-and-access.md §3).
+#[test]
+fn destructuring_binds_several_names() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let report = run(
+    "{title: \"t\" hit: \"h\" n: 3} = {title hit: snippet} | .n = n
+[10 20 30 40] = [_ code _ name] = [first]
+\"{\\\"a\\\": 1}\" | FromJson = {a missing}
+[title snippet n code name first a missing]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::string("t"),
+      Var::string("h"),
+      Var::Int(3),
+      Var::Int(20),
+      Var::Int(40),
+      Var::Int(10),
+      Var::Int(1),
+      Var::None
+    ])
+  );
+  // The names follow the binding rules.
+  let report = check("{a: 1 b: 2} = {a b}\n{a: 3} = {a}");
+  assert_eq!(report.diagnostics[0].code, "duplicate-binding");
+  // A fixed table's unknown key is a compose error at the field.
+  let report = check("{a: 1 b: 2} = {a c}");
+  let d = &report.diagnostics[0];
+  assert_eq!((d.code, at(d)), ("unknown-key", (1, 18)));
+  // A sequence too short fails at activation, at the element.
+  let report = run(
+    "@wire(w { [1 2] = [a b c] })\n@mesh(m) @schedule(m w) @run(m)",
+    &no_defines(),
+  );
+  match report.outcomes.iter().find(|(w, _)| w == "w") {
+    Some((_, Some(Outcome::Failed(e)))) => assert!(e.to_string().contains("out of range"), "{e}"),
+    other => panic!("{other:?}"),
+  }
+  // Flat patterns only; `_` only in a sequence pattern.
+  let d = load_errors("{a: [1 2]} = {a: [x y]}");
+  assert_eq!((d[0].code, at(&d[0])), ("nested-pattern", (1, 18)));
+  assert!(d[0].message.contains("two steps"), "{}", d[0].message);
+  assert_eq!(
+    check("{_: 1} = {_}").diagnostics[0].code,
+    "misplaced-underscore"
+  );
+  assert_eq!(load_errors("[1] = []")[0].code, "pattern");
+  assert_eq!(load_errors("[1] = [_]")[0].code, "pattern");
+  assert_eq!(load_errors("[1] = [a")[0].code, "unclosed");
+  assert_eq!(check("_").diagnostics[0].code, "misplaced-underscore");
+  assert_eq!(check("1 = _").diagnostics[0].code, "misplaced-underscore");
+}
+
+/// ForEach, Map, Filter and Reduce (docs/iteration-and-access.md §4).
+#[test]
+fn iteration_shards() {
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let ints = |v: &[i64]| seq(v.iter().map(|i| Var::Int(*i)).collect());
+  let report = run(
+    "[1 2 3 4] = xs
+0 | Var(sum)
+xs | ForEach(x i { x | Add(sum) | Add(i) | Update(sum) }) | Count = passed
+xs | Map(x { x | Math.Multiply(10) }) = tens
+xs | Map({Add(1)}) = plus
+xs | Filter({IsMore(2)}) = big
+xs | Filter(_ i { i | IsLess(2) }) = first-two
+xs | Reduce(acc x { x | Add(acc) } init: 100) = total
+xs | Reduce(acc x { x | Add(acc) }) = total2
+xs | Reduce(acc _ i { i | Add(acc) } init: 0) = indices
+[{name: \"a\" age: 30} {name: \"b\" age: 12}] = people
+people | Map({.name}) = names
+people | Filter({.age | IsMore(17)}) | Map(p { p = {name} name }) = adults
+[sum passed tens plus big first-two total total2 indices names adults]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      Var::Int(16),
+      Var::Int(4),
+      ints(&[10, 20, 30, 40]),
+      ints(&[2, 3, 4, 5]),
+      ints(&[3, 4]),
+      ints(&[1, 2]),
+      Var::Int(110),
+      Var::Int(10),
+      Var::Int(6),
+      seq(vec![Var::string("a"), Var::string("b")]),
+      seq(vec![Var::string("a")]),
+    ])
+  );
+  // Tables: value then key, in key order.
+  let report = run(
+    "{b: 2 a: 1 c: 3} = t
+[] | Var(keys)
+t | ForEach(v k { k | Push(keys) })
+t | Map(v k { v | Add(1) }) = plus
+t | Filter(v { v | IsMore(1) }) = big
+t | Reduce(acc v { v | Add(acc) }) = total
+[keys plus big total]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      seq(vec![Var::string("a"), Var::string("b"), Var::string("c")]),
+      Var::table([("a", Var::Int(2)), ("b", Var::Int(3)), ("c", Var::Int(4))]),
+      Var::table([("b", Var::Int(2)), ("c", Var::Int(3))]),
+      Var::Int(6),
+    ])
+  );
+  // Any (parsed JSON): checked when the loop starts.
+  let report = run(
+    "\"[{\\\"n\\\": 1}, {\\\"n\\\": 2}]\" | FromJson = j
+j | Map({.n | ExpectInt | Add(1)}) = ns
+0 | Var(rows)
+j | ForEach(row i { row = {n} Inc(rows) })
+\"{\\\"x\\\": 5}\" | FromJson | Map(v k { k }) = keys
+[ns rows keys]",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![
+      seq(vec![Var::Int(2), Var::Int(3)]),
+      Var::Int(2),
+      Var::table([("x", Var::string("x"))]),
+    ])
+  );
+  let report = run(
+    "@wire(w { \"5\" | FromJson | ForEach({Pass}) })\n@mesh(m) @schedule(m w) @run(m)",
+    &no_defines(),
+  );
+  match report.outcomes.iter().find(|(w, _)| w == "w") {
+    Some((_, Some(Outcome::Failed(e)))) => assert!(
+      e.to_string()
+        .contains("ForEach needs a sequence or a table, got Int"),
+      "{e}"
+    ),
+    other => panic!("{other:?}"),
+  }
+  // The collection is read once: pushing to its variable in the body does
+  // not change the iteration.
+  let report = run(
+    "[1 2] | Var(xs)\n0 | Var(n)\nxs | ForEach({ 9 | Push(xs) Inc(n) })\n[n xs | Count]",
+    &no_defines(),
+  );
+  assert_eq!(completed(&report, "root"), ints(&[2, 4]));
+  // Nested loops pick other names; names are block-local.
+  let report = run(
+    "[[1 2] [3]] | Map(row { row | Map(x { x | Add(1) }) })",
+    &no_defines(),
+  );
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![ints(&[2, 3]), ints(&[4])])
+  );
+  let report = check("[[1]] | ForEach(x { x | ForEach(x {Pass}) })");
+  assert_eq!(report.diagnostics[0].code, "duplicate-binding");
+  let report = check("[1] | ForEach(x {Pass})\nx");
+  assert_eq!(report.diagnostics[0].code, "unknown-variable");
+  // Compose errors.
+  assert_eq!(
+    check("[1] | Filter({Add(1)})").diagnostics[0].code,
+    "predicate-not-bool"
+  );
+  assert_eq!(
+    check("[1] | Reduce(acc x { \"s\" } init: 0)").diagnostics[0].code,
+    "wrong-output-type"
+  );
+  let d = &check("\"abc\" | ForEach({Pass})").diagnostics[0];
+  assert_eq!(d.code, "input-type-mismatch");
+  assert!(d.message.contains("String.Split"), "{}", d.message);
+  assert_eq!(
+    check("[1] | ForEach(x x {Pass})").diagnostics[0].code,
+    "duplicate-binding"
+  );
+  let d = load_errors("[1] | ForEach(a b c {Pass})");
+  assert_eq!((d[0].code, at(&d[0])), ("too-many-names", (1, 19)));
+  assert_eq!(
+    load_errors("[1] | ForEach(1 {Pass})")[0].code,
+    "expected-variable-name"
+  );
+  assert_eq!(check("_ | Log").diagnostics[0].code, "misplaced-underscore");
+  assert_eq!(
+    check("1 | Var(_)").diagnostics[0].code,
+    "misplaced-underscore"
+  );
+  // An empty input without init.
+  let report = run(
+    "@wire(w { [] | ExpectIntSeq | Reduce(acc x { x }) })\n@mesh(m) @schedule(m w) @run(m)",
+    &no_defines(),
+  );
+  match report.outcomes.iter().find(|(w, _)| w == "w") {
+    Some((_, Some(Outcome::Failed(e)))) => assert!(e.to_string().contains("init:"), "{e}"),
+    other => panic!("{other:?}"),
+  }
+}
+
+/// Review 2026-10-24-11f8b5c-gemini-4-argon-review-thread-a4f19c#F1: an
+/// empty fixed table's element is Any, not Never (which made the body's
+/// input None and a Reduce look like a Stop).
+#[test]
+fn iterating_an_empty_fixed_table_types_the_element_any() {
+  let report = run(
+    "{} | Map(v { v | ExpectInt | Add(1) }) = a
+{} | Filter({ IsNone }) | Map(v { v | ExpectInt }) = c
+[a c]",
+    &no_defines(),
+  );
+  let empty = Var::table(Vec::<(&str, Var)>::new());
+  assert_eq!(
+    completed(&report, "root"),
+    Var::from_seq(std::sync::Arc::new(vec![empty.clone(), empty]))
+  );
+  // Reduce without init on `{}`: an Any accumulator, not a diverged flow.
+  let d = &check("{} | Reduce(acc v { v }) | Add(1)").diagnostics[0];
+  assert!(d.message.contains("got Any"), "{}", d.message);
+}
+
+/// Review 2026-10-24-11f8b5c-astra-cw75#F2: a sequence pattern checks the
+/// input's kind and its length once, whatever positions `_` skips.
+#[test]
+fn sequence_patterns_check_kind_and_length() {
+  for text in [
+    "[1] = [a _]",
+    "[1] = [a _ _]",
+    "\"[1]\" | FromJson = [a _]",
+    "\"{}\" | FromJson = [a]",
+  ] {
+    let report = run(
+      &format!("@wire(w {{ {text} }})\n@mesh(m) @schedule(m w) @run(m)"),
+      &no_defines(),
+    );
+    match report.outcomes.iter().find(|(w, _)| w == "w") {
+      Some((_, Some(Outcome::Failed(_)))) => {}
+      other => panic!("{text}: {other:?}"),
+    }
+  }
+  // A vector is not a sequence.
+  let d = &check("[1.0 2.0] | ToFloat2 = [a b]").diagnostics;
+  assert_eq!(d[0].code, "input-type-mismatch", "{d:?}");
+  // A longer sequence still binds the first positions.
+  assert_eq!(
+    completed(&run("[1 2 3] = [a _]\na", &no_defines()), "root"),
+    Var::Int(1)
+  );
+}
+
+/// Review 2026-10-24-11f8b5c-stitch-gamer-q7m2#F1: `?` inside a path is an
+/// error, with the fix moving it to the end.
+#[test]
+fn an_interior_question_mark_is_located_with_a_fix() {
+  for (text, fix, col) in [
+    ("{a: 1} | .a?.b", "`.a.b?`", 10),
+    ("{a: 1} = j\nj.a?.b", "`j.a.b?`", 1),
+    ("{a: 1} | .a?.b?", "`.a.b?`", 10),
+  ] {
+    let d = load_errors(text);
+    assert_eq!(d[0].code, "lenient-path", "{text}: {d:?}");
+    assert!(d[0].message.contains(fix), "{text}: {}", d[0].message);
+    assert_eq!(d[0].column, Some(col), "{text}");
+  }
+}
+
+/// A body may suspend; the loop resumes at the same element.
+#[test]
+fn iteration_bodies_suspend_and_resume() {
+  let report = run(
+    "[] | Var(seen)\n[1 2 3] | ForEach(x i { Pause x | Push(seen) }) | Map(x { Pause x | Add(1) }) = after\n[seen after]",
+    &no_defines(),
+  );
+  let seq = |v: Vec<Var>| Var::from_seq(std::sync::Arc::new(v));
+  let ints = |v: &[i64]| seq(v.iter().map(|i| Var::Int(*i)).collect());
+  assert_eq!(
+    completed(&report, "root"),
+    seq(vec![ints(&[1, 2, 3]), ints(&[2, 3, 4])])
+  );
+}
+
 #[test]
 fn unknown_dashed_names_explain_the_dash() {
   let report = check("5 = x\nx-1");
@@ -1626,10 +2046,12 @@ fn deep_do_chains_are_a_diagnostic_not_a_crash() {
   );
   // The device exercises the same over-limit diagnostic without parsing
   // thousands of unrelated declarations into its constrained heap: a chain
-  // of 40 function declarations is about 800 tokens (the token vector's
-  // next doubling would ask the fragmented heap for 80 KiB at once).
+  // of 26 function declarations (its flow limit is 24) is under 512
+  // tokens, so the token vector never asks the fragmented heap for the
+  // 40 KiB of 1,024 tokens at once (that request failed on the classic
+  // ESP32 once the suite's earlier tests retained a few KB more).
   let excessive: &[usize] = if cfg!(target_os = "espidf") {
-    &[40]
+    &[26]
   } else {
     &[80, 400, 3000]
   };
@@ -1639,7 +2061,8 @@ fn deep_do_chains_are_a_diagnostic_not_a_crash() {
   }
   // Spawn chains compose recursively too.
   let mut src = String::new();
-  let spawn_depth = if cfg!(target_os = "espidf") { 80 } else { 200 };
+  // Under 512 tokens on the device, as above.
+  let spawn_depth = if cfg!(target_os = "espidf") { 40 } else { 200 };
   assert!(spawn_depth > otter_core::compose::MAX_FLOW_DEPTH);
   for i in 0..spawn_depth {
     src.push_str(&format!("@wire(s{i} {{Spawn(s{})}})\n", i + 1));
@@ -2026,12 +2449,15 @@ fn malformed_input_is_reported_not_crashed_on() {
   let deep = format!("{}1{}", "[".repeat(arrays), "]".repeat(arrays));
   let d = load_errors(&deep);
   assert_eq!(d[0].code, "too-deep");
+  // Each `Repeat({` nests twice (its parameters and the flow), so half the
+  // depth crosses the boundary; on the device that stays under 512 tokens,
+  // whose vector would otherwise ask the fragmented heap for 40 KiB at once.
   let calls = if cfg!(target_os = "espidf") {
-    otter_lang::parser::MAX_DEPTH + 1
+    otter_lang::parser::MAX_DEPTH / 2 + 1
   } else {
     500
   };
-  assert!(calls > otter_lang::parser::MAX_DEPTH);
+  assert!(2 * calls > otter_lang::parser::MAX_DEPTH);
   let deep = format!(
     "{}{}",
     "Repeat({".repeat(calls),
@@ -3024,7 +3450,7 @@ fn implicit_loop_variables_are_rejected_with_the_1x_help() {
   assert_eq!(at(&d[0]), (1, 23));
   assert!(d[0].message.contains("`$0`"), "{}", d[0].message);
   assert!(
-    d[0].message.contains("the element is the block's input"),
+    d[0].message.contains("ForEach(x {...})"),
     "{}",
     d[0].message
   );

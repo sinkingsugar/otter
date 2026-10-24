@@ -743,6 +743,14 @@ impl Table {
     }
   }
 
+  /// The key at `index` in key order (the iteration shards' table entries).
+  pub fn key_at(&self, index: usize) -> Option<&Arc<str>> {
+    match &self.0 {
+      TableRepr::Struct { shape, .. } => shape.keys().get(index),
+      TableRepr::Map(entries) => entries.get(index).map(|(k, _)| k),
+    }
+  }
+
   pub fn contains_key(&self, key: &str) -> bool {
     self.get(key).is_some()
   }

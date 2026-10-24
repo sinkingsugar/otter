@@ -15,6 +15,11 @@ use crate::types::Shape;
 use crate::var::Table;
 
 pub static TAKE: ShardType = leaf_type::<Take>();
+/// The lenient path `t.a.0?`: internal (the frontend lowers to it), not in
+/// the catalog.
+pub static TAKE_PATH: ShardType = leaf_type::<TakePath>();
+/// A sequence pattern's check (`= [a _ c]`): internal, not in the catalog.
+pub static SEQ_PATTERN: ShardType = leaf_type::<SeqPattern>();
 pub static PUSH: ShardType = leaf_type::<Push>();
 pub static SEQ_MAKE: ShardType = leaf_type::<SeqMake>();
 pub static TABLE_MAKE: ShardType = leaf_type::<TableMake>();
@@ -45,7 +50,7 @@ pub const TAKE_DESC: ShardDesc = ShardDesc {
   version: 1,
   summary: crate::shard_doc!("Outputs one element of a sequence, table or vector."),
   help: crate::shard_doc!(
-    "On a fixed table, a literal key must be one of its keys (a compose error lists them) and the output has that key's type. On an open table, a missing key outputs none. An index out of range is an activation error. `t.key` and `s.0` are Take."
+    "On a fixed table, a literal key must be one of its keys (a compose error lists them) and the output has that key's type. On an open table, a missing key outputs none. An index out of range is an activation error. On Any, or a union with a member Take applies to, the kind is checked at activation (`Take: .a needs a table, got Int`) and the output is Any, or the union of what each applicable member gives. `t.key`, `s.0` and the step `| .key` are Take; `t.key?` is the lenient form (none when a step cannot apply)."
   ),
   params: Params::Declared(TAKE_PARAMS),
   input: InputDesc::Types(&[
@@ -54,6 +59,8 @@ pub const TAKE_DESC: ShardDesc = ShardDesc {
     TypeName::Float2,
     TypeName::Float3,
     TypeName::Float4,
+    // Or a union holding one of them: checked at activation.
+    TypeName::Any,
   ]),
   output: OutputDesc::Dynamic(crate::shard_doc!("the element's type")),
   targets: Targets::All,
@@ -79,103 +86,16 @@ impl LeafShard for Take {
 
   fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<TakeCode>> {
     let (key, key_ty) = Operand::compose_arg(args, "key", "Take", ctx)?;
-    let input = ctx.input();
     let literal = match &key {
       Operand::Const(v) => Some(v.clone()),
       Operand::Bound(_) => None,
     };
-    let mut code = TakeCode::Key(key);
-    let key_error = |expected: TypeName| {
-      Err(
-        compose_error(
-          "Take",
-          "compose-error",
-          "wrong-key-type",
-          format!(
-            "Take on {input} needs a {} key, got {key_ty}",
-            expected.name()
-          ),
-        )
-        .with_param("key", 0),
-      )
-    };
-    let output = match input.desc() {
-      TypeDesc::Seq(element) => {
-        if key_ty != Type::int() {
-          return key_error(TypeName::Int);
-        }
-        *element
-      }
-      TypeDesc::Float2 | TypeDesc::Float3 | TypeDesc::Float4 => {
-        if key_ty != Type::int() {
-          return key_error(TypeName::Int);
-        }
-        Type::float()
-      }
-      TypeDesc::Table(table) => {
-        if key_ty != Type::string() {
-          return key_error(TypeName::String);
-        }
-        match &literal {
-          Some(Var::String(k)) => {
-            match table.keys.binary_search_by(|(name, _)| (**name).cmp(&***k)) {
-              Ok(index) => {
-                if table.is_fixed() {
-                  code = TakeCode::Slot(index);
-                }
-                table.keys[index].1
-              }
-              Err(_) => match table.rest {
-                // An open table may not have the key at runtime.
-                Some(rest) => Type::union([rest, Type::none()]),
-                None => {
-                  let keys: Vec<String> = table.keys.iter().map(|(n, _)| n.to_string()).collect();
-                  let mut d = Diagnostic::new(
-                    Phase::Compose,
-                    "compose-error",
-                    "unknown-key",
-                    format!("{input} has no key `{}` (keys: {})", &***k, keys.join(", ")),
-                  )
-                  .shard("Take")
-                  .param("key", Some(0));
-                  d.did_you_mean = closest(k, keys, 3);
-                  return Err(Error::Diagnostic(Box::new(d)));
-                }
-              },
-            }
-          }
-          // A key read at activation: any value type, or none if missing.
-          _ => Type::union(
-            table
-              .keys
-              .iter()
-              .map(|(_, t)| *t)
-              .chain(table.rest)
-              .chain([Type::none()]),
-          ),
-        }
-      }
-      _ => {
-        return Err(Error::Diagnostic(Box::new(
-          Diagnostic::new(
-            Phase::Compose,
-            "input-type-mismatch",
-            "input-type-mismatch",
-            format!("Take needs a sequence, table or vector input, got {input}"),
-          )
-          .shard("Take")
-          .types(
-            Some(TypeRef::of(input)),
-            [TypeName::Seq, TypeName::Table, TypeName::Float3]
-              .into_iter()
-              .map(TypeRef::named)
-              .collect(),
-          ),
-        )));
-      }
-    };
+    let (output, slot) = take_type(ctx.input(), key_ty, literal.as_ref())?;
     Ok(Composed {
-      compiled: code,
+      compiled: match slot {
+        Some(index) => TakeCode::Slot(index),
+        None => TakeCode::Key(key),
+      },
       output,
     })
   }
@@ -215,15 +135,20 @@ pub(crate) fn take_slot(input: &Var, index: usize) -> Result<Var> {
 /// and calls this for everything else.
 pub(crate) fn take_value(input: &Var, key: &Var) -> Result<Var> {
   let value = match input {
+    Var::Seq(_) | Var::Float2(_) | Var::Float3(_) | Var::Float4(_)
+      if !matches!(key, Var::Int(_)) =>
+    {
+      return Err(take_kind_error(input, key));
+    }
     Var::Seq(items) => items[take_index(key, items.len())?].clone(),
     Var::Float2(v) => Var::Float(f64::from(v[take_index(key, 2)?])),
     Var::Float3(v) => Var::Float(f64::from(v[take_index(key, 3)?])),
     Var::Float4(v) => Var::Float(f64::from(v[take_index(key, 4)?])),
     Var::Table(entries) => match &key {
       Var::String(k) => entries.get(k).cloned().unwrap_or(Var::None),
-      _ => return Err(Error::Activation("Take: the key must be a String".into())),
+      _ => return Err(take_kind_error(input, key)),
     },
-    _ => return Err(Error::Activation("Take: input type mismatch".into())),
+    _ => return Err(take_kind_error(input, key)),
   };
   Ok(value)
 }
@@ -237,6 +162,416 @@ fn take_index(key: &Var, len: usize) -> Result<usize> {
       "Take: index {i} is out of range (length {len})"
     ))),
     _ => Err(Error::Activation("Take: the key must be an Int".into())),
+  }
+}
+
+/// What a Take with a key of type `key_ty` (`literal` when the key is one)
+/// outputs on `input`, and the slot a literal key resolved to on a fixed
+/// table. Static types keep their rules (docs/iteration-and-access.md §2);
+/// on `Any`, or a union with a member a Take applies to, the kind is
+/// checked at activation: the output is `Any`, or the union of what each
+/// applicable member gives.
+pub(crate) fn take_type(
+  input: Type,
+  key_ty: Type,
+  literal: Option<&Var>,
+) -> Result<(Type, Option<usize>)> {
+  match input.desc() {
+    TypeDesc::Any => Ok((Type::any(), None)),
+    TypeDesc::Union(members) => {
+      let mut outputs = Vec::new();
+      let mut applies = false;
+      let mut first_error = None;
+      for member in members {
+        match member_take(*member, key_ty, literal) {
+          Ok(Some((output, _))) => {
+            applies = true;
+            outputs.push(output);
+          }
+          Ok(None) => {}
+          // A table member without the key: none there at activation (a
+          // missing key on a table), unless no member can have it.
+          Err(err)
+            if member.as_table().is_some()
+              && literal.is_some()
+              && err.diagnostic().is_some_and(|d| d.code == "unknown-key") =>
+          {
+            first_error.get_or_insert(err);
+            outputs.push(Type::none());
+          }
+          // Another key kind: this member does not apply.
+          Err(_) => {}
+        }
+      }
+      if applies {
+        Ok((Type::union(outputs), None))
+      } else if let Some(err) = first_error {
+        Err(err)
+      } else {
+        Err(take_input_mismatch(input))
+      }
+    }
+    _ => match member_take(input, key_ty, literal)? {
+      Some(found) => Ok(found),
+      None => Err(take_input_mismatch(input)),
+    },
+  }
+}
+
+/// A Take on one static type: `None` when it does not apply to the type.
+fn member_take(
+  input: Type,
+  key_ty: Type,
+  literal: Option<&Var>,
+) -> Result<Option<(Type, Option<usize>)>> {
+  let key_error = |expected: TypeName| {
+    Err(
+      compose_error(
+        "Take",
+        "compose-error",
+        "wrong-key-type",
+        format!(
+          "Take on {input} needs a {} key, got {key_ty}",
+          expected.name()
+        ),
+      )
+      .with_param("key", 0),
+    )
+  };
+  let found = match input.desc() {
+    TypeDesc::Seq(element) => {
+      if key_ty != Type::int() {
+        return key_error(TypeName::Int);
+      }
+      (*element, None)
+    }
+    TypeDesc::Float2 | TypeDesc::Float3 | TypeDesc::Float4 => {
+      if key_ty != Type::int() {
+        return key_error(TypeName::Int);
+      }
+      (Type::float(), None)
+    }
+    TypeDesc::Table(table) => {
+      if key_ty != Type::string() {
+        return key_error(TypeName::String);
+      }
+      match literal {
+        Some(Var::String(k)) => {
+          match table.keys.binary_search_by(|(name, _)| (**name).cmp(&***k)) {
+            Ok(index) => (table.keys[index].1, table.is_fixed().then_some(index)),
+            Err(_) => match table.rest {
+              // An open table may not have the key at runtime.
+              Some(rest) => (Type::union([rest, Type::none()]), None),
+              None => {
+                let keys: Vec<String> = table.keys.iter().map(|(n, _)| n.to_string()).collect();
+                let mut d = Diagnostic::new(
+                  Phase::Compose,
+                  "compose-error",
+                  "unknown-key",
+                  format!("{input} has no key `{}` (keys: {})", &***k, keys.join(", ")),
+                )
+                .shard("Take")
+                .param("key", Some(0));
+                d.did_you_mean = closest(k, keys, 3);
+                return Err(Error::Diagnostic(Box::new(d)));
+              }
+            },
+          }
+        }
+        // A key read at activation: any value type, or none if missing.
+        _ => (
+          Type::union(
+            table
+              .keys
+              .iter()
+              .map(|(_, t)| *t)
+              .chain(table.rest)
+              .chain([Type::none()]),
+          ),
+          None,
+        ),
+      }
+    }
+    _ => return Ok(None),
+  };
+  Ok(Some(found))
+}
+
+fn take_input_mismatch(input: Type) -> Error {
+  Error::Diagnostic(Box::new(
+    Diagnostic::new(
+      Phase::Compose,
+      "input-type-mismatch",
+      "input-type-mismatch",
+      format!("Take needs a sequence, table or vector input, got {input}"),
+    )
+    .shard("Take")
+    .types(
+      Some(TypeRef::of(input)),
+      [TypeName::Seq, TypeName::Table, TypeName::Float3]
+        .into_iter()
+        .map(TypeRef::named)
+        .collect(),
+    ),
+  ))
+}
+
+/// How a value's kind is named in a run-time message.
+pub(crate) fn kind_name(value: &Var) -> &'static str {
+  match value {
+    Var::None => "none",
+    Var::Bool(_) => "Bool",
+    Var::Int(_) => "Int",
+    Var::Float(_) => "Float",
+    Var::Float2(_) => "Float2",
+    Var::Float3(_) => "Float3",
+    Var::Float4(_) => "Float4",
+    Var::String(_) => "String",
+    Var::Seq(_) => "a sequence",
+    Var::Table(_) => "a table",
+    Var::Bytes(_) => "Bytes",
+    Var::Object(_) => "an object",
+  }
+}
+
+/// A Take's run-time failure on a value of the wrong kind, naming the step
+/// as a path writes it: `Take: .a needs a table, got Int`.
+#[cold]
+fn take_kind_error(input: &Var, key: &Var) -> Error {
+  let (step, needs) = match key {
+    Var::String(k) => (format!(".{}", &***k), "a table"),
+    Var::Int(i) => (format!(".{i}"), "a sequence"),
+    _ => return Error::Activation("Take: the key must be an Int or a String".into()),
+  };
+  Error::Activation(format!(
+    "Take: {step} needs {needs}, got {}",
+    kind_name(input)
+  ))
+}
+
+// --- TakePath (the lenient path `t.a.0?`) ---
+
+pub static TAKE_PATH_PARAMS: &[ParamDecl] = &[decl(
+  "keys",
+  crate::shard_doc!("The path's steps, in order: Int indices and String keys."),
+  Forms::LITERAL,
+  &[TypeName::Seq],
+  Requirement::Required,
+)];
+
+/// Internal: the frontend lowers a lenient path (`t.a.0?`, `| .a?`) to it,
+/// and it is not in the catalog (the public form is the path itself).
+pub const TAKE_PATH_DESC: ShardDesc = ShardDesc {
+  name: "TakePath",
+  version: 1,
+  summary: crate::shard_doc!("A lenient path: none when a step cannot apply."),
+  help: crate::shard_doc!(
+    "Reads each key in turn, as Take does; a step that cannot apply (a value of the wrong kind, none, a missing key, an index out of range) makes the output none and skips the rest. Compose checks each step as Take does, so a step that can never apply is still an error. The output is the strict path's type or none. Written `t.a.0?` or `x | .a.b?`."
+  ),
+  params: Params::Declared(TAKE_PATH_PARAMS),
+  input: InputDesc::Any,
+  output: OutputDesc::Dynamic(crate::shard_doc!("the strict path's type, or none")),
+  targets: Targets::All,
+  aliases: &[],
+  effects: crate::signature::Effects::NONE,
+  lifetime: crate::signature::Lifetime::Stateless,
+};
+
+pub struct TakePath;
+
+impl LeafShard for TakePath {
+  /// The keys: a sequence of Ints and Strings.
+  type Compiled = Var;
+  type State = ();
+  const DESC: ShardDesc = TAKE_PATH_DESC;
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<Var>> {
+    let keys = match args.literal("keys") {
+      Some(Var::Seq(items))
+        if !items.is_empty()
+          && items
+            .iter()
+            .all(|k| matches!(k, Var::String(_)) || matches!(k, Var::Int(i) if *i >= 0)) =>
+      {
+        Var::from_seq(Arc::clone(items))
+      }
+      _ => {
+        return Err(param_error(
+          args,
+          "TakePath",
+          "keys",
+          "compose-error",
+          "invalid-keys",
+          "Keys must be a non-empty sequence of strings and non-negative Ints".into(),
+        ));
+      }
+    };
+    let mut ty = ctx.input();
+    for key in keys.as_seq().unwrap_or(&[]) {
+      // A none from the step before ends the path.
+      ty = without_none(ty);
+      if ty == Type::none() {
+        break;
+      }
+      ty = take_type(ty, key.type_of(), Some(key))?.0;
+    }
+    Ok(Composed {
+      compiled: keys,
+      output: Type::union([ty, Type::none()]),
+    })
+  }
+
+  fn instantiate(_: &Var, _: &mut InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+
+  fn activate(keys: &Var, _: &mut (), _: &mut impl LeafCtx, input: &Var) -> Result<Flow> {
+    Ok(Flow::Next(take_lenient(
+      input,
+      keys.as_seq().unwrap_or(&[]),
+    )))
+  }
+}
+
+/// `ty` without its `None` member (`None` itself when that is all it is).
+fn without_none(ty: Type) -> Type {
+  match ty.desc() {
+    TypeDesc::Union(members) => Type::union(members.iter().copied().filter(|m| *m != Type::none())),
+    _ => ty,
+  }
+}
+
+/// A lenient path's value: each key in turn, none as soon as one cannot
+/// apply.
+pub(crate) fn take_lenient(input: &Var, keys: &[Var]) -> Var {
+  let mut value = input;
+  for (n, key) in keys.iter().enumerate() {
+    value = match (value, key) {
+      (Var::Seq(items), Var::Int(i)) => match usize::try_from(*i).ok().and_then(|i| items.get(i)) {
+        Some(item) => item,
+        None => return Var::None,
+      },
+      (Var::Table(entries), Var::String(k)) => match entries.get(k) {
+        Some(item) => item,
+        None => return Var::None,
+      },
+      // A vector's component is a Float: nothing further to read.
+      (Var::Float2(_) | Var::Float3(_) | Var::Float4(_), Var::Int(_)) if n + 1 == keys.len() => {
+        return take_value(value, key).unwrap_or(Var::None);
+      }
+      _ => return Var::None,
+    };
+  }
+  value.clone()
+}
+
+// --- SeqPattern (the check of `= [a _ c]`) ---
+
+pub static SEQ_PATTERN_PARAMS: &[ParamDecl] = &[decl(
+  "length",
+  crate::shard_doc!("How many positions the pattern has, `_` included."),
+  Forms::LITERAL,
+  &[TypeName::Int],
+  Requirement::Required,
+)];
+
+/// Internal: the frontend checks a sequence pattern's input with it, once,
+/// before reading the positions it names (docs/iteration-and-access.md §3).
+pub const SEQ_PATTERN_DESC: ShardDesc = ShardDesc {
+  name: "SeqPattern",
+  version: 1,
+  summary: crate::shard_doc!("Checks that the input is a sequence of at least `length` elements."),
+  help: crate::shard_doc!(
+    "A sequence type composes to a read of the last position (the length check); Any, or a union holding a sequence, is checked at activation; anything else is a compose error. Its output is not used: the frontend reads the pattern's input again."
+  ),
+  params: Params::Declared(SEQ_PATTERN_PARAMS),
+  input: InputDesc::Any,
+  output: OutputDesc::Dynamic(crate::shard_doc!("the last position's type, or Any")),
+  targets: Targets::All,
+  aliases: &[],
+  effects: crate::signature::Effects::NONE,
+  lifetime: crate::signature::Lifetime::Stateless,
+};
+
+pub struct SeqPattern;
+
+/// A sequence pattern's check: on a sequence type, a read of the last
+/// position (the VM's `Take`); otherwise checked at activation.
+#[derive(Clone, Copy, Debug)]
+pub enum SeqPatternCode {
+  Static(usize),
+  Dynamic(usize),
+}
+
+impl LeafShard for SeqPattern {
+  type Compiled = SeqPatternCode;
+  type State = ();
+  const DESC: ShardDesc = SEQ_PATTERN_DESC;
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<SeqPatternCode>> {
+    let length = match args.literal("length") {
+      Some(Var::Int(n)) if *n >= 1 => *n as usize,
+      _ => {
+        return Err(param_error(
+          args,
+          "SeqPattern",
+          "length",
+          "compose-error",
+          "invalid-length",
+          "Length must be a positive Int".into(),
+        ));
+      }
+    };
+    let input = ctx.input();
+    let (compiled, output) = match input.desc() {
+      TypeDesc::Seq(element) => (SeqPatternCode::Static(length), *element),
+      TypeDesc::Any => (SeqPatternCode::Dynamic(length), Type::any()),
+      TypeDesc::Union(members) if members.iter().any(|m| matches!(m.desc(), TypeDesc::Seq(_))) => {
+        (SeqPatternCode::Dynamic(length), Type::any())
+      }
+      _ => {
+        return Err(Error::Diagnostic(Box::new(
+          Diagnostic::new(
+            Phase::Compose,
+            "input-type-mismatch",
+            "input-type-mismatch",
+            format!("a sequence pattern (`= [a b]`) needs a sequence, got {input}"),
+          )
+          .shard("SeqPattern")
+          .types(
+            Some(TypeRef::of(input)),
+            vec![TypeRef::named(TypeName::Seq)],
+          ),
+        )));
+      }
+    };
+    Ok(Composed { compiled, output })
+  }
+
+  fn instantiate(_: &SeqPatternCode, _: &mut InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+
+  fn activate(
+    code: &SeqPatternCode,
+    _: &mut (),
+    _: &mut impl LeafCtx,
+    input: &Var,
+  ) -> Result<Flow> {
+    let length = match code {
+      SeqPatternCode::Static(n) | SeqPatternCode::Dynamic(n) => *n,
+    };
+    match input {
+      Var::Seq(items) if items.len() >= length => Ok(Flow::Next(items[length - 1].clone())),
+      Var::Seq(items) => Err(Error::Activation(format!(
+        "a sequence pattern of {length} positions needs {length} elements, got {}",
+        items.len()
+      ))),
+      other => Err(Error::Activation(format!(
+        "a sequence pattern needs a sequence, got {}",
+        kind_name(other)
+      ))),
+    }
   }
 }
 

@@ -17,15 +17,7 @@
 
 // The cheapest price among a page's rows, or `no-price`.
 @fn(Cheapest input: Any output: Int params: {} {
-  At(i: 3) | At(i: 0) | SeqOr = rows
-  @no-price | Var(best)
-  0 | Var(i)
-  Repeat({
-    rows | Take(i) | Price = price
-    Inc(i)
-    price | When({IsLess(best)} {price | Update(best)})
-  } times: (rows | Count))
-  best
+  .3.0? | SeqOr | Reduce(best row { row | Price | Min(best) } init: @no-price)
 })
 
 @fn(CheapDates input: {input: {} env: {} working-dir: String} output: String params: {} {

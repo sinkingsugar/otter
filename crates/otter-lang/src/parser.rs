@@ -19,6 +19,9 @@ pub struct Parser<'a> {
   /// reported as unclosed.
   aborted: bool,
   pub problems: Vec<Problem>,
+  /// Tokens a `?` follows: the last segment of a lenient path (the
+  /// lexer's `tokenize_marked`).
+  lenient: Vec<usize>,
 }
 
 /// Parses a whole source. Problems include the lexer's.
@@ -29,8 +32,10 @@ pub fn parse(source: &Source) -> (Program, Vec<Problem>) {
 /// Parses one file of a source (`Source::add`): its spans are offsets in
 /// the whole source.
 pub fn parse_range(source: &Source, range: Span) -> (Program, Vec<Problem>) {
-  let (tokens, mut problems) = Lexer::new(&source.text, range.start, range.end).tokenize();
+  let (tokens, mut problems, lenient) =
+    Lexer::new(&source.text, range.start, range.end).tokenize_marked();
   let mut parser = Parser::new(source, tokens);
+  parser.lenient = lenient;
   let statements = parser.statements(None);
   problems.append(&mut parser.problems);
   problems.sort_by_key(|p| p.span.start);
@@ -47,6 +52,7 @@ impl<'a> Parser<'a> {
       depth: 0,
       aborted: false,
       problems: Vec::new(),
+      lenient: Vec::new(),
     }
   }
 
@@ -212,6 +218,7 @@ impl<'a> Parser<'a> {
       self.bump();
       let v = self.peek().clone();
       return match v.tok {
+        Tok::LBrace | Tok::LBracket => self.pattern(t.span),
         Tok::Ident(name) => {
           self.bump();
           if self.at(&Tok::Pipe) {
@@ -247,6 +254,184 @@ impl<'a> Parser<'a> {
       self.bump();
     }
     self.pipe().map(Statement::Pipeline)
+  }
+
+  /// `= {a b: x}` or `= [a _ c]` (`=` consumed): a flat pattern.
+  #[inline(never)]
+  fn pattern(&mut self, op_span: Span) -> Option<Statement> {
+    let open = self.bump();
+    let table = open.tok == Tok::LBrace;
+    let closer = if table { Tok::RBrace } else { Tok::RBracket };
+    let mut fields = Vec::new();
+    let mut elements = Vec::new();
+    let mut ok = true;
+    let end = loop {
+      let t = self.peek().clone();
+      if t.tok == closer {
+        self.bump();
+        break t.span.end;
+      }
+      if t.tok == Tok::Eof || Self::is_closer(&t.tok) {
+        self.problem(Problem::syntax(
+          open.span,
+          "unclosed",
+          format!(
+            "missing {} for the pattern opened at {}",
+            closer.describe(),
+            self.position(open.span)
+          ),
+        ));
+        return None;
+      }
+      if matches!(t.tok, Tok::LBrace | Tok::LBracket) {
+        ok = false;
+        self.nested_pattern(t.span);
+        continue;
+      }
+      self.bump();
+      let name = |tok: &Tok| match tok {
+        Tok::Ident(n) => Some(n.clone()),
+        _ => None,
+      };
+      if table {
+        let key = match &t.tok {
+          Tok::Ident(k) | Tok::Upper(k) | Tok::Str(k) => k.clone(),
+          other => {
+            ok = false;
+            self.problem(Problem::syntax(
+              t.span,
+              "pattern",
+              format!(
+                "expected a field name in the pattern (`{{a b: x}}`), found {}",
+                other.describe()
+              ),
+            ));
+            continue;
+          }
+        };
+        let key = Spanned {
+          node: key,
+          span: t.span,
+        };
+        if self.at(&Tok::Colon) {
+          self.bump();
+          let b = self.peek().clone();
+          if matches!(b.tok, Tok::LBrace | Tok::LBracket) {
+            ok = false;
+            self.nested_pattern(b.span);
+            continue;
+          }
+          match name(&b.tok) {
+            Some(n) => {
+              self.bump();
+              fields.push((
+                key,
+                Spanned {
+                  node: n,
+                  span: b.span,
+                },
+              ));
+            }
+            None => {
+              ok = false;
+              self.problem(Problem::syntax(
+                b.span,
+                "pattern",
+                format!(
+                  "`{}:` in a pattern must be followed by the name it binds, found {}",
+                  key.node,
+                  b.tok.describe()
+                ),
+              ));
+            }
+          }
+        } else if let Some(n) = name(&t.tok) {
+          fields.push((
+            key,
+            Spanned {
+              node: n,
+              span: t.span,
+            },
+          ));
+        } else {
+          ok = false;
+          self.problem(Problem::syntax(
+            t.span,
+            "pattern",
+            format!(
+              "`{}` is not a name to bind: write `{}: name`",
+              key.node,
+              t.tok.describe().trim_matches('`')
+            ),
+          ));
+        }
+      } else {
+        match &t.tok {
+          Tok::Ident(n) if n == "_" => elements.push(None),
+          Tok::Ident(n) => elements.push(Some(Spanned {
+            node: n.clone(),
+            span: t.span,
+          })),
+          other => {
+            ok = false;
+            self.problem(Problem::syntax(
+              t.span,
+              "pattern",
+              format!(
+                "expected a name or `_` in the pattern (`[a _ c]`), found {}",
+                other.describe()
+              ),
+            ));
+          }
+        }
+      }
+    };
+    let span = open.span.to(Span::new(end, end));
+    if self.at(&Tok::Pipe) {
+      self.bump();
+    }
+    if ok && fields.is_empty() && elements.iter().all(Option::is_none) {
+      self.problem(Problem::syntax(
+        span,
+        "pattern",
+        "a pattern binds at least one name".into(),
+      ));
+      return None;
+    }
+    ok.then(|| Statement::Destructure {
+      op_span,
+      pattern: Box::new(Spanned {
+        node: if table {
+          Pattern::Table(fields)
+        } else {
+          Pattern::Seq(elements)
+        },
+        span,
+      }),
+    })
+  }
+
+  /// A pattern inside a pattern: reported, and skipped to its closer.
+  #[cold]
+  fn nested_pattern(&mut self, at: Span) {
+    self.problem(
+      Problem::syntax(at, "nested-pattern", "patterns do not nest".into())
+        .help("bind in two steps: `= {a: inner}`, then `inner = [x y]`"),
+    );
+    let mut depth = 0usize;
+    loop {
+      match self.bump().tok {
+        Tok::LBrace | Tok::LBracket => depth += 1,
+        Tok::RBrace | Tok::RBracket => {
+          depth -= 1;
+          if depth == 0 {
+            return;
+          }
+        }
+        Tok::Eof => return,
+        _ => {}
+      }
+    }
   }
 
   /// `Block (| Block)*`.
@@ -358,16 +543,19 @@ impl<'a> Parser<'a> {
           }
           _ => {
             let path = self.path();
+            let lenient = !path.is_empty() && self.marked();
             BlockKind::Var {
               name: Spanned {
                 node: name,
                 span: start,
               },
               path,
+              lenient,
             }
           }
         }
       }
+      Tok::Dot => self.step_path(start)?,
       Tok::Int(i) => {
         self.bump();
         BlockKind::Literal(Literal::Int(i))
@@ -478,7 +666,98 @@ impl<'a> Parser<'a> {
       ));
       return None;
     }
+    if matches!(self.peek().tok, Tok::Dot) {
+      self.path_in_value();
+      return None;
+    }
     self.pipe()
+  }
+
+  /// A path step (`.key`, `.0.key`) reading the step's input; `start` is
+  /// the `.`. Out of line: rare, and kept out of `block_inner`.
+  #[inline(never)]
+  fn step_path(&mut self, start: Span) -> Option<BlockKind> {
+    // A path step: `.key`, `.0.key`, reading the step's input.
+    self.bump();
+    let k = self.peek().clone();
+    let key = match k.tok {
+      Tok::Ident(ref s) | Tok::Upper(ref s) if !k.spaced => PathKey::Key(s.clone()),
+      Tok::Int(i) if !k.spaced && i >= 0 => PathKey::Index(i),
+      _ => {
+        self.problem(
+          Problem::syntax(
+            start,
+            "path",
+            "`.` starting a step must be followed by a key or an index (`.key`, `.0`)".into(),
+          )
+          .help(
+            "a path step reads the pipeline value: `x | .a.b` is `x | Take(\"a\") | Take(\"b\")`",
+          ),
+        );
+        return None;
+      }
+    };
+    self.bump();
+    let mut path = vec![Spanned {
+      node: key,
+      span: k.span,
+    }];
+    path.extend(self.path());
+    let lenient = self.marked();
+    Some(BlockKind::Path { path, lenient })
+  }
+
+  /// Whether a `?` follows the token just consumed (a path's last
+  /// segment): the path is lenient.
+  fn marked(&self) -> bool {
+    !self.lenient.is_empty() && self.lenient.binary_search(&(self.pos - 1)).is_ok()
+  }
+
+  /// A path step where a value is expected: `.5` is a misspelled 0.5, a
+  /// path has no pipeline input there. Reports it and skips the pipe.
+  #[cold]
+  #[inline(never)]
+  fn path_in_value(&mut self) {
+    // A path step reads the pipeline input, and a value has none here.
+    let dot = self.peek().clone();
+    let next = self.peek_at(1).clone();
+    if let Tok::Int(_) = next.tok
+      && !next.spaced
+    {
+      // `.5`: a float written without its leading zero.
+      let span = dot.span.to(next.span);
+      let digits = &self.source.text[next.span.start..next.span.end];
+      let fix = format!("0.{digits}");
+      self.problem(
+        Problem::syntax(
+          span,
+          "number-form",
+          format!("a number cannot start with `.`: write {fix}"),
+        )
+        .fix(fix),
+      );
+      self.bump();
+      self.bump();
+      return;
+    }
+    let Some(block) = self.block() else {
+      return;
+    };
+    self.problem(
+      Problem::syntax(
+        block.span,
+        "path-in-value",
+        "a path step cannot stand for a value here: it has no pipeline input".into(),
+      )
+      .help("a path step reads the pipeline input; bind it first or use a variable path"),
+    );
+    // The rest of the pipe still parses (and reports its problems).
+    while self.at(&Tok::Pipe) {
+      self.bump();
+      if self.block().is_none() {
+        return;
+      }
+    }
   }
 
   fn nested_statements(&mut self, closer: Tok, what: &str, open: Span) -> (Vec<Statement>, Span) {
@@ -510,6 +789,7 @@ impl<'a> Parser<'a> {
   }
 
   /// `.key` / `.0` segments directly after a variable name.
+  #[inline(always)]
   fn path(&mut self) -> Vec<Spanned<PathKey>> {
     let mut path = Vec::new();
     while self.at(&Tok::Dot) && !self.peek().spaced {
@@ -751,9 +1031,11 @@ impl<'a> Parser<'a> {
           if !buf.is_empty() {
             parts.push(FPart::Text(std::mem::take(&mut buf)));
           }
-          let (tokens, mut lex_problems) = Lexer::new(text, open + 1, close).tokenize();
+          let (tokens, mut lex_problems, lenient) =
+            Lexer::new(text, open + 1, close).tokenize_marked();
           self.problems.append(&mut lex_problems);
           let mut inner = Parser::new(self.source, tokens);
+          inner.lenient = lenient;
           inner.depth = self.depth;
           let stmts = inner.statements(None);
           self.problems.append(&mut inner.problems);
