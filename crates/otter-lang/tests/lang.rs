@@ -2449,12 +2449,15 @@ fn malformed_input_is_reported_not_crashed_on() {
   let deep = format!("{}1{}", "[".repeat(arrays), "]".repeat(arrays));
   let d = load_errors(&deep);
   assert_eq!(d[0].code, "too-deep");
+  // Each `Repeat({` nests twice (its parameters and the flow), so half the
+  // depth crosses the boundary; on the device that stays under 512 tokens,
+  // whose vector would otherwise ask the fragmented heap for 40 KiB at once.
   let calls = if cfg!(target_os = "espidf") {
-    otter_lang::parser::MAX_DEPTH + 1
+    otter_lang::parser::MAX_DEPTH / 2 + 1
   } else {
     500
   };
-  assert!(calls > otter_lang::parser::MAX_DEPTH);
+  assert!(2 * calls > otter_lang::parser::MAX_DEPTH);
   let deep = format!(
     "{}{}",
     "Repeat({".repeat(calls),
