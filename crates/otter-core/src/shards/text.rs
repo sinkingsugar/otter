@@ -1490,20 +1490,30 @@ impl<const END: bool> LeafShard for Pad<END> {
         ),
       ));
     };
+    // A width of zero or less pads nothing, without reading the string.
+    if width <= 0 {
+      return Ok(Flow::Next(input.clone()));
+    }
+    let Ok(width) = usize::try_from(width) else {
+      return Err(fail(
+        Self::NAME,
+        &format!("width {width} is too large for this target"),
+      ));
+    };
     let text = input.as_str().unwrap_or("");
+    // Counting the characters reads the string: charged before it, on
+    // every path after it.
+    if let Some(meter) = ctx.meter() {
+      meter_bytes(input, meter)?;
+    }
     let len = text.chars().count();
-    let Some(missing) = usize::try_from(width)
-      .ok()
-      .and_then(|w| w.checked_sub(len))
-      .filter(|m| *m > 0)
-    else {
+    let Some(missing) = width.checked_sub(len).filter(|m| *m > 0) else {
       return Ok(Flow::Next(input.clone()));
     };
     let bytes = missing
       .checked_mul(fill.len_utf8())
       .and_then(|b| b.checked_add(text.len()));
     if let Some(meter) = ctx.meter() {
-      meter_bytes(input, meter)?;
       meter.allocate(bytes.unwrap_or(usize::MAX))?;
     }
     let mut out = String::new();

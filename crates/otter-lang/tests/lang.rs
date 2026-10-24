@@ -5700,6 +5700,48 @@ fn pad_start_and_end_pad_by_characters() {
   assert_eq!(d[0].code, "input-type-mismatch");
 }
 
+/// Review astra-f8c2#F1: padding counts the string's characters, so a
+/// compose-time evaluation charges that traversal even when nothing is
+/// padded, as `Count` does.
+#[test]
+fn padding_at_compose_time_charges_the_string_it_reads() {
+  // Charged, 200 reads pass the platform's fuel (10M, the device's 8,000);
+  // uncharged, they stay far below it.
+  let text = "x".repeat(if cfg!(target_os = "espidf") {
+    2048
+  } else {
+    1 << 20
+  });
+  for shard in [
+    "Count",
+    "String.PadStart(width: 3)",
+    "String.PadEnd(width: 3)",
+  ] {
+    let source = format!("#( \"{text}\" = s  Repeat({{s | {shard}}} times: 200) 1 )");
+    let d = compose_errors(&source);
+    assert_eq!(d[0].code, "expansion-budget", "{shard}: {}", d[0].message);
+  }
+  // A width of zero or less reads nothing: no traversal to charge.
+  let source = format!("#( \"{text}\" = s  Repeat({{s | String.PadEnd(width: 0)}} times: 200) 1 )");
+  assert!(check(&source).ok());
+}
+
+/// Review astra-f8c2#F2: a width the target cannot represent (past
+/// `usize` on 32-bit WASI and ESP32) is an activation error, never the
+/// input unchanged; on 64-bit the same width fails its allocation.
+#[test]
+fn padding_to_an_unrepresentable_width_fails() {
+  for shard in ["String.PadStart", "String.PadEnd"] {
+    let failure = root_failure(&format!("\"x\" | {shard}(width: {})", i64::MAX));
+    assert!(failure.contains(shard), "{failure}");
+    #[cfg(target_pointer_width = "32")]
+    {
+      let failure = root_failure(&format!("\"x\" | {shard}(width: 4294967296)"));
+      assert!(failure.contains("too large"), "{failure}");
+    }
+  }
+}
+
 #[test]
 fn checks_assertions_and_type_changes() {
   let v = root_value(
