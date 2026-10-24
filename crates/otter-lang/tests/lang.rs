@@ -51,64 +51,6 @@ fn completed(report: &otter_lang::RunReport, wire: &str) -> Var {
   }
 }
 
-// The deepest test comes first: the firmware runs this file's tests in
-// order, and its peak heap is the frontend suite's; running it before the
-// type registry has grown with the rest of the suite keeps a registry
-// reallocation (one contiguous block, tens of KB on the classic ESP32) out
-// of that peak.
-fn wrapped_chain(n: usize, wrapper: &str) -> String {
-  let mut src = String::new();
-  for i in 0..n {
-    let body = wrapper.replace("{next}", &format!("W{}", i + 1));
-    src.push_str(&format!(
-      "@fn(W{i} input: None output: Any params: {{}} {{{body}}})\n"
-    ));
-  }
-  src.push_str(&format!(
-    "@fn(W{n} input: None output: Any params: {{}} {{1}})\nW0"
-  ));
-  src
-}
-
-#[test]
-fn nesting_up_to_the_limit_runs_through_every_control_shard() {
-  // Each wrapper adds two or three flow levels per wire; the chain goes
-  // as deep as compose allows, and must run (in debug builds too).
-  for (wrapper, levels) in [
-    ("If(All({true} {{next} true}) {1} {2})", 3),
-    ("When({true} {{next}})", 2),
-    ("Repeat({{next}} times: 1)", 2),
-    ("1 | Match([1 {{next}}] default: {{}})", 2),
-    ("Maybe({{next}} {2})", 2),
-    ("Any({false} {{next} false})", 2),
-    // A compose-time evaluation composes and runs its pipeline in the
-    // middle of compose, an engine activation per level.
-    ("#( {next} )", 3),
-  ] {
-    let n = (otter_core::compose::MAX_FLOW_DEPTH - 2) / levels;
-    let src = wrapped_chain(n, wrapper);
-    // This test needs diagnostics, not the full tooling report of every
-    // occurrence and its expanded source path.
-    let program = Program::load(Source::new("t.shs", &src), &catalog(), &no_defines())
-      .unwrap_or_else(|(_, d)| panic!("{d:?}"));
-    let diagnostics = program.compose();
-    assert!(diagnostics.is_empty(), "{wrapper}: {diagnostics:?}");
-    drop(program);
-    #[cfg(not(target_os = "espidf"))]
-    assert!(check(&src).ok(), "{wrapper}");
-    assert!(run(&src, &no_defines()).succeeded(), "{wrapper}");
-    // The chain is at the limit: one more wire is too deep. If compose's
-    // level counting drifts, this fails instead of the test silently
-    // running shallower than the limit (and the release CI step with it).
-    let deeper = check(&wrapped_chain(n + 1, wrapper));
-    assert_eq!(
-      deeper.diagnostics.first().map(|d| d.code),
-      Some("too-deep"),
-      "{wrapper}: n = {n} should be the deepest chain that composes"
-    );
-  }
-}
-
 #[test]
 fn constructor_segments_preserve_snapshots_and_change_table_shapes() {
   let report = run(
@@ -2104,10 +2046,12 @@ fn deep_do_chains_are_a_diagnostic_not_a_crash() {
   );
   // The device exercises the same over-limit diagnostic without parsing
   // thousands of unrelated declarations into its constrained heap: a chain
-  // of 40 function declarations is about 800 tokens (the token vector's
-  // next doubling would ask the fragmented heap for 80 KiB at once).
+  // of 26 function declarations (its flow limit is 24) is under 512
+  // tokens, so the token vector never asks the fragmented heap for the
+  // 40 KiB of 1,024 tokens at once (that request failed on the classic
+  // ESP32 once the suite's earlier tests retained a few KB more).
   let excessive: &[usize] = if cfg!(target_os = "espidf") {
-    &[40]
+    &[26]
   } else {
     &[80, 400, 3000]
   };
@@ -2117,7 +2061,8 @@ fn deep_do_chains_are_a_diagnostic_not_a_crash() {
   }
   // Spawn chains compose recursively too.
   let mut src = String::new();
-  let spawn_depth = if cfg!(target_os = "espidf") { 80 } else { 200 };
+  // Under 512 tokens on the device, as above.
+  let spawn_depth = if cfg!(target_os = "espidf") { 40 } else { 200 };
   assert!(spawn_depth > otter_core::compose::MAX_FLOW_DEPTH);
   for i in 0..spawn_depth {
     src.push_str(&format!("@wire(s{i} {{Spawn(s{})}})\n", i + 1));
@@ -2128,6 +2073,59 @@ fn deep_do_chains_are_a_diagnostic_not_a_crash() {
 
 /// A chain of `n` functions, each calling the next inside the given
 /// control-flow wrapper (`{next}` is replaced by the call).
+fn wrapped_chain(n: usize, wrapper: &str) -> String {
+  let mut src = String::new();
+  for i in 0..n {
+    let body = wrapper.replace("{next}", &format!("W{}", i + 1));
+    src.push_str(&format!(
+      "@fn(W{i} input: None output: Any params: {{}} {{{body}}})\n"
+    ));
+  }
+  src.push_str(&format!(
+    "@fn(W{n} input: None output: Any params: {{}} {{1}})\nW0"
+  ));
+  src
+}
+
+#[test]
+fn nesting_up_to_the_limit_runs_through_every_control_shard() {
+  // Each wrapper adds two or three flow levels per wire; the chain goes
+  // as deep as compose allows, and must run (in debug builds too).
+  for (wrapper, levels) in [
+    ("If(All({true} {{next} true}) {1} {2})", 3),
+    ("When({true} {{next}})", 2),
+    ("Repeat({{next}} times: 1)", 2),
+    ("1 | Match([1 {{next}}] default: {{}})", 2),
+    ("Maybe({{next}} {2})", 2),
+    ("Any({false} {{next} false})", 2),
+    // A compose-time evaluation composes and runs its pipeline in the
+    // middle of compose, an engine activation per level.
+    ("#( {next} )", 3),
+  ] {
+    let n = (otter_core::compose::MAX_FLOW_DEPTH - 2) / levels;
+    let src = wrapped_chain(n, wrapper);
+    // This test needs diagnostics, not the full tooling report of every
+    // occurrence and its expanded source path.
+    let program = Program::load(Source::new("t.shs", &src), &catalog(), &no_defines())
+      .unwrap_or_else(|(_, d)| panic!("{d:?}"));
+    let diagnostics = program.compose();
+    assert!(diagnostics.is_empty(), "{wrapper}: {diagnostics:?}");
+    drop(program);
+    #[cfg(not(target_os = "espidf"))]
+    assert!(check(&src).ok(), "{wrapper}");
+    assert!(run(&src, &no_defines()).succeeded(), "{wrapper}");
+    // The chain is at the limit: one more wire is too deep. If compose's
+    // level counting drifts, this fails instead of the test silently
+    // running shallower than the limit (and the release CI step with it).
+    let deeper = check(&wrapped_chain(n + 1, wrapper));
+    assert_eq!(
+      deeper.diagnostics.first().map(|d| d.code),
+      Some("too-deep"),
+      "{wrapper}: n = {n} should be the deepest chain that composes"
+    );
+  }
+}
+
 #[test]
 fn maybe_without_else_passes_its_input_through() {
   // As in 1.x: Action runs for its effects, on success or failure.
