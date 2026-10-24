@@ -64,6 +64,11 @@ GATED = ("ir", "allocs", "bytes")
 HOST = Path("<host target>")
 
 
+# The snippets the gate runs, by name (`common/snippets.rs`).
+SNIPPETS = ("path-static", "path-dynamic", "path-lenient", "repeat-take", "foreach-sum", "foreach-named",
+            "repeat-push", "map-256", "filter-256", "reduce-256", "table-foreach")
+
+
 class Workload:
     """A named run of the driver: `argv(n)` runs `n` iterations; a VM script
     also has its output checked."""
@@ -90,6 +95,10 @@ def workloads(scratch):
     for case in ("assign", "seq", "table", "lookup"):
         name = f"service/{case}" if case == "lookup" else f"object/{case}"
         found.append(Workload(name, 1000, lambda n, c=case: ["object", c, str(n)]))
+    # Script snippets (crates/otter-lang/examples/common/snippets.rs): paths, and
+    # the iteration shards beside the hand-written loops they replace.
+    for case in SNIPPETS:
+        found.append(Workload(f"snippet/{case}", 1000, lambda n, c=case: ["snippet", c, str(n)]))
     return found
 
 

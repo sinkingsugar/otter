@@ -76,72 +76,56 @@
   })
 
   // Flight rows are data[3][0]; order them as asked (stable).
-  data | At(i: 3) | At(i: 0) | SeqOr = rows
-  rows | Count = row-count
-  [] | Var(keys)
-  0 | Var(i)
-  Repeat({
-    rows | Take(i) = row
+  data.3.0? | SeqOr = rows
+  rows | Map(row i {
     sort-mode | Match([
       "cheapest" {row | Price}
-      "duration" {row | At(i: 0) | At(i: 9) | IntOr(default: @no-price)}
+      "duration" {row.0.9? | IntOr(default: @no-price)}
     ] default: {i}) = key
-    [key i] | Push(keys)
-    Inc(i)
-  } times: row-count)
-  keys | Sort = order
+    [key i]
+  }) | Sort = order
 
   0 | Var(shown)
-  0 | Var(k)
-  Repeat({
-    order | Take(k) | ExpectSeq | Take(1) | ExpectInt = index
-    Inc(k)
+  order | ForEach({
+    = [_ index]
     Maybe({
       rows | Take(index) = row
-      row | At(i: 0) = detail
-      detail | At(i: 2) | SeqOr = legs
+      row.0? = detail
+      detail.2? | SeqOr = legs
       legs | Count | Sub(1) | Max(0) = stops
       All({shown | IsLess(12)} {legs | Count | IsMore(0)} {Any({max-stops | Is(-1)} {stops | IsLessEqual(max-stops)})}) | When({Is(true)} {
         row | Price = price
         price | If({Is(@no-price)} {"n/a"} {price | ToString}) = price-text
-        detail | At(i: 9) | IntOr(default: 0) = total
+        detail.9? | IntOr(default: 0) = total
         stops | If({Is(0)} {"nonstop"} {f"{stops} stop(s)"}) = stops-text
         Inc(shown)
         f"\n{shown}. {price-text} {currency} - {total | FmtMins} - {stops-text}\n" | Push(lines)
 
-        0 | Var(l)
-        Repeat({
-          legs | Take(l) = leg
-          Inc(l)
-          leg | At(i: 3) | StringOr(default: "?") = leg-from
-          leg | At(i: 6) | StringOr(default: "?") = leg-to
-          leg | At(i: 22) = airline
-          airline | At(i: 0) | StringOr(default: "") = airline-code
-          airline | At(i: 1) | StringOr(default: "") = flight-number
-          airline | At(i: 3) | StringOr(default: "") = airline-name
-          leg | At(i: 17) | StringOr(default: "") = aircraft
-          leg | At(i: 11) | IntOr(default: 0) = leg-mins
-          leg | At(i: 20) | FmtDateTime(time: (leg | At(i: 8))) = departs
-          leg | At(i: 21) | FmtDateTime(time: (leg | At(i: 10))) = arrives
+        legs | ForEach(leg {
+          leg.3? | StringOr(default: "?") = leg-from
+          leg.6? | StringOr(default: "?") = leg-to
+          leg.22.0? | StringOr(default: "") = airline-code
+          leg.22.1? | StringOr(default: "") = flight-number
+          leg.22.3? | StringOr(default: "") = airline-name
+          leg.17? | StringOr(default: "") = aircraft
+          leg.11? | IntOr(default: 0) = leg-mins
+          leg.20? | FmtDateTime(time: leg.8?) = departs
+          leg.21? | FmtDateTime(time: leg.10?) = arrives
           aircraft | If({Is("")} {""} {f", {aircraft}"}) = aircraft-text
           f"   {airline-code} {flight-number} ({airline-name}): {leg-from} {departs} -> {leg-to} {arrives} [{leg-mins | FmtMins}{aircraft-text}]\n" | Push(lines)
-        } times: (legs | Count))
+        })
 
         // Layovers, detail[13]: [minutes IATA IATA none airport-name city ...].
-        detail | At(i: 13) | SeqOr = layovers
-        0 | Var(m)
-        Repeat({
-          layovers | Take(m) = layover
-          Inc(m)
-          layover | At(i: 0) | IntOr(default: 0) = layover-mins
-          layover | At(i: 1) | StringOr(default: "?") = layover-code
-          layover | At(i: 4) | StringOr(default: "") = layover-name
+        detail.13? | SeqOr | ForEach(layover {
+          layover.0? | IntOr(default: 0) = layover-mins
+          layover.1? | StringOr(default: "?") = layover-code
+          layover.4? | StringOr(default: "") = layover-name
           layover-name | If({Is("")} {""} {f" ({layover-name})"}) = layover-name-text
           f"   layover: {layover-mins | FmtMins} at {layover-code}{layover-name-text}\n" | Push(lines)
-        } times: (layovers | Count))
+        })
       })
     } {Log("google-flights: skipped a malformed flight row")})
-  } times: row-count)
+  })
 
   shown | When({Is(0)} {"\nNo matching flights found for this route and date.\n" | Push(lines)})
   f"\nBook / see more: {url}\n" | Push(lines)

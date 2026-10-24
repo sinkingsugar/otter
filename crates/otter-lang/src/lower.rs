@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use otter_core::describe::{self, Forms, ParamDecl};
 use otter_core::diagnostic::{Diagnostic, PathStep};
-use otter_core::shards::data::{SEQ_MAKE, STRING_FORMAT, TABLE_MAKE, TAKE};
+use otter_core::shards::data::{SEQ_MAKE, SEQ_PATTERN, STRING_FORMAT, TABLE_MAKE, TAKE, TAKE_PATH};
 use otter_core::shards::{BIND, CONST, GET, RUN, SUB};
 use otter_core::{
   Arg, Catalog, FunctionDef, FunctionParam, ParamValue, ShardDef, Type, Var, WireDef,
@@ -522,6 +522,7 @@ fn is_default(params: Option<&Params>) -> bool {
 fn statement_span(stmt: &Statement) -> Span {
   match stmt {
     Statement::Assign { op_span, var, .. } => op_span.to(var.span),
+    Statement::Destructure { op_span, pattern } => op_span.to(pattern.span),
     Statement::Pipeline(p) => p.span,
   }
 }
@@ -530,7 +531,7 @@ fn statement_span(stmt: &Statement) -> Span {
 fn name_of(pipe: &Pipe) -> Option<String> {
   match &pipe.blocks[..] {
     [b] => match &b.kind {
-      BlockKind::Var { name, path } if path.is_empty() => Some(name.node.clone()),
+      BlockKind::Var { name, path, .. } if path.is_empty() => Some(name.node.clone()),
       BlockKind::Literal(Literal::String(s)) => Some(s.clone()),
       _ => None,
     },
@@ -1364,6 +1365,9 @@ impl Lowerer<'_> {
             ShardDef::with_args(&BIND, vec![Arg::pos(ParamValue::Var(var.node.clone()))]),
           );
         }
+        Statement::Destructure { op_span, pattern } => {
+          self.destructure(out, prefix, op_span.to(pattern.span), &pattern.node)
+        }
         Statement::Pipeline(pipe) => {
           for block in &pipe.blocks {
             self.block(out, prefix, block);
@@ -1371,6 +1375,57 @@ impl Lowerer<'_> {
         }
       }
     }
+  }
+
+  /// `= {a b: x}`, `= [a _ c]`: the input bound to a temporary once, then
+  /// one path read and binding per name, then the input again (it passes
+  /// through), as writing it out would cost (docs/iteration-and-access.md
+  /// §3).
+  fn destructure(
+    &mut self,
+    out: &mut Vec<ShardDef>,
+    prefix: &[PathStep],
+    span: Span,
+    pattern: &Pattern,
+  ) {
+    let temp = self.temp();
+    let bind =
+      |name: &str| ShardDef::with_args(&BIND, vec![Arg::pos(ParamValue::Var(name.to_string()))]);
+    let get =
+      |name: &str| ShardDef::with_args(&GET, vec![Arg::pos(ParamValue::Var(name.to_string()))]);
+    let take = |key: Var| ShardDef::with_args(&TAKE, vec![Arg::pos(ParamValue::Value(key))]);
+    self.emit(out, prefix, span, bind(&temp));
+    // A sequence pattern checks the input's kind and length once, whatever
+    // positions it names.
+    if let Pattern::Seq(elements) = pattern {
+      self.emit(out, prefix, span, get(&temp));
+      self.emit(
+        out,
+        prefix,
+        span,
+        ShardDef::with_args(
+          &SEQ_PATTERN,
+          vec![Arg::pos(ParamValue::Value(Var::Int(elements.len() as i64)))],
+        ),
+      );
+    }
+    let reads: Vec<(Var, &Name, Span)> = match pattern {
+      Pattern::Table(fields) => fields
+        .iter()
+        .map(|(key, name)| (Var::string(&key.node), name, key.span.to(name.span)))
+        .collect(),
+      Pattern::Seq(elements) => elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, name)| name.as_ref().map(|n| (Var::Int(i as i64), n, n.span)))
+        .collect(),
+    };
+    for (key, name, at) in reads {
+      self.emit(out, prefix, at, get(&temp));
+      self.emit(out, prefix, at, take(key));
+      self.emit(out, prefix, name.span, bind(&name.node));
+    }
+    self.emit(out, prefix, span, get(&temp));
   }
 
   fn emit(&mut self, out: &mut Vec<ShardDef>, prefix: &[PathStep], span: Span, def: ShardDef) {
@@ -1395,8 +1450,22 @@ impl Lowerer<'_> {
   fn block(&mut self, out: &mut Vec<ShardDef>, prefix: &[PathStep], block: &Block) {
     let span = block.span;
     match &block.kind {
-      BlockKind::Shard { name, params } => self.shard(out, prefix, block, name, params.as_ref()),
-      BlockKind::Var { name, path } if path.is_empty() => {
+      BlockKind::Shard { name, params } => {
+        // A loop's names before its flow are declarations.
+        let named;
+        let params = match params {
+          Some(p) if is_loop_name(&name.node) => {
+            named = self.loop_params(&name.node, p);
+            match &named {
+              Some(p) => Some(p),
+              None => return,
+            }
+          }
+          p => p.as_ref(),
+        };
+        self.shard(out, prefix, block, name, params)
+      }
+      BlockKind::Var { name, path, .. } if path.is_empty() => {
         self.emit(
           out,
           prefix,
@@ -1404,15 +1473,21 @@ impl Lowerer<'_> {
           ShardDef::with_args(&GET, vec![Arg::pos(ParamValue::Var(name.node.clone()))]),
         );
       }
-      BlockKind::Var { name, path } => {
+      BlockKind::Var {
+        name,
+        path,
+        lenient,
+      } => {
         self.emit(
           out,
           prefix,
           name.span,
           ShardDef::with_args(&GET, vec![Arg::pos(ParamValue::Var(name.node.clone()))]),
         );
-        self.take_path(out, prefix, path);
+        self.take_path(out, prefix, path, *lenient);
       }
+      // `.a.b`: the same Takes on the step's input.
+      BlockKind::Path { path, lenient } => self.take_path(out, prefix, path, *lenient),
       // `(a | b)` in a flow runs in place.
       BlockKind::Expr(stmts) => self.statements_into(out, stmts.iter(), prefix),
       BlockKind::Func { name, params: None } => {
@@ -1621,8 +1696,35 @@ impl Lowerer<'_> {
     Some(text)
   }
 
-  /// `.key` / `.0` segments as Take shards.
-  fn take_path(&mut self, out: &mut Vec<ShardDef>, prefix: &[PathStep], path: &[Spanned<PathKey>]) {
+  /// `.key` / `.0` segments as Take shards; a lenient path (`?`) as one
+  /// `TakePath`.
+  fn take_path(
+    &mut self,
+    out: &mut Vec<ShardDef>,
+    prefix: &[PathStep],
+    path: &[Spanned<PathKey>],
+    lenient: bool,
+  ) {
+    if lenient {
+      let keys: Vec<Var> = path
+        .iter()
+        .map(|segment| match &segment.node {
+          PathKey::Key(k) => Var::string(k),
+          PathKey::Index(i) => Var::Int(*i),
+        })
+        .collect();
+      let span = path[0].span.to(path[path.len() - 1].span);
+      self.emit(
+        out,
+        prefix,
+        span,
+        ShardDef::with_args(
+          &TAKE_PATH,
+          vec![Arg::pos(ParamValue::Value(Var::from_seq(Arc::new(keys))))],
+        ),
+      );
+      return;
+    }
     for segment in path {
       let key = match &segment.node {
         PathKey::Key(k) => Var::string(k),
@@ -1693,7 +1795,7 @@ impl Lowerer<'_> {
   ) -> Option<ParamValue> {
     if let [b] = &pipe.blocks[..] {
       match &b.kind {
-        BlockKind::Var { name, path } if path.is_empty() && !snapshot => {
+        BlockKind::Var { name, path, .. } if path.is_empty() && !snapshot => {
           return Some(ParamValue::Var(name.node.clone()));
         }
         // A literal holding a `#( )` is hoisted like a computed value: its
@@ -1889,7 +1991,7 @@ impl Lowerer<'_> {
     let name = match items {
       [n, _] if n.name.is_none() => match &n.value.blocks[..] {
         [b] => match &b.kind {
-          BlockKind::Var { name, path } if path.is_empty() => Some(name.clone()),
+          BlockKind::Var { name, path, .. } if path.is_empty() => Some(name.clone()),
           _ => None,
         },
         _ => None,
@@ -2519,7 +2621,7 @@ impl Lowerer<'_> {
       BlockKind::Flow(stmts) => Some(ParamValue::Flow(self.statements(stmts.iter(), nested))),
       BlockKind::EmptyBraces if flow_accepted => Some(ParamValue::Flow(Vec::new())),
       // A shard's flow argument naming a flow parameter runs its block.
-      BlockKind::Var { name, path }
+      BlockKind::Var { name, path, .. }
         if path.is_empty()
           && flow_accepted
           && !accepts(Forms::VARIABLE)
@@ -2530,7 +2632,7 @@ impl Lowerer<'_> {
         self.emit(&mut flow, nested, b.span, run);
         Some(ParamValue::Flow(flow))
       }
-      BlockKind::Var { name, path } if path.is_empty() => {
+      BlockKind::Var { name, path, .. } if path.is_empty() => {
         if accepts(Forms::WIRE) && !accepts(Forms::VARIABLE) {
           Some(ParamValue::Wire(name.node.clone()))
         } else if accepts(Forms::VARIABLE) || !flow_accepted {
@@ -2603,6 +2705,107 @@ impl Lowerer<'_> {
       cases.push((value, flow));
     }
     Some(ParamValue::Cases(cases))
+  }
+}
+
+/// Whether `name` is an iteration shard's (checked for every shard
+/// lowered: the length first).
+#[inline(always)]
+fn is_loop_name(name: &str) -> bool {
+  matches!(name.len(), 3 | 6 | 7) && loop_names(name).is_some()
+}
+
+/// The names an iteration shard takes before its flow, in order.
+fn loop_names(shard: &str) -> Option<&'static [&'static str]> {
+  match shard {
+    "ForEach" | "Map" | "Filter" => Some(&["value", "index"]),
+    "Reduce" => Some(&["acc", "value", "index"]),
+    _ => None,
+  }
+}
+
+impl Lowerer<'_> {
+  /// An iteration shard's parameters with the names before its flow as
+  /// named declarations: `ForEach(x i {...})` is `ForEach({...} value: x
+  /// index: i)`; `_` skips one (docs/iteration-and-access.md §4.1). The
+  /// flow is the last positional argument, unless given as `action:`.
+  #[inline(never)]
+  fn loop_params(&mut self, shard: &str, params: &Params) -> Option<Params> {
+    let names = loop_names(shard).expect("an iteration shard");
+    let positional: Vec<usize> = (0..params.items.len())
+      .filter(|&i| params.items[i].name.is_none())
+      .collect();
+    let action_named = params
+      .items
+      .iter()
+      .any(|p| p.name.as_ref().is_some_and(|n| n.node == "action"));
+    let given = if action_named {
+      &positional[..]
+    } else {
+      &positional[..positional.len().saturating_sub(1)]
+    };
+    if given.len() > names.len() {
+      let extra = &params.items[given[names.len()]];
+      self.problem(
+        Problem::construct(
+          extra.value.span,
+          "generic",
+          "too-many-names",
+          format!(
+            "{shard} takes at most {} names ({}), before its flow",
+            names.len(),
+            names.join(", ")
+          ),
+        )
+        .shard(shard),
+      );
+      return None;
+    }
+    // The flow (when positional) first, then the names, then what was
+    // named in the source.
+    let mut items: Vec<Param> = params
+      .items
+      .iter()
+      .enumerate()
+      .filter(|(i, p)| p.name.is_none() && !given.contains(i))
+      .map(|(_, p)| p.clone())
+      .collect();
+    let mut ok = true;
+    for (n, &i) in given.iter().enumerate() {
+      let item = &params.items[i];
+      match &item.value.blocks[..] {
+        [b] if matches!(&b.kind, BlockKind::Var { name, path, .. } if path.is_empty() && name.node == "_") =>
+          {}
+        [b] if matches!(&b.kind, BlockKind::Var { path, .. } if path.is_empty()) => {
+          items.push(Param {
+            name: Some(Spanned {
+              node: names[n].to_string(),
+              span: b.span,
+            }),
+            value: item.value.clone(),
+          })
+        }
+        _ => {
+          ok = false;
+          self.problem(
+            Problem::construct(
+              item.value.span,
+              "generic",
+              "expected-variable-name",
+              format!(
+                "{shard}'s arguments before its flow are names to bind (`{shard}(x i {{...}})`), or `_` to skip one"
+              ),
+            )
+            .shard(shard),
+          );
+        }
+      }
+    }
+    items.extend(params.items.iter().filter(|p| p.name.is_some()).cloned());
+    ok.then_some(Params {
+      items,
+      span: params.span,
+    })
   }
 }
 

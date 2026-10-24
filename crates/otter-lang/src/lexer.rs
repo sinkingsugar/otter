@@ -92,6 +92,8 @@ pub struct Lexer<'a> {
   pos: usize,
   end: usize,
   pub problems: Vec<Problem>,
+  /// Where a `?` was, to check once every token is known (`marks`).
+  questions: Vec<usize>,
 }
 
 fn is_ident_continue(b: u8) -> bool {
@@ -107,10 +109,18 @@ impl<'a> Lexer<'a> {
       pos: start,
       end,
       problems: Vec::new(),
+      questions: Vec::new(),
     }
   }
 
-  pub fn tokenize(mut self) -> (Vec<Token>, Vec<Problem>) {
+  pub fn tokenize(self) -> (Vec<Token>, Vec<Problem>) {
+    let (tokens, problems, _) = self.tokenize_marked();
+    (tokens, problems)
+  }
+
+  /// Like [`Lexer::tokenize`], with the indices of the tokens a `?` follows
+  /// (sorted): the last segment of a lenient path (`t.a?`, `.0?`).
+  pub fn tokenize_marked(mut self) -> (Vec<Token>, Vec<Problem>, Vec<usize>) {
     let mut tokens: Vec<Token> = Vec::new();
     loop {
       let spaced = self.skip_trivia();
@@ -124,6 +134,7 @@ impl<'a> Lexer<'a> {
         break;
       }
       let prev = tokens.last();
+
       // A path index right after an adjacent `.` (`s.0.a`): digits only,
       // so `0.a` is not read as a malformed float.
       let path_index =
@@ -157,7 +168,95 @@ impl<'a> Lexer<'a> {
         });
       }
     }
-    (tokens, self.problems)
+    let marks = if self.questions.is_empty() {
+      Vec::new()
+    } else {
+      self.marks(&tokens)
+    };
+    (tokens, self.problems, marks)
+  }
+
+  /// The tokens each `?` marks lenient: one glued to a path segment (a name
+  /// or an index right after a `.`). Any other `?` is an unexpected
+  /// character. Out of the token loop: `?` is rare.
+  #[cold]
+  #[inline(never)]
+  fn marks(&mut self, tokens: &[Token]) -> Vec<usize> {
+    let mut marks = Vec::new();
+    for at in std::mem::take(&mut self.questions) {
+      let i = tokens.partition_point(|t| t.span.end <= at);
+      let segment = i
+        .checked_sub(1)
+        .filter(|&s| s >= 1)
+        .filter(|&s| tokens[s].span.end == at)
+        .filter(|&s| matches!(tokens[s].tok, Tok::Ident(_) | Tok::Int(_)))
+        .filter(|&s| tokens[s - 1].tok == Tok::Dot && !tokens[s].spaced);
+      // A segment glued after `?` (`.a?.b`): the `?` is inside the path.
+      let glued = |i: usize| tokens.get(i).is_some_and(|t| !t.spaced);
+      let segment_at = |i: usize| {
+        glued(i)
+          && matches!(
+            tokens.get(i).map(|t| &t.tok),
+            Some(Tok::Ident(_) | Tok::Int(_))
+          )
+      };
+      match segment {
+        Some(s)
+          if glued(s + 1)
+            && tokens[s + 1].tok == Tok::Dot
+            && tokens[s + 1].span.start == at + 1
+            && segment_at(s + 2) =>
+        {
+          // The whole path: back over `.segment` pairs (and the name a
+          // variable path starts with), forward to its last segment.
+          let mut first = s - 1;
+          while first >= 2
+            && glued(first)
+            && segment_at(first - 1)
+            && tokens[first - 2].tok == Tok::Dot
+          {
+            first -= 2;
+          }
+          if first >= 1 && glued(first) && matches!(tokens[first - 1].tok, Tok::Ident(_)) {
+            first -= 1;
+          }
+          let mut last = s + 2;
+          while glued(last + 1) && tokens[last + 1].tok == Tok::Dot && segment_at(last + 2) {
+            last += 2;
+          }
+          let mut end = tokens[last].span.end;
+          if self.text.as_bytes().get(end) == Some(&b'?') {
+            end += 1;
+          }
+          let span = Span::new(tokens[first].span.start, end);
+          let fix: String = self.text[span.start..span.end]
+            .chars()
+            .filter(|c| *c != '?')
+            .chain(['?'])
+            .collect();
+          self.problems.push(
+            Problem::syntax(
+              span,
+              "lenient-path",
+              format!("`?` makes the whole path lenient, so it goes at its end: write `{fix}`"),
+            )
+            .fix(fix),
+          );
+        }
+        Some(s) => marks.push(s),
+        None => self.problems.push(
+          Problem::syntax(
+            Span::new(at, at + 1),
+            "unexpected-character",
+            "unexpected character `?`".into(),
+          )
+          .help(
+            "`?` right after a path makes it lenient: `t.a.0?` is none when a step cannot apply",
+          ),
+        ),
+      }
+    }
+    marks
   }
 
   fn peek(&self, ahead: usize) -> Option<u8> {
@@ -266,22 +365,9 @@ impl<'a> Lexer<'a> {
         ));
         None
       }
-      b'.' if next.is_some_and(|n| n.is_ascii_digit()) => {
-        self.pos += 1;
-        while self.peek(0).is_some_and(|c| c.is_ascii_digit()) {
-          self.pos += 1;
-        }
-        let digits = self.text[start + 1..self.pos].to_string();
-        self.problems.push(
-          Problem::syntax(
-            Span::new(start, self.pos),
-            "number-form",
-            format!("a number cannot start with `.`: write 0.{digits}"),
-          )
-          .fix(format!("0.{digits}")),
-        );
-        None
-      }
+      // `.5` is a path step reading index 5 of the pipeline value; where a
+      // value is expected the parser reports it as a misspelled `0.5`
+      // (`Parser::element`).
       b'.' => single(self, Tok::Dot),
       b'"' => self.string(start),
       b'f' if next == Some(b'"') => self.fstring(start),
@@ -313,7 +399,7 @@ impl<'a> Lexer<'a> {
             ),
           )
           .help(
-            "in 2.0 the element is the block's input: bind it with `= item` if you need a name",
+            "name the element instead: `items | ForEach(x {...})` (value first, then the index: `ForEach(x i {...})`); the body's input is the element",
           ),
         );
         Some(tok)
@@ -322,8 +408,20 @@ impl<'a> Lexer<'a> {
         self.pos += 1;
         Some(self.ident(start))
       }
+      b'?' => {
+        // Checked once every token is known (`marks`).
+        self.pos += 1;
+        self.questions.push(start);
+        None
+      }
       b'A'..=b'Z' => Some(self.upper(start)),
       b'_' if next.is_some_and(|n| n.is_ascii_uppercase()) => Some(self.upper(start)),
+      // `_` alone: the name that skips one, in a `[...]` pattern or among
+      // a loop's names; compose refuses to declare or read it elsewhere.
+      b'_' if !next.is_some_and(is_ident_continue) => {
+        self.pos += 1;
+        Some(Tok::Ident("_".into()))
+      }
       _ => {
         let c = self.text[start..].chars().next().unwrap_or('?');
         self.pos += c.len_utf8();
@@ -756,7 +854,9 @@ mod tests {
     assert_eq!(p.code, "semicolon");
     assert_eq!(p.span, Span::new(12, 13));
     assert_eq!(first_problem("1. | Log").fix.as_deref(), Some("1.0"));
-    assert_eq!(first_problem(".5").fix.as_deref(), Some("0.5"));
+    // `.5` lexes as a path step; the parser reports it where a value is
+    // expected (`lang.rs`).
+    assert_eq!(toks(".5"), [Tok::Dot, Tok::Int(5), Tok::Eof]);
     assert_eq!(first_problem("~5").code, "number-form");
     assert_eq!(first_problem("2x").code, "number-form");
     assert_eq!(first_problem("\"a\\qb\"").code, "string-escape");

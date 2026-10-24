@@ -14,6 +14,7 @@ use crate::compose_time::Meter;
 use crate::error::{Error, Result};
 use crate::shards::Operand;
 use crate::shards::data;
+use crate::shards::iterate::{self, LoopKind};
 use crate::shards::leaf::{self, LeafShard};
 use crate::shards::math::{self, BinOp};
 use crate::shards::values;
@@ -94,6 +95,23 @@ pub(crate) enum Op {
   /// caller's next mutation of a collection it shared is not a copy. A
   /// value the accumulator still reads moves into it.
   Clear(Binding),
+  /// A lenient path (`t.a.0?`, `data::TakePath`): each key in turn, none
+  /// as soon as one cannot apply. The keys as a sequence value: an `Arc`
+  /// of its own would give `Op`'s drop another case.
+  TakePath(Var),
+  /// The iteration shards' loops (`shards::iterate`, lowered by
+  /// `ComposeCtx::flatten`): the length of the collection, checked to be
+  /// one, when the loop starts.
+  IterLen(LoopKind),
+  /// Element (a table's value) at the index in the slot, of the collection.
+  Element(Binding, LoopKind),
+  /// The index name's value at the index in the slot: the index for a
+  /// sequence, the key for a table.
+  EntryKey(Binding),
+  /// What a `Map` (`false`) or `Filter` (`true`) over a table or a
+  /// dynamic input outputs, from the collection in the slot and what the
+  /// loop collected (`iterate::rebuild`).
+  Rebuild(Binding, bool),
 }
 
 /// The tag of the last hot-tier operation: `run` sends every tag past it to
@@ -396,6 +414,11 @@ impl Op {
       Op::JumpIf(_) => "jump-if",
       Op::LoopTest(..) => "loop-test",
       Op::Clear(_) => "clear",
+      Op::TakePath(_) => "take-path",
+      Op::IterLen(_) => "iter-len",
+      Op::Element(..) => "element",
+      Op::EntryKey(_) => "entry-key",
+      Op::Rebuild(..) => "rebuild",
     }
   }
 }
@@ -517,7 +540,10 @@ impl Instruction {
       | Op::AddFloatBound(b)
       | Op::AddFloat4Bound(b)
       | Op::LoopTest(b, _)
-      | Op::Clear(b) => binding(b, f),
+      | Op::Clear(b)
+      | Op::Element(b, _)
+      | Op::EntryKey(b)
+      | Op::Rebuild(b, _) => binding(b, f),
       Op::Take(o) | Op::Arith(_, o) | Op::Compare(_, o) | Op::Equal(_, o) => operand(o, f),
       Op::SeqMake(ops) | Op::TableMake(_, ops) => {
         for o in ops {
@@ -536,6 +562,8 @@ impl Instruction {
       | Op::Pass
       | Op::Count
       | Op::VmCall
+      | Op::TakePath(_)
+      | Op::IterLen(_)
       | Op::Jump(_)
       | Op::JumpIfNot(_)
       | Op::JumpIf(_) => {}
@@ -608,7 +636,11 @@ pub(crate) fn lower_scratch_releases(code: &mut [Instruction]) {
       | Op::VmCall
       | Op::AddFloat4Const(_)
       | Op::AddFloat4Bound(_)
-      | Op::Clear(_) => may_own = true,
+      | Op::Clear(_)
+      | Op::TakePath(_)
+      | Op::Element(..)
+      | Op::EntryKey(_)
+      | Op::Rebuild(..) => may_own = true,
       Op::Const(_)
       | Op::GetLocal(_)
       | Op::GetMesh(_)
@@ -623,6 +655,7 @@ pub(crate) fn lower_scratch_releases(code: &mut [Instruction]) {
       | Op::Compare(..)
       | Op::Equal(..)
       | Op::Count
+      | Op::IterLen(_)
       | Op::Pass
       | Op::Jump(_)
       | Op::JumpIfNot(_)
@@ -660,6 +693,14 @@ pub(crate) fn leaf<L: LeafShard>(c: &L::Compiled, output: Type) -> Option<Inline
       data::TakeCode::Key(key) => Op::Take(key.clone()),
       data::TakeCode::Slot(index) => Op::TakeSlot(*index),
     }
+  } else if id == TypeId::of::<data::SeqPattern>() {
+    // On a sequence type, the length check is a read of the last position.
+    match c.downcast_ref::<data::SeqPatternCode>()? {
+      data::SeqPatternCode::Static(n) => Op::Take(Operand::Const(Var::Int(*n as i64 - 1))),
+      data::SeqPatternCode::Dynamic(_) => return None,
+    }
+  } else if id == TypeId::of::<data::TakePath>() {
+    Op::TakePath(c.downcast_ref::<Var>()?.clone())
   } else if id == TypeId::of::<data::SeqMake>() {
     Op::SeqMake(c.downcast_ref::<Vec<Operand>>()?.clone())
   } else if id == TypeId::of::<data::TableMake>() {
@@ -1123,7 +1164,16 @@ pub(crate) fn run<C: VmCalls>(
             }
             value = numeric;
           }
-          Op::Push(_) | Op::Equal(..) | Op::Count | Op::VmCall | Op::Clear(_) => break 'slow,
+          Op::Push(_)
+          | Op::Equal(..)
+          | Op::Count
+          | Op::VmCall
+          | Op::Clear(_)
+          | Op::TakePath(_)
+          | Op::IterLen(_)
+          | Op::Element(..)
+          | Op::EntryKey(_)
+          | Op::Rebuild(..) => break 'slow,
         }
         #[cfg(any(debug_assertions, feature = "output-checks"))]
         leaf::check_output(instruction.check.0, instruction.check.1, &*value)?;
@@ -1414,6 +1464,24 @@ unsafe fn slow_op<C: VmCalls>(
         number!(Var::Bool(values::values_equal(&*value, rhs) != *negate));
       }
       Op::Count => number!(Var::Int(tri!(count(&*value, calls.meter())))),
+      Op::IterLen(kind) => number!(Var::Int(tri!(iterate::iter_len(&*value, *kind)))),
+      Op::Element(b, kind) => own!(tri!(iterate::element(&*value, &*frames.slot(*b), *kind))),
+      Op::EntryKey(b) => own!(tri!(iterate::entry_key(&*value, &*frames.slot(*b)))),
+      Op::Rebuild(b, filter) => {
+        if C::METERED
+          && let Var::Seq(items) = &*value
+        {
+          // A table's output holds an entry (key and value) per item; a
+          // sequence's, a value.
+          let each = match &*frames.slot(*b) {
+            Var::Table(_) => size_of::<(std::sync::Arc<str>, Var)>(),
+            _ => size_of::<Var>(),
+          };
+          tri!(calls.meter().expect("metered").allocate(items.len() * each));
+        }
+        own!(tri!(iterate::rebuild(&*frames.slot(*b), &*value, *filter)))
+      }
+      Op::TakePath(keys) => own!(data::take_lenient(&*value, keys.as_seq().unwrap_or(&[]))),
       Op::Clear(b) => {
         if let Some(moved) = clear_slot(frames.slot(*b), value) {
           own!(moved);
