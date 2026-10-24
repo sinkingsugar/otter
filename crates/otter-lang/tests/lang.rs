@@ -1855,6 +1855,72 @@ j | ForEach(row i { row = {n} Inc(rows) })
   }
 }
 
+/// Review 2026-10-24-11f8b5c-gemini-4-argon-review-thread-a4f19c#F1: an
+/// empty fixed table's element is Any, not Never (which made the body's
+/// input None and a Reduce look like a Stop).
+#[test]
+fn iterating_an_empty_fixed_table_types_the_element_any() {
+  let report = run(
+    "{} | Map(v { v | ExpectInt | Add(1) }) = a
+{} | Filter({ IsNone }) | Map(v { v | ExpectInt }) = c
+[a c]",
+    &no_defines(),
+  );
+  let empty = Var::table(Vec::<(&str, Var)>::new());
+  assert_eq!(
+    completed(&report, "root"),
+    Var::from_seq(std::sync::Arc::new(vec![empty.clone(), empty]))
+  );
+  // Reduce without init on `{}`: an Any accumulator, not a diverged flow.
+  let d = &check("{} | Reduce(acc v { v }) | Add(1)").diagnostics[0];
+  assert!(d.message.contains("got Any"), "{}", d.message);
+}
+
+/// Review 2026-10-24-11f8b5c-astra-cw75#F2: a sequence pattern checks the
+/// input's kind and its length once, whatever positions `_` skips.
+#[test]
+fn sequence_patterns_check_kind_and_length() {
+  for text in [
+    "[1] = [a _]",
+    "[1] = [a _ _]",
+    "\"[1]\" | FromJson = [a _]",
+    "\"{}\" | FromJson = [a]",
+  ] {
+    let report = run(
+      &format!("@wire(w {{ {text} }})\n@mesh(m) @schedule(m w) @run(m)"),
+      &no_defines(),
+    );
+    match report.outcomes.iter().find(|(w, _)| w == "w") {
+      Some((_, Some(Outcome::Failed(_)))) => {}
+      other => panic!("{text}: {other:?}"),
+    }
+  }
+  // A vector is not a sequence.
+  let d = &check("[1.0 2.0] | ToFloat2 = [a b]").diagnostics;
+  assert_eq!(d[0].code, "input-type-mismatch", "{d:?}");
+  // A longer sequence still binds the first positions.
+  assert_eq!(
+    completed(&run("[1 2 3] = [a _]\na", &no_defines()), "root"),
+    Var::Int(1)
+  );
+}
+
+/// Review 2026-10-24-11f8b5c-stitch-gamer-q7m2#F1: `?` inside a path is an
+/// error, with the fix moving it to the end.
+#[test]
+fn an_interior_question_mark_is_located_with_a_fix() {
+  for (text, fix, col) in [
+    ("{a: 1} | .a?.b", "`.a.b?`", 10),
+    ("{a: 1} = j\nj.a?.b", "`j.a.b?`", 1),
+    ("{a: 1} | .a?.b?", "`.a.b?`", 10),
+  ] {
+    let d = load_errors(text);
+    assert_eq!(d[0].code, "lenient-path", "{text}: {d:?}");
+    assert!(d[0].message.contains(fix), "{text}: {}", d[0].message);
+    assert_eq!(d[0].column, Some(col), "{text}");
+  }
+}
+
 /// A body may suspend; the loop resumes at the same element.
 #[test]
 fn iteration_bodies_suspend_and_resume() {

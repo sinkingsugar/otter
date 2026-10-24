@@ -210,8 +210,7 @@ fn loop_error(
 
 /// The element and index types of an iterable input, and how it is read.
 fn iterable(input: Type) -> Option<(Source, Type, Type)> {
-  let table_element =
-    |t: &crate::types::TableType| Type::union(t.keys.iter().map(|(_, ty)| *ty).chain(t.rest));
+  let table_element = |t: &crate::types::TableType| table_values(t);
   match input.desc() {
     TypeDesc::Seq(element) => Some((Source::Seq, *element, Type::int())),
     TypeDesc::Table(t) => Some((Source::Table, table_element(t), Type::string())),
@@ -390,15 +389,25 @@ pub(crate) fn compose_loop(
   })
 }
 
+/// The type of a table's values: its known fields' and its rest's. An
+/// empty fixed table (`{}`) has none, and its element is `Any`, as `[]`'s
+/// is: `Never` would make a loop body's input `None` and a `Reduce` look
+/// like a `Stop`.
+fn table_values(t: &crate::types::TableType) -> Type {
+  let values = Type::union(t.keys.iter().map(|(_, ty)| *ty).chain(t.rest));
+  if values == Type::never() {
+    Type::any()
+  } else {
+    values
+  }
+}
+
 /// What `Filter` outputs on `input`: a sequence keeps its type; a table
-/// becomes an open table of its values' type (a fixed table may lose
-/// keys).
+/// becomes an open table of its values' type, with no required key (any
+/// entry may be filtered out, a known field of an open table too).
 fn filtered(input: Type) -> Type {
   let one = |ty: Type| match ty.desc() {
-    TypeDesc::Table(t) if t.rest.is_none() => Type::table(
-      Vec::<(Arc<str>, Type)>::new(),
-      Some(Type::union(t.keys.iter().map(|(_, ty)| *ty))),
-    ),
+    TypeDesc::Table(t) => Type::table(Vec::<(Arc<str>, Type)>::new(), Some(table_values(t))),
     _ => ty,
   };
   match input.desc() {

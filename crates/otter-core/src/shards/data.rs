@@ -18,6 +18,8 @@ pub static TAKE: ShardType = leaf_type::<Take>();
 /// The lenient path `t.a.0?`: internal (the frontend lowers to it), not in
 /// the catalog.
 pub static TAKE_PATH: ShardType = leaf_type::<TakePath>();
+/// A sequence pattern's check (`= [a _ c]`): internal, not in the catalog.
+pub static SEQ_PATTERN: ShardType = leaf_type::<SeqPattern>();
 pub static PUSH: ShardType = leaf_type::<Push>();
 pub static SEQ_MAKE: ShardType = leaf_type::<SeqMake>();
 pub static TABLE_MAKE: ShardType = leaf_type::<TableMake>();
@@ -461,6 +463,116 @@ pub(crate) fn take_lenient(input: &Var, keys: &[Var]) -> Var {
     };
   }
   value.clone()
+}
+
+// --- SeqPattern (the check of `= [a _ c]`) ---
+
+pub static SEQ_PATTERN_PARAMS: &[ParamDecl] = &[decl(
+  "length",
+  crate::shard_doc!("How many positions the pattern has, `_` included."),
+  Forms::LITERAL,
+  &[TypeName::Int],
+  Requirement::Required,
+)];
+
+/// Internal: the frontend checks a sequence pattern's input with it, once,
+/// before reading the positions it names (docs/iteration-and-access.md §3).
+pub const SEQ_PATTERN_DESC: ShardDesc = ShardDesc {
+  name: "SeqPattern",
+  version: 1,
+  summary: crate::shard_doc!("Checks that the input is a sequence of at least `length` elements."),
+  help: crate::shard_doc!(
+    "A sequence type composes to a read of the last position (the length check); Any, or a union holding a sequence, is checked at activation; anything else is a compose error. Its output is not used: the frontend reads the pattern's input again."
+  ),
+  params: Params::Declared(SEQ_PATTERN_PARAMS),
+  input: InputDesc::Any,
+  output: OutputDesc::Dynamic(crate::shard_doc!("the last position's type, or Any")),
+  targets: Targets::All,
+  aliases: &[],
+  effects: crate::signature::Effects::NONE,
+  lifetime: crate::signature::Lifetime::Stateless,
+};
+
+pub struct SeqPattern;
+
+/// A sequence pattern's check: on a sequence type, a read of the last
+/// position (the VM's `Take`); otherwise checked at activation.
+#[derive(Clone, Copy, Debug)]
+pub enum SeqPatternCode {
+  Static(usize),
+  Dynamic(usize),
+}
+
+impl LeafShard for SeqPattern {
+  type Compiled = SeqPatternCode;
+  type State = ();
+  const DESC: ShardDesc = SEQ_PATTERN_DESC;
+
+  fn compose(args: &Args, ctx: &mut ComposeCtx<'_>) -> Result<Composed<SeqPatternCode>> {
+    let length = match args.literal("length") {
+      Some(Var::Int(n)) if *n >= 1 => *n as usize,
+      _ => {
+        return Err(param_error(
+          args,
+          "SeqPattern",
+          "length",
+          "compose-error",
+          "invalid-length",
+          "Length must be a positive Int".into(),
+        ));
+      }
+    };
+    let input = ctx.input();
+    let (compiled, output) = match input.desc() {
+      TypeDesc::Seq(element) => (SeqPatternCode::Static(length), *element),
+      TypeDesc::Any => (SeqPatternCode::Dynamic(length), Type::any()),
+      TypeDesc::Union(members) if members.iter().any(|m| matches!(m.desc(), TypeDesc::Seq(_))) => {
+        (SeqPatternCode::Dynamic(length), Type::any())
+      }
+      _ => {
+        return Err(Error::Diagnostic(Box::new(
+          Diagnostic::new(
+            Phase::Compose,
+            "input-type-mismatch",
+            "input-type-mismatch",
+            format!("a sequence pattern (`= [a b]`) needs a sequence, got {input}"),
+          )
+          .shard("SeqPattern")
+          .types(
+            Some(TypeRef::of(input)),
+            vec![TypeRef::named(TypeName::Seq)],
+          ),
+        )));
+      }
+    };
+    Ok(Composed { compiled, output })
+  }
+
+  fn instantiate(_: &SeqPatternCode, _: &mut InstanceCtx) -> Result<()> {
+    Ok(())
+  }
+
+  fn activate(
+    code: &SeqPatternCode,
+    _: &mut (),
+    _: &mut impl LeafCtx,
+    input: &Var,
+  ) -> Result<Flow> {
+    let length = match code {
+      SeqPatternCode::Static(n) | SeqPatternCode::Dynamic(n) => *n,
+    };
+    match input {
+      Var::Seq(items) if items.len() >= length => Ok(Flow::Next(items[length - 1].clone())),
+      Var::Seq(items) => Err(Error::Activation(format!(
+        "a sequence pattern of {length} positions needs {length} elements, got {}",
+        items.len()
+      ))),
+      other => Err(Error::Activation(format!(
+        "a sequence pattern needs a sequence, got {}",
+        kind_name(other)
+      ))),
+    }
+  }
 }
 
 // --- Push ---

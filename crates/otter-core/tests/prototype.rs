@@ -2482,3 +2482,73 @@ fn iteration_shards_suspend_nest_and_release() {
     Outcome::Completed(Var::Int(16))
   );
 }
+
+/// Review 2026-10-24-11f8b5c-astra-cw75#F1: Filter on a table type with
+/// required keys and a rest type keeps none of them required: a filtered
+/// key may be missing.
+#[test]
+fn filter_on_a_mixed_open_table_erases_required_keys() {
+  use otter_core::shards::FILTER;
+  let mixed = Type::table([("a", Type::int())], Some(Type::string()));
+  let mut mesh = Mesh::new();
+  mesh.add_wire(wire(
+    "w",
+    false,
+    vec![
+      iterate(&FILTER, vec![konst(Var::Bool(false))], &[]),
+      take(val(Var::string("a"))),
+    ],
+  ));
+  let compiled = mesh.compile("w", mixed).expect("compiles");
+  assert!(
+    compiled.flow.output.accepts(Type::none()),
+    "a filtered key's type includes None, got {}",
+    compiled.flow.output
+  );
+  let id = mesh
+    .spawn(
+      &compiled,
+      Var::table([("a", Var::Int(1)), ("b", Var::string("text"))]),
+    )
+    .unwrap();
+  mesh.run(10);
+  assert_eq!(mesh.outcome(id), Some(&Outcome::Completed(Var::None)));
+}
+
+/// Review 2026-10-24-11f8b5c-gemini-4-argon-review-thread-a4f19c#F2: a
+/// Map over a table in a compose-time evaluation is charged a table entry
+/// per output entry, not a sequence element.
+#[test]
+fn rebuild_charges_table_entries_at_compose_time() {
+  use otter_core::ShardDef;
+  use otter_core::shards::{MAP, values};
+  let n = 16;
+  let table = Var::table((0..n).map(|i| (format!("k{i:02}"), Var::Int(i))));
+  let entry = std::mem::size_of::<(std::sync::Arc<str>, Var)>();
+  let run = |value_bytes: usize| {
+    let mut mesh = Mesh::new();
+    mesh.set_eval_limits(otter_core::EvalLimits {
+      value_bytes,
+      ..Default::default()
+    });
+    mesh.add_wire(wire(
+      "w",
+      false,
+      vec![
+        konst(Var::Int(0)),
+        ShardDef::new(
+          &otter_core::shards::CONST,
+          vec![ParamValue::Eval(vec![
+            konst(table.clone()),
+            iterate(&MAP, vec![add(val(Var::Int(1)))], &[]),
+            ShardDef::new(&values::COUNT, vec![]),
+          ])],
+        ),
+      ],
+    ));
+    mesh.compile("w", Type::none()).map(|_| ())
+  };
+  assert!(run(n as usize * entry).is_ok(), "enough for the entries");
+  let err = run(n as usize * entry - 1).expect_err("the entries exceed the limit");
+  assert!(err.to_string().contains("value limit"), "{err}");
+}

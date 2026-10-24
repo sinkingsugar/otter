@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use otter_core::describe::{self, Forms, ParamDecl};
 use otter_core::diagnostic::{Diagnostic, PathStep};
-use otter_core::shards::data::{SEQ_MAKE, STRING_FORMAT, TABLE_MAKE, TAKE, TAKE_PATH};
+use otter_core::shards::data::{SEQ_MAKE, SEQ_PATTERN, STRING_FORMAT, TABLE_MAKE, TAKE, TAKE_PATH};
 use otter_core::shards::{BIND, CONST, GET, RUN, SUB};
 use otter_core::{
   Arg, Catalog, FunctionDef, FunctionParam, ParamValue, ShardDef, Type, Var, WireDef,
@@ -1395,6 +1395,20 @@ impl Lowerer<'_> {
       |name: &str| ShardDef::with_args(&GET, vec![Arg::pos(ParamValue::Var(name.to_string()))]);
     let take = |key: Var| ShardDef::with_args(&TAKE, vec![Arg::pos(ParamValue::Value(key))]);
     self.emit(out, prefix, span, bind(&temp));
+    // A sequence pattern checks the input's kind and length once, whatever
+    // positions it names.
+    if let Pattern::Seq(elements) = pattern {
+      self.emit(out, prefix, span, get(&temp));
+      self.emit(
+        out,
+        prefix,
+        span,
+        ShardDef::with_args(
+          &SEQ_PATTERN,
+          vec![Arg::pos(ParamValue::Value(Var::Int(elements.len() as i64)))],
+        ),
+      );
+    }
     let reads: Vec<(Var, &Name, Span)> = match pattern {
       Pattern::Table(fields) => fields
         .iter()

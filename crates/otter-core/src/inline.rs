@@ -693,6 +693,12 @@ pub(crate) fn leaf<L: LeafShard>(c: &L::Compiled, output: Type) -> Option<Inline
       data::TakeCode::Key(key) => Op::Take(key.clone()),
       data::TakeCode::Slot(index) => Op::TakeSlot(*index),
     }
+  } else if id == TypeId::of::<data::SeqPattern>() {
+    // On a sequence type, the length check is a read of the last position.
+    match c.downcast_ref::<data::SeqPatternCode>()? {
+      data::SeqPatternCode::Static(n) => Op::Take(Operand::Const(Var::Int(*n as i64 - 1))),
+      data::SeqPatternCode::Dynamic(_) => return None,
+    }
   } else if id == TypeId::of::<data::TakePath>() {
     Op::TakePath(c.downcast_ref::<Var>()?.clone())
   } else if id == TypeId::of::<data::SeqMake>() {
@@ -1465,12 +1471,13 @@ unsafe fn slow_op<C: VmCalls>(
         if C::METERED
           && let Var::Seq(items) = &*value
         {
-          tri!(
-            calls
-              .meter()
-              .expect("metered")
-              .allocate(items.len() * size_of::<Var>())
-          );
+          // A table's output holds an entry (key and value) per item; a
+          // sequence's, a value.
+          let each = match &*frames.slot(*b) {
+            Var::Table(_) => size_of::<(std::sync::Arc<str>, Var)>(),
+            _ => size_of::<Var>(),
+          };
+          tri!(calls.meter().expect("metered").allocate(items.len() * each));
         }
         own!(tri!(iterate::rebuild(&*frames.slot(*b), &*value, *filter)))
       }

@@ -191,7 +191,58 @@ impl<'a> Lexer<'a> {
         .filter(|&s| tokens[s].span.end == at)
         .filter(|&s| matches!(tokens[s].tok, Tok::Ident(_) | Tok::Int(_)))
         .filter(|&s| tokens[s - 1].tok == Tok::Dot && !tokens[s].spaced);
+      // A segment glued after `?` (`.a?.b`): the `?` is inside the path.
+      let glued = |i: usize| tokens.get(i).is_some_and(|t| !t.spaced);
+      let segment_at = |i: usize| {
+        glued(i)
+          && matches!(
+            tokens.get(i).map(|t| &t.tok),
+            Some(Tok::Ident(_) | Tok::Int(_))
+          )
+      };
       match segment {
+        Some(s)
+          if glued(s + 1)
+            && tokens[s + 1].tok == Tok::Dot
+            && tokens[s + 1].span.start == at + 1
+            && segment_at(s + 2) =>
+        {
+          // The whole path: back over `.segment` pairs (and the name a
+          // variable path starts with), forward to its last segment.
+          let mut first = s - 1;
+          while first >= 2
+            && glued(first)
+            && segment_at(first - 1)
+            && tokens[first - 2].tok == Tok::Dot
+          {
+            first -= 2;
+          }
+          if first >= 1 && glued(first) && matches!(tokens[first - 1].tok, Tok::Ident(_)) {
+            first -= 1;
+          }
+          let mut last = s + 2;
+          while glued(last + 1) && tokens[last + 1].tok == Tok::Dot && segment_at(last + 2) {
+            last += 2;
+          }
+          let mut end = tokens[last].span.end;
+          if self.text.as_bytes().get(end) == Some(&b'?') {
+            end += 1;
+          }
+          let span = Span::new(tokens[first].span.start, end);
+          let fix: String = self.text[span.start..span.end]
+            .chars()
+            .filter(|c| *c != '?')
+            .chain(['?'])
+            .collect();
+          self.problems.push(
+            Problem::syntax(
+              span,
+              "lenient-path",
+              format!("`?` makes the whole path lenient, so it goes at its end: write `{fix}`"),
+            )
+            .fix(fix),
+          );
+        }
         Some(s) => marks.push(s),
         None => self.problems.push(
           Problem::syntax(

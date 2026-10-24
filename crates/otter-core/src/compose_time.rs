@@ -531,6 +531,7 @@ static SAFE: &[(&ShardType, u32)] = {
     (&values::TO_FLOAT4, 1),
     (&data::TAKE, 1),
     (&data::TAKE_PATH, 1),
+    (&data::SEQ_PATTERN, 1),
     (&checks::IS_TRUE, 1),
     (&checks::IS_FALSE, 1),
     (&checks::PASS, 1),
