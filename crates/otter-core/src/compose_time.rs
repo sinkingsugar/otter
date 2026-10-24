@@ -608,6 +608,8 @@ static SAFE: &[(&ShardType, u32)] = {
     (&seqs::DROP_FRONT, 1),
     (&seqs::REVERSE, 1),
     (&seqs::INDEX_OF, 1),
+    (&seqs::FIRST, 1),
+    (&seqs::LAST, 1),
   ]
 };
 

@@ -218,6 +218,8 @@ pub static CATALOG: &[&ShardType] = &[
   &seqs::DROP_FRONT,
   &seqs::REVERSE,
   &seqs::INDEX_OF,
+  &seqs::FIRST,
+  &seqs::LAST,
   &seqs::REMOVE,
   &date::DATE_PARSE,
   &date::DATE_FORMAT,

@@ -5622,6 +5622,47 @@ fn expect_with_a_default_gives_it_for_another_type() {
 }
 
 #[test]
+fn first_and_last_read_the_ends_of_a_sequence() {
+  let v = root_value(
+    r#"
+[1 2 3] = xs
+[] | ExpectIntSeq = empty
+"[1, \"a\"]" | FromJson = j
+5 | ToAny = five
+0 = zero
+[
+  (xs | First | Add(10)) (xs | Last)
+  (empty | First(default: 0) | Add(1)) (empty | Last(default: zero))
+  (j | First) (j | Last(default: 9))
+  (five | First(default: "not a sequence"))
+  (xs | Last(default: "unused"))
+  #( [4 5] | Last )
+]
+"#,
+  );
+  assert_eq!(v.to_string(), r#"[11 3 1 0 1 "a" "not a sequence" 3 5]"#);
+  assert_eq!(
+    root_failure("[] | ExpectIntSeq | First"),
+    "activation error: First: the sequence is empty"
+  );
+  assert_eq!(
+    root_failure("5 | ToAny | Last"),
+    "activation error: Last: needs a sequence, got Int"
+  );
+  // A default of another type joins the element type.
+  let d = load_or_compose_errors(r#"[1] | First(default: "x") | Add(1)"#);
+  assert_eq!(d[0].code, "input-type-mismatch", "{}", d[0].message);
+  for script in ["1 | First", r#""ab" | Last(default: "")"#] {
+    let d = load_or_compose_errors(script);
+    assert_eq!(
+      d[0].code, "input-type-mismatch",
+      "{script}: {}",
+      d[0].message
+    );
+  }
+}
+
+#[test]
 fn checks_assertions_and_type_changes() {
   let v = root_value(
     r#"
