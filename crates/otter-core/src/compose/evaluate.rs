@@ -201,6 +201,45 @@ impl ComposeCtx<'_> {
   }
 }
 
+impl ComposeCache {
+  /// The value of `flow` evaluated at compose time on its own, outside the
+  /// compose of any code: what a frontend decides while it loads, before
+  /// any body composes (the condition of `@if`, docs/metaprogramming.md
+  /// §2.6). The same eligibility checks, budgets (`env.eval`) and cache as
+  /// a `#( )` inside code; what the evaluation read is not recorded
+  /// anywhere. Errors carry the path inside the pipeline.
+  pub fn evaluate(&mut self, env: &ComposeEnv<'_>, flow: &[ShardDef]) -> Result<Var> {
+    let mut composing = Vec::new();
+    let mut ctx = Box::new(ComposeCtx {
+      analysis: Analysis::default(),
+      input: Type::none(),
+      locals: FrameLayout::default(),
+      env,
+      cache: self,
+      composing: &mut composing,
+      deps: Vec::new(),
+      restart_deps: Vec::new(),
+      functions: HashMap::default(),
+      diagnostic_path: Vec::new(),
+      local_paths: Vec::new(),
+      current_args: None,
+      flow_index: None,
+      scopes: super::Scopes::default(),
+      initialized: super::Initialized::default(),
+      failed_child: None,
+      depth: 0,
+      blocks: 0,
+      owner: Owner::Eval,
+      keeps: Vec::new(),
+      lazy_refs: Vec::new(),
+      inline_depth: 0,
+      flow_args: 0,
+      block_param: None,
+    });
+    ctx.evaluate(flow)
+  }
+}
+
 /// `flow` composed as its own pipeline through `cache`, checked to be
 /// eligible: the wire to run, and what composing it read.
 fn pipeline(

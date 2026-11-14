@@ -140,6 +140,7 @@ fn check(o: &Options) -> Result<ExitCode, String> {
         diagnostics,
         wires: Vec::new(),
         functions: Vec::new(),
+        conditionals: Vec::new(),
       },
       source,
     ),

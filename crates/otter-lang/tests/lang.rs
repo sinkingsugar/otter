@@ -6184,3 +6184,214 @@ fn instance_shards_need_a_handle_variable() {
   let d = check("@wire(child { none })\nWait(child)").diagnostics;
   assert!(!d.is_empty());
 }
+
+// --- `@if`: compose-time selection (docs/metaprogramming.md §2.6) ---
+
+fn defines(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+  pairs
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+fn load_errors_with(text: &str, defines: &HashMap<String, String>) -> Vec<Diagnostic> {
+  match Program::load(Source::new("t.shs", text), &catalog(), defines) {
+    Ok(_) => panic!("expected load errors"),
+    Err((_, d)) => d,
+  }
+}
+
+/// The taken branch is spliced in place; the other is parsed but never
+/// lowered or composed, so a shard, a parameter or a name the host lacks
+/// is fine there. Bindings in the taken branch are visible after it.
+#[test]
+fn if_takes_one_branch_and_never_lowers_the_other() {
+  let text = r#"@const(cap-reward false ignore-redefined: true)
+@if(@cap-reward {
+  "new" | Quest.Step(reward: missing-var) = v
+} {
+  "old" = v
+})
+@if(false { Nothing.Here })
+@if(true { 1 } { 2 }) | Math.Add(v | Count) | Math.Add(@if(false {10} {20})) = n
+f"{v} {n}""#;
+  assert_eq!(
+    completed(&run(text, &no_defines()), "root"),
+    Var::string("old 24")
+  );
+  // A syntax error in the untaken branch is still reported.
+  let d = load_errors("@if(true { 1 } { Log(\"a\" })");
+  assert_eq!(d[0].phase, otter_core::diagnostic::Phase::Parse);
+  // A branch that is taken composes like hand-written code: its binding
+  // clashes with one written before the `@if`.
+  let d = check("1 = v\n@if(true { 2 = v })\nv").diagnostics;
+  assert_eq!(d[0].code, "duplicate-binding", "{d:?}");
+  assert_eq!(at(&d[0]), (2, 14));
+}
+
+/// A host turns new code on with a define the script declares a typed
+/// default for: an older host leaves it false.
+#[test]
+fn if_reads_host_defines_through_a_typed_default() {
+  let text = r#"@const(cap-reward false ignore-redefined: true)
+@if(@cap-reward { "new" } { "old" })"#;
+  assert_eq!(
+    completed(&run(text, &no_defines()), "root"),
+    Var::string("old")
+  );
+  let on = defines(&[("cap-reward", "true")]);
+  assert_eq!(completed(&run(text, &on), "root"), Var::string("new"));
+  // Without the default, a define is a String: the help says what to add.
+  let d = load_errors_with("@if(@cap-reward { 1 })", &on);
+  assert_eq!(d[0].code, "if-condition");
+  assert!(
+    d[0]
+      .message
+      .contains("@const(cap-reward false ignore-redefined: true)"),
+    "{}",
+    d[0].message
+  );
+  // A reload with other defines decides again.
+  let source = || Source::new("t.shs", format!("{text} | Log"));
+  let mut session = otter_lang::Session::new();
+  let (_, lines) = otter_core::log::capture(|| {
+    assert!(session.reload(source(), &catalog(), &no_defines()).is_ok());
+    session.tick();
+    assert!(session.reload(source(), &catalog(), &on).is_ok());
+    session.tick();
+  });
+  assert_eq!(lines, ["old", "new"]);
+}
+
+/// The condition is a Bool known while loading; anything else is located
+/// at the condition, with what to write instead.
+#[test]
+fn if_conditions_are_compose_time_bools() {
+  let cases: &[(&str, &str, (u32, u32))] = &[
+    ("1 = x\n@if(x { 1 })", "if-condition", (2, 5)),
+    ("@if(\"yes\" { 1 })", "if-condition", (1, 5)),
+    ("@if(#(1 | Math.Add(1)) { 1 })", "if-condition", (1, 5)),
+    ("@if(Log { 1 })", "if-condition", (1, 5)),
+    (
+      "@fn(F input: None output: Bool params: {} { true })\n@if(#(F) { 1 })",
+      "if-condition",
+      (2, 5),
+    ),
+    (
+      "@if(#(1 | Assert.Is(2) true) { 1 })",
+      "compose-time-error",
+      (1, 11),
+    ),
+    (
+      "@if(#(Time.Now | IsMore(0)) { 1 })",
+      "not-compose-time",
+      (1, 7),
+    ),
+    (
+      "@if(@later { 1 })\n@const(later true)",
+      "unknown-define",
+      (1, 6),
+    ),
+    ("@if(true 1)", "declaration", (1, 10)),
+    ("@if(true { 1 } { 2 } { 3 })", "declaration", (1, 1)),
+    ("@if(when: true { 1 })", "declaration", (1, 5)),
+  ];
+  for (text, code, pos) in cases {
+    let d = load_errors(text);
+    assert_eq!((d[0].code, at(&d[0])), (*code, *pos), "{text}: {d:?}");
+  }
+  // Inside a body, the condition sees every constant, wherever declared,
+  // and `#( )` computes it.
+  let text = "@wire(main { @if(#(@n | IsMore(1)) { \"big\" } { \"small\" }) })\n@const(n 2)\n@mesh(m) @schedule(m main) @run(m)";
+  assert_eq!(
+    completed(&run(text, &no_defines()), "main"),
+    Var::string("big")
+  );
+}
+
+/// Top-level `@if`s select declarations and includes, in order; a branch
+/// not taken reads no file. `@if`s nest.
+#[test]
+fn if_selects_declarations_includes_and_nests() {
+  let lib = files(&[
+    (
+      "new.shs",
+      "@fn(Greet input: None output: String params: {} { \"new\" })",
+    ),
+    (
+      "old.shs",
+      "@fn(Greet input: None output: String params: {} { \"old\" })\n@const(level 1)",
+    ),
+  ]);
+  let text = r#"@const(cap false ignore-redefined: true)
+@if(@cap { @include("new.shs") @const(level 2) } { @include("old.shs") @if(true { @include("missing.shs") } {}) })"#;
+  // `missing.shs` is named in a taken branch: an error.
+  let d = load_with(text, &lib).err().unwrap();
+  assert_eq!(d[0].code, "file-not-found", "{d:?}");
+  let text = r#"@const(cap false ignore-redefined: true)
+@if(@cap { @include("new.shs") @const(level 2) } { @include("old.shs") @if(false { @include("missing.shs") }) })
+@wire(main {
+  @if(#(@level | IsMore(1)) { @if(@cap { "both" } { "level" }) } { Greet })
+})
+@mesh(m) @schedule(m main) @run(m)"#;
+  let program = load_with(text, &lib).unwrap();
+  assert_eq!(program.files, ["old.shs"]);
+  let report = program.run().unwrap();
+  assert_eq!(completed(&report, "main"), Var::string("old"));
+  let on = defines(&[("cap", "true")]);
+  let program = Program::load_with(Source::new("main.shs", text), &catalog(), &on, &lib)
+    .map_err(|(_, d)| d)
+    .unwrap();
+  assert_eq!(program.files, ["new.shs"]);
+  assert_eq!(
+    completed(&program.run().unwrap(), "main"),
+    Var::string("both")
+  );
+  // Each decision is reported, where the `@if` and its branch are.
+  let c = &program.analyze().conditionals;
+  let seen: Vec<_> = c.iter().map(|c| (c.line, c.value, c.branch)).collect();
+  assert_eq!(
+    seen,
+    [
+      (2, true, Some("then")),
+      (4, true, Some("then")),
+      (4, true, Some("then"))
+    ]
+  );
+  assert_eq!(c[2].taken, Some((4, 40)));
+}
+
+/// `if` is reserved for the builtin: not a constant, not a value; a
+/// define named `if` does not change it. Functions are uppercase, so a
+/// function never collides with it.
+#[test]
+fn if_is_reserved_and_distinct_from_functions() {
+  let d = load_errors("@const(if true)\n1");
+  assert_eq!((d[0].code, at(&d[0])), ("reserved-name", (1, 8)));
+  let d = load_errors("@if | Log");
+  assert_eq!((d[0].code, at(&d[0])), ("declaration", (1, 2)));
+  let text = "@if(true { 7 })";
+  let given = defines(&[("if", "false")]);
+  assert_eq!(completed(&run(text, &given), "root"), Var::Int(7));
+  let d = load_errors("@fn(Pick input: None output: Int params: {} { 7 })\n@Pick(true { 1 })");
+  assert_eq!(d[0].code, "not-a-macro");
+}
+
+/// Problems in the taken branch point at the source as written, and
+/// `check --json` lists the decisions.
+#[test]
+fn if_branches_keep_their_source_locations() {
+  let report = check("@if(false { 1 } {\n  \"a\" | Math.Add(1)\n})");
+  let d = &report.diagnostics;
+  assert_eq!(d[0].code, "input-type-mismatch", "{d:?}");
+  assert_eq!(at(&d[0]), (2, 9));
+  let report = check("@if(true {\n  1 | Math.Add(1)\n})");
+  assert!(report.ok(), "{:?}", report.diagnostics);
+  let json = report.to_json();
+  assert!(
+    json.contains(r#""conditionals":[{"file":"t.shs","line":1,"column":1,"value":true,"branch":"then","taken":{"line":1,"column":10}}]"#),
+    "{json}"
+  );
+  let add = &report.wires[0].occurrences[1];
+  assert_eq!((add.line, add.column), (Some(2), Some(7)));
+}

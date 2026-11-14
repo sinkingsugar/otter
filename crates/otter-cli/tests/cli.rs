@@ -544,3 +544,35 @@ fn watch_follows_includes_across_extensions() {
   watch.send("q");
   assert!(watch.exits_cleanly());
 }
+
+/// `@if` decides with script arguments: `check --json` lists the decision,
+/// the untaken branch may name what this build lacks, and a watched
+/// program follows the files its taken branch includes (it reloads when
+/// one changes, deciding again).
+#[test]
+fn if_decides_with_script_arguments_and_watches_the_taken_includes() {
+  let lib = script("if-lib.otr", "@const(v 41)\n");
+  let file = script(
+    "if.otr",
+    "@const(cap false ignore-redefined: true)\n@if(@cap { Not.Here(reward: 1) } { @include(\"if-lib.otr\") @v })\n",
+  );
+  let (code, out, err) = otter(&["check", "--json", &file]);
+  assert_eq!(code, 0, "{out}{err}");
+  assert!(
+    out.contains(&format!(
+      r#""conditionals":[{{"file":"{file}","line":2,"column":1,"value":false,"branch":"else","taken":{{"line":2,"column":34}}}}]"#
+    )),
+    "{out}"
+  );
+  let (code, out, err) = otter(&["run", &file]);
+  assert_eq!((code, out.as_str()), (0, "root: 41\n"), "{err}");
+  let (code, _, err) = otter(&["check", &file, "cap:true"]);
+  assert_eq!(code, 1);
+  assert!(err.contains("unknown shard `Not.Here`"), "{err}");
+  let mut watch = Watch::start(&file);
+  watch.wait_for("root: 41");
+  std::fs::write(&lib, "@const(v 42)\n").unwrap();
+  watch.wait_for("root: 42");
+  watch.send("q");
+  assert!(watch.exits_cleanly());
+}

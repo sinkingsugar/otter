@@ -22,6 +22,8 @@ pub struct Parser<'a> {
   /// Tokens a `?` follows: the last segment of a lenient path (the
   /// lexer's `tokenize_marked`).
   lenient: Vec<usize>,
+  /// An `@if(...)` was read (`Program::selects`).
+  selects: bool,
 }
 
 /// Parses a whole source. Problems include the lexer's.
@@ -39,7 +41,14 @@ pub fn parse_range(source: &Source, range: Span) -> (Program, Vec<Problem>) {
   let statements = parser.statements(None);
   problems.append(&mut parser.problems);
   problems.sort_by_key(|p| p.span.start);
-  (Program { statements }, problems)
+  let selects = parser.selects;
+  (
+    Program {
+      statements,
+      selects,
+    },
+    problems,
+  )
 }
 
 impl<'a> Parser<'a> {
@@ -53,6 +62,7 @@ impl<'a> Parser<'a> {
       aborted: false,
       problems: Vec::new(),
       lenient: Vec::new(),
+      selects: false,
     }
   }
 
@@ -624,6 +634,7 @@ impl<'a> Parser<'a> {
           }
         };
         let params = self.params_if_open(&format!("@{name}"));
+        self.selects |= params.is_some() && name == "if";
         BlockKind::Func {
           name: Spanned {
             node: name,

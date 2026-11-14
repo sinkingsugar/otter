@@ -15,6 +15,10 @@ pub type Name = Spanned<String>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
   pub statements: Vec<Statement>,
+  /// Whether the parser read an `@if(...)` anywhere in the tree: lowering
+  /// decides them (`select.rs`) only then. A tree built by hand that holds
+  /// one sets it.
+  pub selects: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
