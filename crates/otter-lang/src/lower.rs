@@ -162,6 +162,18 @@ pub struct Lowered {
   /// Set when loose top-level code was wrapped into [`ROOT_WIRE`].
   pub root: bool,
   pub map: SourceMap,
+  /// Every `@if` decided while loading, in the order decided.
+  pub conditionals: Vec<Conditional>,
+}
+
+/// An `@if` decided while loading (docs/metaprogramming.md §2.6): where it
+/// is, its condition's value, and the branch that replaced it (`None`:
+/// false, with no else branch).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conditional {
+  pub span: Span,
+  pub value: bool,
+  pub taken: Option<Span>,
 }
 
 struct Lowerer<'a> {
@@ -309,27 +321,29 @@ fn lower_files<'a>(
   defines: &'a std::collections::HashMap<String, String>,
   files: Option<(&'a crate::Source, &'a dyn crate::Files)>,
 ) -> (Lowered, Vec<Problem>, Vec<String>) {
-  let mut l = Lowerer {
-    catalog,
-    defines,
-    problems: Vec::new(),
-    map: SourceMap::default(),
-    wire: String::new(),
-    temps: 0,
-    functions: HashMap::default(),
-    consts: HashMap::default(),
-    const_stack: Vec::new(),
-    consts_checked: HashSet::default(),
-    typed_defines: HashSet::default(),
-    const_values: HashMap::default(),
-    const_reads: 0,
-    const_expansion: 0,
-    const_overflow: None,
-    flow_params: Vec::new(),
-    files,
-    reads: Vec::new(),
-  };
+  let mut l = Lowerer::new(catalog, defines, files);
   let mut out = Lowered::default();
+  // `@if`s are decided first, on a copy of the tree (only when it holds
+  // one): what lowers is the taken branches, as if written in place.
+  let selected;
+  let program = if program.selects && crate::select::contains_if(&program.statements) {
+    let mut selector = crate::select::Selector::new(catalog, defines);
+    let statements = selector.program(program.statements.clone(), files, &mut l.problems);
+    out.conditionals = selector.decided;
+    l.reads = selector.reads;
+    // What follows a failed decision would only cascade from it.
+    if !l.problems.is_empty() {
+      dedup(&mut l.problems);
+      return (out, l.problems, l.reads);
+    }
+    selected = Program {
+      statements,
+      selects: false,
+    };
+    &selected
+  } else {
+    program
+  };
   // Script-argument defaults before anything reads a name: a function's
   // parameter defaults may read one, and must see it with its type. The
   // same pass finds the functions, whose signatures come next.
@@ -465,12 +479,105 @@ fn lower_files<'a>(
   l.map.nodes.shrink_to_fit();
   out.map = l.map;
   l.problems.extend(l.const_overflow);
+  // Deciding an `@if` lowers the constants its condition reads, which
+  // lowering reports again.
+  if !out.conditionals.is_empty() {
+    dedup(&mut l.problems);
+  }
   let reads = std::mem::take(&mut l.reads);
   (out, l.problems, reads)
 }
 
+/// Drops repeated problems, keeping the first of each.
+pub(crate) fn dedup(problems: &mut Vec<Problem>) {
+  let mut kept: Vec<Problem> = Vec::with_capacity(problems.len());
+  for p in problems.drain(..) {
+    if !kept.contains(&p) {
+      kept.push(p);
+    }
+  }
+  *problems = kept;
+}
+
+/// The source-map root a condition of `@if` lowers under.
+const IF_ROOT: &str = "@if";
+
+/// The value of an `@if` condition (a literal, `@name` or `#( )`), with
+/// the problems lowering or evaluating it found and the files `@read`
+/// read. `consts` are the top-level `@const` declarations it may read;
+/// they lower as they would in the program, and `#( )` evaluates on its
+/// own (`ComposeCache::evaluate`), with no function and the default
+/// budgets.
+pub(crate) fn condition_value(
+  cond: &Block,
+  consts: &[Statement],
+  catalog: &Catalog,
+  defines: &std::collections::HashMap<String, String>,
+  files: Option<(&crate::Source, &dyn crate::Files)>,
+  top_level: bool,
+) -> (Option<Var>, Vec<Problem>, Vec<String>) {
+  let mut l = Lowerer::new(catalog, defines, files);
+  for default in [true, false] {
+    for stmt in consts {
+      if let Some((name, params, block)) = top_level_func(stmt)
+        && name.node == "const"
+        && is_default(params) == default
+      {
+        l.const_decl(block, params);
+      }
+    }
+  }
+  l.wire = IF_ROOT.to_string();
+  let before = l.problems.len();
+  let value = l.constant(cond, &[]);
+  if top_level
+    && let Some(p) = l.problems[before..]
+      .iter_mut()
+      .find(|p| p.code == "unknown-define")
+  {
+    p.help = Some(
+      "a top-level `@if` sees the constants declared above it: declare it (or its default, `ignore-redefined: true`) before the `@if`".into(),
+    );
+  }
+  let value = match value {
+    Some(ParamValue::Value(v)) => Some(v),
+    Some(ParamValue::Eval(flow)) if l.problems.is_empty() => {
+      let layout = otter_core::compose::FrameLayout::default();
+      let (wires, functions) = (HashMap::default(), HashMap::default());
+      let env = otter_core::compose::ComposeEnv {
+        mesh_layout: &layout,
+        wires: &wires,
+        functions: &functions,
+        eval: otter_core::compose_time::EvalLimits::default(),
+      };
+      match otter_core::ComposeCache::default().evaluate(&env, &flow) {
+        Ok(v) => Some(v),
+        Err(err) => {
+          let (code, message, path) = match err {
+            otter_core::Error::Diagnostic(d) => (d.code, d.message.clone(), d.path.clone()),
+            other => ("compose-time-error", other.to_string(), Vec::new()),
+          };
+          let mut probe = Diagnostic::new(otter_core::diagnostic::Phase::Compose, "", "", "");
+          probe.path = vec![PathStep::Wire(IF_ROOT.into()), PathStep::Evaluation];
+          probe.path.extend(path);
+          let span = l.map.locate(&probe).unwrap_or(cond.span);
+          l.problems.push(Problem::construct(
+            span,
+            "generic",
+            code,
+            format!("while deciding `@if`: {message}"),
+          ));
+          None
+        }
+      }
+    }
+    _ => None,
+  };
+  (value, l.problems, l.reads)
+}
+
 /// A top-level `@name(...)` statement (one block, nothing piped).
-fn top_level_func(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> {
+pub(crate) fn top_level_func(stmt: &Statement) -> Option<(&Name, Option<&Params>, &Block)> {
   let Statement::Pipeline(pipe) = stmt else {
     return None;
   };
@@ -506,7 +613,7 @@ const _: () = assert!(
 
 /// Whether a `@const`'s parameters end with `ignore-redefined: true`: a
 /// default for a script argument.
-fn is_default(params: Option<&Params>) -> bool {
+pub(crate) fn is_default(params: Option<&Params>) -> bool {
   params.and_then(|p| p.items.last()).is_some_and(|last| {
     last
       .name
@@ -540,7 +647,7 @@ fn name_of(pipe: &Pipe) -> Option<String> {
 }
 
 /// A function's name: uppercase, like a shard's, since calls read as shards.
-fn upper_name_of(pipe: &Pipe) -> Option<String> {
+pub(crate) fn upper_name_of(pipe: &Pipe) -> Option<String> {
   match &pipe.blocks[..] {
     [b] => match &b.kind {
       BlockKind::Shard { name, params: None } => Some(name.node.clone()),
@@ -572,6 +679,35 @@ fn named_type(name: &str) -> Option<Type> {
     "Table" => Type::any_table(),
     _ => return None,
   })
+}
+
+impl<'a> Lowerer<'a> {
+  fn new(
+    catalog: &'a Catalog,
+    defines: &'a std::collections::HashMap<String, String>,
+    files: Option<(&'a crate::Source, &'a dyn crate::Files)>,
+  ) -> Lowerer<'a> {
+    Lowerer {
+      catalog,
+      defines,
+      problems: Vec::new(),
+      map: SourceMap::default(),
+      wire: String::new(),
+      temps: 0,
+      functions: HashMap::default(),
+      consts: HashMap::default(),
+      const_stack: Vec::new(),
+      consts_checked: HashSet::default(),
+      typed_defines: HashSet::default(),
+      const_values: HashMap::default(),
+      const_reads: 0,
+      const_expansion: 0,
+      const_overflow: None,
+      flow_params: Vec::new(),
+      files,
+      reads: Vec::new(),
+    }
+  }
 }
 
 impl Lowerer<'_> {
@@ -1514,6 +1650,10 @@ impl Lowerer<'_> {
           );
         }
       }
+      // Decided before lowering (`select.rs`); none is left here.
+      BlockKind::Func { name, .. } if name.node == "if" => {
+        unreachable!("`@if` is decided before lowering")
+      }
       BlockKind::Func { name, .. } if name.node == "include" => {
         self.unsupported(
           span,
@@ -1835,6 +1975,18 @@ impl Lowerer<'_> {
   /// `@name`: a script argument (a string), or a constant. `at` is where
   /// the value goes (see [`Self::constant`]).
   fn read_name(&mut self, name: &Name, at: &[PathStep]) -> Option<ParamValue> {
+    if name.node == "if" {
+      self.problem(
+        Problem::construct(
+          name.span,
+          "generic",
+          "declaration",
+          "`@if` is the compose-time conditional, not a value".into(),
+        )
+        .help("write `@if(condition {then} {else})`"),
+      );
+      return None;
+    }
     if let Some(v) = self.defines.get(&name.node)
       && !self.typed_defines.contains(&name.node)
     {
@@ -2014,6 +2166,18 @@ impl Lowerer<'_> {
       ));
       return;
     };
+    if name.node == "if" {
+      self.problem(
+        Problem::construct(
+          name.span,
+          "generic",
+          "reserved-name",
+          "`if` is reserved: `@if(...)` is the compose-time conditional".into(),
+        )
+        .help("give the constant another name"),
+      );
+      return;
+    }
     // A default: the script argument of the same name, when given, wins,
     // read as the default's type (arguments arrive as strings).
     if default {

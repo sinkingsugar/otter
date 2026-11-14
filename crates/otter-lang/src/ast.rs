@@ -14,7 +14,37 @@ pub type Name = Spanned<String>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
-  pub statements: Vec<Statement>,
+  pub(crate) statements: Vec<Statement>,
+  /// Whether the tree may hold an `@if(...)`: lowering decides them
+  /// (`select.rs`) only then. The parser knows; any other way to build or
+  /// change a tree keeps it true when it might be.
+  pub(crate) selects: bool,
+}
+
+impl Program {
+  /// A tree built from statements (not parsed).
+  pub fn new(statements: Vec<Statement>) -> Program {
+    let selects = crate::select::contains_if(&statements);
+    Program {
+      statements,
+      selects,
+    }
+  }
+
+  pub fn statements(&self) -> &[Statement] {
+    &self.statements
+  }
+
+  /// The statements to change: the tree is then decided as if it may hold
+  /// an `@if`.
+  pub fn statements_mut(&mut self) -> &mut Vec<Statement> {
+    self.selects = true;
+    &mut self.statements
+  }
+
+  pub fn into_statements(self) -> Vec<Statement> {
+    self.statements
+  }
 }
 
 #[derive(Clone, Debug, PartialEq)]

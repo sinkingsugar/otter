@@ -98,3 +98,7 @@ Examples come from real scripts. Pipelines inside `[...]`, table values and para
    - `check --json` can report the inferred input and output type of every shard, keyed by occurrence path, so a tool can show the type after each line.
    - The formatter puts one pipeline per line.
 5. **Output rules in diagnostics.** A type mismatch on a shard's input says where that input came from: the producing shard, and any shards it passed through on the way (`When` passes its input through). Compose knows the previous shards and their `OutputDesc`, so this is a core change. **Implemented** (`input_from` in diagnostics, [shard-metadata-and-compose.md](shard-metadata-and-compose.md) §6).
+
+## 8. Later additions
+
+- **`@if(condition {then} {else})`** (2026-11-14): compose-time selection, a lowercase builtin in the reserved `@name(...)` slot beside `@read` and `@include` (macros and functions are uppercase, so they never collide). The condition is `true`, `false`, `@name` or `#( ... )`, a Bool known while loading; the branches are blocks in braces, and the untaken one is parsed but never lowered. It stands wherever a step, a value or a top-level declaration can. A runtime branch stays `If(...)`. Semantics and diagnostics: [metaprogramming.md §2.6](metaprogramming.md#26-if-compose-time-selection-2026-11-14).

@@ -132,18 +132,7 @@ fn check(o: &Options) -> Result<ExitCode, String> {
   let source = read(&o.file)?;
   // The program's source holds the included files, which diagnostics
   // point into.
-  let (report, source) = match Program::load_with(source, &catalog(), &o.defines, &o.files()) {
-    Ok(program) => (program.analyze(), program.source),
-    Err((source, diagnostics)) => (
-      CheckReport {
-        file: o.file.clone(),
-        diagnostics,
-        wires: Vec::new(),
-        functions: Vec::new(),
-      },
-      source,
-    ),
-  };
+  let (report, source) = otter_lang::check_with_source(source, &catalog(), &o.defines, &o.files());
   print_report(&report, &source, o.json);
   if !o.json && report.ok() {
     eprintln!("{}: ok", o.file);

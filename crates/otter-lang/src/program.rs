@@ -18,6 +18,7 @@ use crate::files::{Files, FsFiles};
 use crate::lower::{Lowered, ROOT_WIRE, lower_with};
 use crate::parser::parse;
 use crate::problem::{Problem, locate};
+use crate::select::{Before, Selector, if_statement};
 use crate::source::Source;
 
 /// A source program, parsed and lowered.
@@ -30,6 +31,9 @@ pub struct Program {
 }
 
 /// The result of `check`, in the 1.x `shards check --json` envelope.
+/// Build one with [`CheckReport::new`]: it gains fields as `check` learns
+/// to report more.
+#[non_exhaustive]
 pub struct CheckReport {
   pub file: String,
   pub diagnostics: Vec<Diagnostic>,
@@ -39,6 +43,55 @@ pub struct CheckReport {
   /// Every declared function that composed, with its signature (inferred
   /// effects and mesh access included) and its declaration's location.
   pub functions: Vec<FunctionReport>,
+  /// Every `@if` decided while loading, with the branch that replaced it.
+  pub conditionals: Vec<ConditionalReport>,
+}
+
+/// An `@if` as `check --json` reports it: where it is (file, line and
+/// column), its condition's value, and the branch that replaced it.
+pub struct ConditionalReport {
+  pub file: String,
+  pub line: u32,
+  pub column: u32,
+  pub value: bool,
+  /// `"then"`, `"else"`, or `None` (false, with no else branch).
+  pub branch: Option<&'static str>,
+  /// Where the taken branch starts.
+  pub taken: Option<(u32, u32)>,
+}
+
+impl ConditionalReport {
+  fn new(c: &crate::lower::Conditional, source: &Source) -> ConditionalReport {
+    let (line, column) = source.line_col(c.span.start);
+    ConditionalReport {
+      file: source.file_name(c.span.start).to_string(),
+      line,
+      column,
+      value: c.value,
+      branch: match (c.value, c.taken) {
+        (true, _) => Some("then"),
+        (false, Some(_)) => Some("else"),
+        (false, None) => None,
+      },
+      taken: c.taken.map(|span| source.line_col(span.start)),
+    }
+  }
+
+  fn to_json(&self) -> String {
+    let mut fields = vec![
+      format!("\"file\":{}", json_str(&self.file)),
+      format!("\"line\":{},\"column\":{}", self.line, self.column),
+      format!("\"value\":{}", self.value),
+      format!(
+        "\"branch\":{}",
+        self.branch.map(json_str).unwrap_or_else(|| "null".into())
+      ),
+    ];
+    if let Some((line, column)) = self.taken {
+      fields.push(format!("\"taken\":{{\"line\":{line},\"column\":{column}}}"));
+    }
+    format!("{{{}}}", fields.join(","))
+  }
 }
 
 pub struct FunctionReport {
@@ -119,6 +172,18 @@ impl WireAnalysis {
 }
 
 impl CheckReport {
+  /// A report of `diagnostics` alone (a load that failed): no wires,
+  /// functions or decisions.
+  pub fn new(file: impl Into<String>, diagnostics: Vec<Diagnostic>) -> CheckReport {
+    CheckReport {
+      file: file.into(),
+      diagnostics,
+      wires: Vec::new(),
+      functions: Vec::new(),
+      conditionals: Vec::new(),
+    }
+  }
+
   pub fn ok(&self) -> bool {
     self.diagnostics.is_empty()
   }
@@ -126,7 +191,7 @@ impl CheckReport {
   pub fn to_json(&self) -> String {
     let diagnostics: Vec<String> = self.diagnostics.iter().map(Diagnostic::to_json).collect();
     format!(
-      "{{\"ok\":{},\"file\":{},\"diagnostics\":[{}],\"wires\":[{}],\"functions\":[{}]}}",
+      "{{\"ok\":{},\"file\":{},\"diagnostics\":[{}],\"wires\":[{}],\"functions\":[{}],\"conditionals\":[{}]}}",
       self.ok(),
       json_str(&self.file),
       diagnostics.join(","),
@@ -140,6 +205,12 @@ impl CheckReport {
         .functions
         .iter()
         .map(FunctionReport::to_json)
+        .collect::<Vec<_>>()
+        .join(","),
+      self
+        .conditionals
+        .iter()
+        .map(ConditionalReport::to_json)
         .collect::<Vec<_>>()
         .join(",")
     )
@@ -160,36 +231,69 @@ impl Program {
 
   /// [`Program::load`], with `@include` and `@read` reading from `files`.
   pub fn load_with(
-    mut source: Source,
+    source: Source,
     catalog: &Catalog,
     defines: &std::collections::HashMap<String, String>,
     files: &dyn Files,
   ) -> Result<Program, (Source, Vec<Diagnostic>)> {
+    Program::load_deciding(source, catalog, defines, files, &mut Vec::new())
+  }
+
+  /// [`Program::load_with`]; on failure, the `@if`s decided before it go
+  /// to `failed` (`check` reports them).
+  fn load_deciding(
+    mut source: Source,
+    catalog: &Catalog,
+    defines: &std::collections::HashMap<String, String>,
+    files: &dyn Files,
+    failed: &mut Vec<crate::lower::Conditional>,
+  ) -> Result<Program, (Source, Vec<Diagnostic>)> {
     let (mut tree, mut problems) = parse(&source);
     let mut read = Vec::new();
+    let mut decided = Vec::new();
     if problems.is_empty() {
-      let mut seen = vec![files.key(&source.name)];
-      let statements = std::mem::take(&mut tree.statements);
-      tree.statements = include(
-        &mut source,
-        statements,
-        files,
-        &mut seen,
-        &mut read,
-        &mut problems,
-        0,
-      );
+      let mut seen = Included {
+        keys: vec![files.key(&source.name)],
+        names: Vec::new(),
+        selector: Selector::new(catalog, defines),
+        selects: false,
+      };
+      let file = crate::ast::Program {
+        statements: std::mem::take(&mut tree.statements),
+        selects: tree.selects,
+      };
+      // Top-level `@if`s are decided in order as files are included, so a
+      // branch can include a file and an included file can hold one.
+      tree.statements = include(&mut source, file, files, &mut seen, &mut problems, 0, None);
+      tree.selects = seen.selects;
+      let selector = seen.selector;
+      read = seen.names;
+      decided = selector.decided;
+      for r in selector.reads {
+        if !read.contains(&r) {
+          read.push(r);
+        }
+      }
     }
     if !problems.is_empty() {
+      crate::lower::dedup(&mut problems);
+      *failed = decided;
       let diagnostics = problems.iter().map(|p| p.to_diagnostic(&source)).collect();
       return Err((source, diagnostics));
     }
-    let (lowered, problems, reads) = lower_with(&tree, catalog, defines, &source, files);
+    let (mut lowered, problems, reads) = lower_with(&tree, catalog, defines, &source, files);
+    decided.append(&mut lowered.conditionals);
     if !problems.is_empty() {
+      *failed = decided;
       let diagnostics = problems.iter().map(|p| p.to_diagnostic(&source)).collect();
       return Err((source, diagnostics));
     }
-    read.extend(reads);
+    lowered.conditionals = decided;
+    for r in reads {
+      if !read.contains(&r) {
+        read.push(r);
+      }
+    }
     Ok(Program {
       source,
       lowered,
@@ -411,6 +515,12 @@ impl Program {
       diagnostics: out,
       wires,
       functions,
+      conditionals: self
+        .lowered
+        .conditionals
+        .iter()
+        .map(|c| ConditionalReport::new(c, &self.source))
+        .collect(),
     }
   }
 
@@ -546,15 +656,29 @@ pub fn check_with(
   defines: &std::collections::HashMap<String, String>,
   files: &dyn Files,
 ) -> CheckReport {
+  check_with_source(source, catalog, defines, files).0
+}
+
+/// [`check_with`], also returning the source with every file the program
+/// included, which the report's diagnostics point into (to render them).
+pub fn check_with_source(
+  source: Source,
+  catalog: &Catalog,
+  defines: &std::collections::HashMap<String, String>,
+  files: &dyn Files,
+) -> (CheckReport, Source) {
   let file = source.name.clone();
-  match Program::load_with(source, catalog, defines, files) {
-    Err((_, diagnostics)) => CheckReport {
-      file,
-      diagnostics,
-      wires: Vec::new(),
-      functions: Vec::new(),
-    },
-    Ok(program) => program.analyze(),
+  let mut decided = Vec::new();
+  match Program::load_deciding(source, catalog, defines, files, &mut decided) {
+    Err((source, diagnostics)) => {
+      let mut report = CheckReport::new(file, diagnostics);
+      report.conditionals = decided
+        .iter()
+        .map(|c| ConditionalReport::new(c, &source))
+        .collect();
+      (report, source)
+    }
+    Ok(program) => (program.analyze(), program.source),
   }
 }
 
@@ -567,18 +691,59 @@ const MAX_INCLUDE_DEPTH: usize = 64;
 /// replaced by the included file's statements (expanded the same way). A
 /// file is included once per program, wherever it is named again: its
 /// declarations are visible from then on. The included files are added to
-/// `source` (so their spans locate), and their names to `read`.
+/// `source` (so their spans locate), and their names to `seen`. A
+/// top-level `@if` is decided here, in order, and its branch expanded the
+/// same way: the untaken branch's files are never read.
 fn include(
   source: &mut Source,
-  statements: Vec<Statement>,
+  file: crate::ast::Program,
   files: &dyn Files,
-  seen: &mut Vec<String>,
-  read: &mut Vec<String>,
+  seen: &mut Included<'_>,
   problems: &mut Vec<Problem>,
   depth: usize,
+  before: Option<&Before<'_>>,
 ) -> Vec<Statement> {
+  let statements = file.statements;
   let mut out = Vec::with_capacity(statements.len());
+  seen.selects |= file.selects;
   for statement in statements {
+    let site = if file.selects {
+      if_statement(statement)
+    } else {
+      Err(statement)
+    };
+    let statement = match site {
+      Ok(site) => {
+        // What the condition may read: everything included so far.
+        seen.selector.scope(&Before {
+          statements: &out,
+          parent: before,
+        });
+        let branch = seen
+          .selector
+          .select(site, true, Some((&*source, files)), problems);
+        if let Some(branch) = branch {
+          let expanded = include(
+            source,
+            crate::ast::Program {
+              statements: branch,
+              selects: true,
+            },
+            files,
+            seen,
+            problems,
+            depth,
+            Some(&Before {
+              statements: &out,
+              parent: before,
+            }),
+          );
+          out.extend(expanded);
+        }
+        continue;
+      }
+      Err(statement) => statement,
+    };
     let Some((path, span)) = include_target(&statement, problems) else {
       out.push(statement);
       continue;
@@ -608,10 +773,10 @@ fn include(
         continue;
       }
     };
-    if seen.contains(&file.key) {
+    if seen.keys.contains(&file.key) {
       continue;
     }
-    seen.push(file.key.clone());
+    seen.keys.push(file.key.clone());
     let text = match String::from_utf8(file.bytes) {
       Ok(text) => text,
       Err(_) => {
@@ -624,24 +789,39 @@ fn include(
         continue;
       }
     };
-    read.push(file.name.clone());
+    seen.names.push(file.name.clone());
     let range = source.add(file.name, &text);
     let (tree, mut parsed) = crate::parser::parse_range(source, range);
     let failed = !parsed.is_empty();
     problems.append(&mut parsed);
     if !failed {
-      out.extend(include(
+      let expanded = include(
         source,
-        tree.statements,
+        tree,
         files,
         seen,
-        read,
         problems,
         depth + 1,
-      ));
+        Some(&Before {
+          statements: &out,
+          parent: before,
+        }),
+      );
+      out.extend(expanded);
     }
   }
   out
+}
+
+/// The files included so far: their keys (each is included once) and
+/// names (what a reload depends on), in the order read.
+struct Included<'a> {
+  keys: Vec<String>,
+  names: Vec<String>,
+  /// Decides the top-level `@if`s on the way.
+  selector: Selector<'a>,
+  /// A file included so far holds an `@if` (`Program::selects`).
+  selects: bool,
 }
 
 /// For a top-level `@include(...)` statement, its path (`None`, with a
