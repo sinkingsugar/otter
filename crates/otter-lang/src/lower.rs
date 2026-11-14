@@ -331,6 +331,11 @@ fn lower_files<'a>(
     let statements = selector.program(program.statements.clone(), files, &mut l.problems);
     out.conditionals = selector.decided;
     l.reads = selector.reads;
+    // What follows a failed decision would only cascade from it.
+    if !l.problems.is_empty() {
+      dedup(&mut l.problems);
+      return (out, l.problems, l.reads);
+    }
     selected = Program {
       statements,
       selects: false,
@@ -1645,12 +1650,10 @@ impl Lowerer<'_> {
           );
         }
       }
-      // Decided before lowering (`select.rs`): one left here is in a tree
-      // built without `Program::selects`.
-      BlockKind::Func { name, .. } if name.node == "if" => self.unsupported(
-        span,
-        "`@if` in a tree whose `selects` is not set: it is never decided",
-      ),
+      // Decided before lowering (`select.rs`); none is left here.
+      BlockKind::Func { name, .. } if name.node == "if" => {
+        unreachable!("`@if` is decided before lowering")
+      }
       BlockKind::Func { name, .. } if name.node == "include" => {
         self.unsupported(
           span,

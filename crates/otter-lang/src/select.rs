@@ -31,14 +31,58 @@ pub(crate) type FilesRef<'s> = Option<(&'s crate::Source, &'s dyn crate::Files)>
 pub(crate) struct Selector<'a> {
   catalog: &'a Catalog,
   defines: &'a HashMap<String, String>,
-  /// The top-level `@const` declarations a condition may read.
-  consts: Vec<Statement>,
+  /// The top-level `@const` declarations a condition may read, each
+  /// selected (its own `@if`s decided) when a condition first needs it.
+  consts: Vec<Const>,
+  /// The constants whose `@if`s are being decided, innermost last
+  /// (`compose-time-cycle`).
+  selecting: Vec<String>,
+  /// Whether decisions are recorded in `decided`: not while a constant is
+  /// selected for a condition, since the program's own copy of it is
+  /// decided (and recorded) where it stands.
+  recording: bool,
   /// The declared functions' names: a condition cannot call one.
   functions: Vec<String>,
   /// Every `@if` decided, in the order decided.
   pub(crate) decided: Vec<Conditional>,
   /// The files `@read` read while deciding.
   pub(crate) reads: Vec<String>,
+}
+
+/// A constant a condition may read.
+struct Const {
+  name: String,
+  /// Its declaration as written.
+  written: Statement,
+  /// Whether its value holds an `@if`: it is read selected, then.
+  selects: bool,
+  state: ConstState,
+}
+
+enum ConstState {
+  Written,
+  Selecting,
+  Selected(Statement),
+  /// Deciding one of its `@if`s failed (reported then).
+  Failed,
+}
+
+impl Const {
+  /// The declaration a condition reads: `None` while it holds an `@if`
+  /// not decided yet.
+  fn readable(&self) -> Option<&Statement> {
+    match &self.state {
+      ConstState::Selected(stmt) => Some(stmt),
+      _ if !self.selects => Some(&self.written),
+      _ => None,
+    }
+  }
+
+  /// Its value, where the names it reads are.
+  fn value(stmt: &Statement) -> Option<&Pipe> {
+    let (_, params, _) = top_level_func(stmt)?;
+    params?.items.get(1).map(|p| &p.value)
+  }
 }
 
 /// The top-level statements before a point, in pieces that stay where
@@ -58,6 +102,8 @@ impl<'a> Selector<'a> {
       catalog,
       defines,
       consts: Vec::new(),
+      selecting: Vec::new(),
+      recording: true,
       functions: Vec::new(),
       decided: Vec::new(),
       reads: Vec::new(),
@@ -87,7 +133,32 @@ impl<'a> Selector<'a> {
       return;
     };
     match name.node.as_str() {
-      "const" => self.consts.push(stmt.clone()),
+      "const" => {
+        let Some(name) =
+          params
+            .and_then(|p| p.items.first())
+            .and_then(|p| match &p.value.blocks[..] {
+              [b] => match &b.kind {
+                BlockKind::Var { name, .. } => Some(name.node.clone()),
+                _ => None,
+              },
+              _ => None,
+            })
+        else {
+          return;
+        };
+        // What a constant selects to depends on what is visible: a wider
+        // scope decides again.
+        for c in &mut self.consts {
+          c.state = ConstState::Written;
+        }
+        self.consts.push(Const {
+          name,
+          written: stmt.clone(),
+          selects: contains_if(std::slice::from_ref(stmt)),
+          state: ConstState::Written,
+        });
+      }
       "fn" => {
         if let Some(f) = params
           .and_then(|p| p.items.first())
@@ -199,14 +270,16 @@ impl<'a> Selector<'a> {
       None => None,
     };
     // A condition may itself hold an `@if` (inside a `#( )`).
-    self.pipe(&mut cond.value, files, problems);
+    self.pipe(&mut cond.value, true, files, problems);
     let value = self.condition(&cond.value, top_level, files, problems)?;
     let (taken, statements) = match (value, then, other) {
       (true, (span, stmts), _) => (Some(span), stmts),
       (false, _, Some((span, stmts))) => (Some(span), stmts),
       (false, _, None) => (None, Vec::new()),
     };
-    self.decided.push(Conditional { span, value, taken });
+    if self.recording {
+      self.decided.push(Conditional { span, value, taken });
+    }
     Some(statements)
   }
 
@@ -262,9 +335,39 @@ impl<'a> Selector<'a> {
       );
       return None;
     }
+    // The constants it reads, through each other, decided first.
+    let mut names = Vec::new();
+    names_read(block, &mut names);
+    let mut seen = Vec::new();
+    while let Some(name) = names.pop() {
+      if seen.contains(&name) {
+        continue;
+      }
+      let at = match &block.kind {
+        BlockKind::Func { name, params: None } => name.span,
+        _ => cond.span,
+      };
+      if !self.ensure(&name, at, files, problems) {
+        // Reported, or a cascade of what was.
+        return None;
+      }
+      for c in self.consts.iter().filter(|c| c.name == name) {
+        if let Some(value) = c.readable().and_then(Const::value) {
+          for b in &value.blocks {
+            names_read(b, &mut names);
+          }
+        }
+      }
+      seen.push(name);
+    }
+    let readable: Vec<Statement> = self
+      .consts
+      .iter()
+      .filter_map(|c| c.readable().cloned())
+      .collect();
     let (value, mut found, reads) = condition_value(
       block,
-      &self.consts,
+      &readable,
       self.catalog,
       self.defines,
       files,
@@ -314,11 +417,68 @@ impl<'a> Selector<'a> {
     }
   }
 
+  /// Decides the `@if`s in the value of the constant `name` (each
+  /// declaration of it), once per scope. One being decided already is a
+  /// cycle, reported at `at`.
+  fn ensure(
+    &mut self,
+    name: &str,
+    at: Span,
+    files: FilesRef<'_>,
+    problems: &mut Vec<Problem>,
+  ) -> bool {
+    let mut ok = true;
+    for i in 0..self.consts.len() {
+      if self.consts[i].name != name || !self.consts[i].selects {
+        continue;
+      }
+      match self.consts[i].state {
+        ConstState::Selected(_) => continue,
+        ConstState::Failed => {
+          ok = false;
+          continue;
+        }
+        ConstState::Selecting => {
+          ok = false;
+          let first = self.selecting.iter().position(|c| c == name).unwrap_or(0);
+          let mut chain = self.selecting[first..].to_vec();
+          chain.push(name.to_string());
+          problems.push(Problem::construct(
+            at,
+            "generic",
+            "compose-time-cycle",
+            format!(
+              "`@{name}` is read while its own `@if` is decided ({})",
+              chain.join(" -> ")
+            ),
+          ));
+          continue;
+        }
+        ConstState::Written => {}
+      }
+      self.consts[i].state = ConstState::Selecting;
+      self.selecting.push(name.to_string());
+      let mut stmt = self.consts[i].written.clone();
+      let recording = std::mem::replace(&mut self.recording, false);
+      let before = problems.len();
+      self.statement(&mut stmt, files, problems);
+      self.recording = recording;
+      self.selecting.pop();
+      self.consts[i].state = if problems.len() == before {
+        ConstState::Selected(stmt)
+      } else {
+        ok = false;
+        ConstState::Failed
+      };
+    }
+    ok
+  }
+
   /// Whether a constant declared so far is a default (`ignore-redefined:
   /// true`), which reads a script argument of its name as its own type.
   fn declares_default(&self, name: &str) -> bool {
-    self.consts.iter().any(|stmt| {
-      top_level_func(stmt).is_some_and(|(_, params, _)| {
+    self.consts.iter().any(|c| {
+      top_level_func(&c.written).is_some_and(|(_, params, _)| {
         params
           .and_then(|p| p.items.first())
           .is_some_and(|first| {
@@ -368,7 +528,7 @@ impl<'a> Selector<'a> {
           return;
         }
         seen.push(name.node.clone());
-        for stmt in &self.consts {
+        for stmt in self.consts.iter().filter_map(Const::readable) {
           if let Some((_, Some(params), _)) = top_level_func(stmt)
             && let [n, v, ..] = &params.items[..]
             && matches!(&n.value.blocks[..], [b] if matches!(&b.kind, BlockKind::Var { name: c, .. } if c.node == name.node))
@@ -438,13 +598,22 @@ impl<'a> Selector<'a> {
 
   fn statement(&mut self, stmt: &mut Statement, files: FilesRef<'_>, problems: &mut Vec<Problem>) {
     if let Statement::Pipeline(pipe) = stmt {
-      self.pipe(pipe, files, problems);
+      self.pipe(pipe, false, files, problems);
     }
   }
 
-  fn pipe(&mut self, pipe: &mut Pipe, files: FilesRef<'_>, problems: &mut Vec<Problem>) {
+  /// `value`: the pipe is a value (a parameter, an element, a table
+  /// value), which an `@if` alone in it must give.
+  fn pipe(
+    &mut self,
+    pipe: &mut Pipe,
+    value: bool,
+    files: FilesRef<'_>,
+    problems: &mut Vec<Problem>,
+  ) {
+    let alone = value && pipe.blocks.len() == 1;
     for block in &mut pipe.blocks {
-      self.block(block, files, problems);
+      self.block(block, alone, files, problems);
     }
   }
 
@@ -461,7 +630,14 @@ impl<'a> Selector<'a> {
   /// An `@if` among other blocks of a pipe, or inside a value, becomes its
   /// branch: the branch's one block, or its statements in parentheses
   /// (which run in place, in the enclosing scope).
-  fn block(&mut self, block: &mut Block, files: FilesRef<'_>, problems: &mut Vec<Problem>) {
+  /// `value`: the block is a whole value, so a branch must give one.
+  fn block(
+    &mut self,
+    block: &mut Block,
+    value: bool,
+    files: FilesRef<'_>,
+    problems: &mut Vec<Problem>,
+  ) {
     if is_if(block) {
       let span = block.span;
       let site = std::mem::replace(
@@ -472,11 +648,21 @@ impl<'a> Selector<'a> {
         },
       );
       if let Some(mut branch) = self.select(site, false, files, problems) {
-        if let [Statement::Pipeline(pipe)] = &mut branch[..]
+        if value && branch.is_empty() {
+          problems.push(
+            Problem::construct(
+              span,
+              "generic",
+              "if-no-value",
+              "this `@if` stands for a value, but the branch it takes is empty".into(),
+            )
+            .help("give it the other branch (`@if(condition {then} {else})`), or make it a step of its own"),
+          );
+        } else if let [Statement::Pipeline(pipe)] = &mut branch[..]
           && pipe.blocks.len() == 1
         {
           *block = pipe.blocks.pop().expect("one block");
-          self.block(block, files, problems);
+          self.block(block, value, files, problems);
         } else {
           block.kind = BlockKind::Expr(self.statements(branch, files, problems));
         }
@@ -493,20 +679,20 @@ impl<'a> Selector<'a> {
         ..
       } => {
         for item in &mut params.items {
-          self.pipe(&mut item.value, files, problems);
+          self.pipe(&mut item.value, true, files, problems);
         }
       }
       BlockKind::Seq(items) => {
         for item in items {
-          self.pipe(item, files, problems);
+          self.pipe(item, true, files, problems);
         }
       }
       BlockKind::Table(entries) => {
         for (key, value) in entries {
           if let TableKey::Value(b) = &mut key.node {
-            self.block(b, files, problems);
+            self.block(b, true, files, problems);
           }
-          self.pipe(value, files, problems);
+          self.pipe(value, true, files, problems);
         }
       }
       BlockKind::Flow(s) | BlockKind::Expr(s) | BlockKind::Eval(s) => {
@@ -604,4 +790,40 @@ pub(crate) fn contains_if(statements: &[Statement]) -> bool {
     Statement::Pipeline(p) => pipe(p),
     _ => false,
   })
+}
+
+/// The names `@name` reads in a block, anywhere inside it.
+fn names_read(block: &Block, out: &mut Vec<String>) {
+  fn pipe(p: &Pipe, out: &mut Vec<String>) {
+    p.blocks.iter().for_each(|b| names_read(b, out));
+  }
+  fn stmts(s: &[Statement], out: &mut Vec<String>) {
+    for stmt in s {
+      if let Statement::Pipeline(p) = stmt {
+        pipe(p, out);
+      }
+    }
+  }
+  match &block.kind {
+    BlockKind::Func { name, params: None } => out.push(name.node.clone()),
+    BlockKind::Shard {
+      params: Some(params),
+      ..
+    }
+    | BlockKind::Func {
+      params: Some(params),
+      ..
+    } => params.items.iter().for_each(|i| pipe(&i.value, out)),
+    BlockKind::Seq(items) => items.iter().for_each(|i| pipe(i, out)),
+    BlockKind::Table(entries) => entries.iter().for_each(|(_, v)| pipe(v, out)),
+    BlockKind::Flow(s) | BlockKind::Expr(s) | BlockKind::Eval(s) => stmts(s, out),
+    BlockKind::FString(parts) => {
+      for part in parts {
+        if let FPart::Expr(s, _) = part {
+          stmts(s, out);
+        }
+      }
+    }
+    _ => {}
+  }
 }

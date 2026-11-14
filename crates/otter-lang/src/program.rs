@@ -31,6 +31,9 @@ pub struct Program {
 }
 
 /// The result of `check`, in the 1.x `shards check --json` envelope.
+/// Build one with [`CheckReport::new`]: it gains fields as `check` learns
+/// to report more.
+#[non_exhaustive]
 pub struct CheckReport {
   pub file: String,
   pub diagnostics: Vec<Diagnostic>,
@@ -169,6 +172,18 @@ impl WireAnalysis {
 }
 
 impl CheckReport {
+  /// A report of `diagnostics` alone (a load that failed): no wires,
+  /// functions or decisions.
+  pub fn new(file: impl Into<String>, diagnostics: Vec<Diagnostic>) -> CheckReport {
+    CheckReport {
+      file: file.into(),
+      diagnostics,
+      wires: Vec::new(),
+      functions: Vec::new(),
+      conditionals: Vec::new(),
+    }
+  }
+
   pub fn ok(&self) -> bool {
     self.diagnostics.is_empty()
   }
@@ -216,10 +231,22 @@ impl Program {
 
   /// [`Program::load`], with `@include` and `@read` reading from `files`.
   pub fn load_with(
+    source: Source,
+    catalog: &Catalog,
+    defines: &std::collections::HashMap<String, String>,
+    files: &dyn Files,
+  ) -> Result<Program, (Source, Vec<Diagnostic>)> {
+    Program::load_deciding(source, catalog, defines, files, &mut Vec::new())
+  }
+
+  /// [`Program::load_with`]; on failure, the `@if`s decided before it go
+  /// to `failed` (`check` reports them).
+  fn load_deciding(
     mut source: Source,
     catalog: &Catalog,
     defines: &std::collections::HashMap<String, String>,
     files: &dyn Files,
+    failed: &mut Vec<crate::lower::Conditional>,
   ) -> Result<Program, (Source, Vec<Diagnostic>)> {
     let (mut tree, mut problems) = parse(&source);
     let mut read = Vec::new();
@@ -250,15 +277,17 @@ impl Program {
     }
     if !problems.is_empty() {
       crate::lower::dedup(&mut problems);
+      *failed = decided;
       let diagnostics = problems.iter().map(|p| p.to_diagnostic(&source)).collect();
       return Err((source, diagnostics));
     }
     let (mut lowered, problems, reads) = lower_with(&tree, catalog, defines, &source, files);
+    decided.append(&mut lowered.conditionals);
     if !problems.is_empty() {
+      *failed = decided;
       let diagnostics = problems.iter().map(|p| p.to_diagnostic(&source)).collect();
       return Err((source, diagnostics));
     }
-    decided.append(&mut lowered.conditionals);
     lowered.conditionals = decided;
     for r in reads {
       if !read.contains(&r) {
@@ -627,16 +656,29 @@ pub fn check_with(
   defines: &std::collections::HashMap<String, String>,
   files: &dyn Files,
 ) -> CheckReport {
+  check_with_source(source, catalog, defines, files).0
+}
+
+/// [`check_with`], also returning the source with every file the program
+/// included, which the report's diagnostics point into (to render them).
+pub fn check_with_source(
+  source: Source,
+  catalog: &Catalog,
+  defines: &std::collections::HashMap<String, String>,
+  files: &dyn Files,
+) -> (CheckReport, Source) {
   let file = source.name.clone();
-  match Program::load_with(source, catalog, defines, files) {
-    Err((_, diagnostics)) => CheckReport {
-      file,
-      diagnostics,
-      wires: Vec::new(),
-      functions: Vec::new(),
-      conditionals: Vec::new(),
-    },
-    Ok(program) => program.analyze(),
+  let mut decided = Vec::new();
+  match Program::load_deciding(source, catalog, defines, files, &mut decided) {
+    Err((source, diagnostics)) => {
+      let mut report = CheckReport::new(file, diagnostics);
+      report.conditionals = decided
+        .iter()
+        .map(|c| ConditionalReport::new(c, &source))
+        .collect();
+      (report, source)
+    }
+    Ok(program) => (program.analyze(), program.source),
   }
 }
 

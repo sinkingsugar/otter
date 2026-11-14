@@ -23,7 +23,9 @@ pub mod watch;
 pub use files::{Files, FsFiles, MemoryFiles};
 pub use parser::parse;
 pub use problem::{Problem, render};
-pub use program::{CheckReport, ConditionalReport, Program, RunReport, check, check_with};
+pub use program::{
+  CheckReport, ConditionalReport, Program, RunReport, check, check_with, check_with_source,
+};
 pub use session::{Finished, Session};
 pub use source::{Source, Span};
 pub use tool::{CallOptions, Tool, ToolDefinition, ToolError, ToolInput, ToolOutput};

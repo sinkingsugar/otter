@@ -6395,3 +6395,195 @@ fn if_branches_keep_their_source_locations() {
   let add = &report.wires[0].occurrences[1];
   assert_eq!((add.line, add.column), (Some(2), Some(7)));
 }
+
+/// A constant whose value holds an `@if` is read selected by conditions,
+/// forward from bodies too; selections that need each other are a cycle.
+#[test]
+fn if_conditions_read_constants_selected() {
+  let cases: &[(&str, Var)] = &[
+    (
+      "@const(c @if(true {true} {false}))\n@if(@c {1} {2})",
+      Var::Int(1),
+    ),
+    (
+      "@const(c #( @if(true {true} {false}) ))\n@if(@c {1} {2})",
+      Var::Int(1),
+    ),
+    (
+      "@const(c @if(true {true} {false}))\n@if(false {1} {2})",
+      Var::Int(2),
+    ),
+    // Through a constant that reads it.
+    (
+      "@const(c @if(false {true} {false}))\n@const(d @c)\n@if(@d {1} {2})",
+      Var::Int(2),
+    ),
+  ];
+  for (text, value) in cases {
+    assert_eq!(
+      completed(&run(text, &no_defines()), "root"),
+      *value,
+      "{text}"
+    );
+  }
+  // In a body, a condition sees constants declared below it, selected
+  // with what they read.
+  let text = r#"@wire(main { @if(@c {"a"} {"b"}) })
+@const(c @if(@d {true} {false}))
+@const(d true)
+@mesh(m) @schedule(m main) @run(m)"#;
+  assert_eq!(
+    completed(&run(text, &no_defines()), "main"),
+    Var::string("a")
+  );
+  // At the top level, only above.
+  let d = load_errors("@if(@c {1} {2})\n@const(c @if(true {true} {false}))");
+  assert_eq!(d[0].code, "unknown-define", "{d:?}");
+  // Selections that need each other, reported once at the read.
+  for text in [
+    "@const(a @if(@b {true} {false}))\n@const(b @if(@a {true} {false}))\n@wire(main { @if(@a {1} {2}) })\n@mesh(m) @schedule(m main) @run(m)",
+    "@const(b @if(@b {true} {false}))\n@if(@b {1})",
+  ] {
+    let d = load_errors(text);
+    assert_eq!(d.len(), 1, "{text}: {d:?}");
+    assert_eq!(
+      (d[0].code, at(&d[0])),
+      ("compose-time-cycle", (1, 15)),
+      "{text}"
+    );
+  }
+  // Failures inside a `#( )` condition: budgets and value cycles.
+  let d = load_errors("@if(#(Repeat({1} times: 100000000) true) {1})");
+  assert_eq!(d[0].code, "expansion-budget");
+  let d = load_errors("@const(a #(@b))\n@const(b #(@a))\n@if(#(@a | IsMore(0)) {1})");
+  assert_eq!(d[0].code, "compose-time-cycle");
+}
+
+/// A load that fails still reports the `@if`s it decided.
+#[test]
+fn if_decisions_survive_a_failed_load() {
+  let lib = files(&[]);
+  let cases: &[(&str, &str)] = &[
+    ("@if(true { Missing.Shard } { 1 })", "unknown-shard"),
+    ("@if(true { @include(\"missing.shs\") })", "file-not-found"),
+    ("@if(true { 1 })\n@if(\"x\" { 2 })", "if-condition"),
+  ];
+  for (text, code) in cases {
+    let report = otter_lang::check_with(
+      Source::new("main.shs", *text),
+      &catalog(),
+      &no_defines(),
+      &lib,
+    );
+    assert_eq!(report.diagnostics[0].code, *code, "{text}");
+    let c = &report.conditionals;
+    assert_eq!(c.len(), 1, "{text}");
+    assert_eq!(
+      (c[0].line, c[0].value, c[0].branch),
+      (1, true, Some("then"))
+    );
+    assert!(report.to_json().contains("\"conditionals\":[{"), "{text}");
+  }
+}
+
+/// A tree built or changed by hand is decided like a parsed one.
+#[test]
+fn if_in_trees_built_by_hand() {
+  let parsed = |text| otter_lang::parse(&Source::new("t.shs", text)).0;
+  let tree =
+    otter_lang::ast::Program::new(parsed("@if(true {1} {2}) | Math.Add(1)").into_statements());
+  let (lowered, problems) = otter_lang::lower::lower(&tree, &catalog(), &no_defines());
+  assert!(problems.is_empty(), "{problems:?}");
+  assert_eq!(lowered.conditionals.len(), 1);
+  // A parsed tree without one, given one.
+  let mut tree = parsed("1");
+  tree
+    .statements_mut()
+    .extend(parsed("@if(false {1} {2})").into_statements());
+  let (lowered, problems) = otter_lang::lower::lower(&tree, &catalog(), &no_defines());
+  assert!(problems.is_empty(), "{problems:?}");
+  assert!(!lowered.conditionals[0].value);
+  let report = otter_lang::CheckReport::new("t.shs", Vec::new());
+  assert!(report.ok() && report.conditionals.is_empty());
+}
+
+/// `@if` in function bodies, flow arguments, values and selected mesh
+/// declarations; an `@if` standing for a value must give one.
+#[test]
+fn if_in_bodies_flows_values_and_declarations() {
+  let text = r#"@const(fast true ignore-redefined: true)
+@fn(Speed input: None output: Int params: {} { @if(@fast {10} {1}) })
+@fn(Twice input: Int output: Int params: {action: Flow(input: Int output: Int)} { Run(action) | Run(action) })
+@wire(a { 1 | Twice(action: { @if(@fast { Math.Multiply(Speed) } { Math.Add(1) }) }) })
+@wire(b { "slow" })
+@if(@fast { @mesh(m) @schedule(m a) @run(m) } { @mesh(m) @schedule(m b) @run(m) })"#;
+  assert_eq!(completed(&run(text, &no_defines()), "a"), Var::Int(100));
+  let slow = defines(&[("fast", "false")]);
+  assert_eq!(completed(&run(text, &slow), "b"), Var::string("slow"));
+  for text in [
+    "1 | Math.Add(@if(false {2}))",
+    "[1 @if(false {2}) 3]",
+    "{a: @if(true {})}",
+  ] {
+    let d = load_errors(text);
+    assert_eq!(d[0].code, "if-no-value", "{text}: {d:?}");
+  }
+  // A step that takes no branch passes its input on.
+  assert_eq!(
+    completed(
+      &run("1 | @if(false {2}) | Math.Add(1)", &no_defines()),
+      "root"
+    ),
+    Var::Int(2)
+  );
+}
+
+/// Included files: a condition read from one decides again when it
+/// changes; a file only an untaken branch names is never read; problems in
+/// an included taken branch point into that file.
+#[test]
+fn if_with_included_files() {
+  let main = r#"@include("flag.shs")
+@if(@flag { @include("on.shs") } { @include("off.shs") })
+@value | Log"#;
+  let with = |flag: &str| {
+    files(&[
+      ("flag.shs", flag),
+      ("on.shs", "@const(value \"on\")"),
+      ("off.shs", "@const(value \"off\")"),
+    ])
+  };
+  let mut session = otter_lang::Session::new();
+  let (_, lines) = otter_core::log::capture(|| {
+    session.set_files(with("@const(flag true)"));
+    assert!(
+      session
+        .reload(Source::new("main.shs", main), &catalog(), &no_defines())
+        .is_ok()
+    );
+    assert_eq!(session.files_read(), ["flag.shs", "on.shs"]);
+    session.tick();
+    session.set_files(with("@const(flag false)"));
+    assert!(
+      session
+        .reload(Source::new("main.shs", main), &catalog(), &no_defines())
+        .is_ok()
+    );
+    assert_eq!(session.files_read(), ["flag.shs", "off.shs"]);
+    session.tick();
+  });
+  assert_eq!(lines, ["on", "off"]);
+  let lib = files(&[("lib.shs", "@if(true {\n  \"a\" | Math.Add(1)\n})")]);
+  let report = otter_lang::check_with(
+    Source::new("main.shs", "@include(\"lib.shs\")"),
+    &catalog(),
+    &no_defines(),
+    &lib,
+  );
+  let d = &report.diagnostics[0];
+  assert_eq!(
+    (d.code, d.file.as_deref(), at(d)),
+    ("input-type-mismatch", Some("lib.shs"), (2, 9))
+  );
+  assert_eq!(report.conditionals[0].file, "lib.shs");
+}
